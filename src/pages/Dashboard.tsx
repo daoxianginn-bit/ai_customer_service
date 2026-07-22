@@ -212,10 +212,11 @@ export default function Dashboard() {
           </div>
 
           <div className="pt-2 border-t">
-            <label className="block text-sm font-bold text-gray-800 mb-1">Google 試算表知識庫（圖文選單問答 / 一般 QA）</label>
+            <label className="block text-sm font-bold text-gray-800 mb-1">Google 試算表知識庫（FAQ 問答）</label>
             <p className="text-xs text-gray-500 mb-3 leading-relaxed">
-              用一張試算表管理「關鍵字 → 固定回覆」，圖文選單點擊命中關鍵字時 AI 只會潤飾語氣、不會竄改內容；沒命中的問題則會把整張表當知識庫讓 AI 自由回答。
-              試算表格式：第一列為標題列，A 欄＝意圖代碼（選填）、B 欄＝關鍵字（逗號分隔）、C 欄＝回覆內容。
+              用一張試算表管理「問題 → 答案」。試算表格式：第一列為標題列，<b>A 欄＝category 分類（選填）、B 欄＝question 問題、C 欄＝answer 答案</b>。
+              AI 回答時，答案的意思必須與 C 欄一致（可換句話說讓語氣更自然，但不能竄改事實）；
+              B 欄若填完整問句（如「還有房間嗎？」）會由 AI 判斷語意最相符的一筆；若填逗號分隔的短關鍵字（如「房型,房型介紹」），使用者輸入命中時會直接精準回覆該筆答案。
             </p>
             <div className="grid grid-cols-2 gap-4">
               <div>

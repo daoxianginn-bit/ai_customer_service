@@ -111,7 +111,7 @@ export const handler: Handler = async (event) => {
         const matched = knowledgeRows.length ? matchKnowledgeIntent(userMessage, knowledgeRows) : null;
 
         if (matched) {
-          console.log(`[KnowledgeSheet] Intent matched: ${matched.intent || matched.keywords[0]}`);
+          console.log(`[KnowledgeSheet] Exact match: [${matched.category}] ${matched.question}`);
           aiResult = await answerWithPolish(settings, matched.answer);
         } else {
           const faqContext = buildSheetFaqContext(knowledgeRows);
@@ -131,17 +131,22 @@ export const handler: Handler = async (event) => {
 };
 
 // ========================================================================
-// Google 試算表知識庫（意圖比對 + 一般 QA 資料來源）
+// Google 試算表知識庫（精準關鍵字比對 + 一般 QA 資料來源）
 // 試算表格式（第一列為標題列，從第二列開始為資料）：
-//   A欄：意圖代碼（例如 room_intro，選填，僅供辨識用）
-//   B欄：關鍵字（逗號分隔，例如：房型,房型介紹,房間介紹）
-//   C欄：回覆內容（AI 會以此為事實依據潤飾語氣後回覆）
+//   A欄：category 分類（選填，僅供辨識/顯示用，不參與比對）
+//   B欄：question 問題
+//        - 若填「完整問句」（如：還有房間嗎？有空房嗎？）→ 當一般 QA 知識庫，AI 會找出語意相符的項目回答，
+//          且回答意思必須與 C 欄一致（可換句話說，不可竄改事實）
+//        - 若填「逗號分隔的短關鍵字」（如：房型,房型介紹,房間介紹）→ 使用者輸入命中任一關鍵字時，
+//          直接使用 C 欄內容並跳過語意判斷（AI 只負責潤飾語氣）
+//   C欄：answer 答案（AI 唯一可信任的事實依據）
 // ========================================================================
 
 interface KnowledgeRow {
-  intent: string;
-  keywords: string[];
-  answer: string;
+  category: string;   // A 欄：分類（純備註用，不參與比對）
+  question: string;   // B 欄：完整問題原文（用於一般 QA 的 FAQ 內容顯示）
+  keywords: string[]; // 由 B 欄依逗號切出的候選關鍵字（若 B 欄本身沒有逗號，整句就是唯一一個關鍵字）
+  answer: string;      // C 欄：答案
 }
 
 const SHEET_CACHE_TTL_MS = 5 * 60 * 1000; // 5 分鐘快取，避免每則訊息都重打 Google API
@@ -205,16 +210,20 @@ function parseSheetRows(values: string[][]): KnowledgeRow[] {
   const dataRows = (values || []).slice(1); // 跳過標題列
   return dataRows
     .filter((row) => row && row[1])
-    .map((row) => ({
-      intent: (row[0] || '').trim(),
-      keywords: (row[1] || '')
-        .replace(/，/g, ',')
-        .split(',')
-        .map((k) => k.trim())
-        .filter(Boolean),
-      answer: (row[2] || '').trim(),
-    }))
-    .filter((row) => row.keywords.length > 0 && row.answer);
+    .map((row) => {
+      const question = (row[1] || '').trim();
+      return {
+        category: (row[0] || '').trim(),
+        question,
+        keywords: question
+          .replace(/，/g, ',')
+          .split(',')
+          .map((k) => k.trim())
+          .filter(Boolean),
+        answer: (row[2] || '').trim(),
+      };
+    })
+    .filter((row) => row.question && row.answer);
 }
 
 async function fetchKnowledgeSheet(sheetId: string, gid: string): Promise<KnowledgeRow[]> {
@@ -252,7 +261,16 @@ function matchKnowledgeIntent(userMessage: string, rows: KnowledgeRow[]): Knowle
 
 function buildSheetFaqContext(rows: KnowledgeRow[]): string {
   if (!rows.length) return '';
-  return rows.map((r) => `Q: ${r.keywords.join('、')}\nA: ${r.answer}`).join('\n\n');
+  return rows.map((r) => `[${r.category || '一般'}] Q: ${r.question}\nA: ${r.answer}`).join('\n\n');
+}
+
+// 一般 QA fallback 時，把「必須忠於 FAQ 答案意思」的規則包裝起來，避免 AI 自由發揮改變事實
+function buildKnowledgeSection(extraKnowledge?: string): string {
+  if (!extraKnowledge) return '';
+  return `【常見問答知識庫】以下是最可信任的事實依據，請務必遵守：\n` +
+    `1. 若使用者的問題與下方任一筆意思相符，你的回答意思必須與該筆「答案」完全一致，只能用自己的話讓語氣更自然、口語化，禁止新增、刪除或竄改任何事實、數字、日期、金額、政策。\n` +
+    `2. 若使用者的問題不在下方清單中，才依系統指令與參考資料自由回答；若不確定答案，請誠實告知並建議使用者聯繫真人客服，不要編造內容。\n\n` +
+    `${extraKnowledge}\n\n`;
 }
 
 // 命中意圖時：不讓 AI 自由發揮，只請它把試算表原文改寫成親切語氣，避免事實被竄改/幻覺
@@ -281,7 +299,7 @@ async function callGPT(settings: any, currentMessage: string, extraKnowledge?: s
     if (settings.reference_file_url) {
       try { const r = await fetch(settings.reference_file_url); if (r.ok) fileContent = await r.text(); } catch (e) {}
     }
-    systemContent = `${settings.system_prompt}\n\n${extraKnowledge ? `知識庫 FAQ（Google 試算表）：\n${extraKnowledge}\n\n` : ''}參考文字：\n${settings.reference_text}\n\n檔案內容：\n${fileContent}`;
+    systemContent = `${settings.system_prompt}\n\n${buildKnowledgeSection(extraKnowledge)}參考文字：\n${settings.reference_text}\n\n檔案內容：\n${fileContent}`;
   }
 
   if (isGPT5) {
@@ -330,7 +348,7 @@ async function callGemini(settings: any, currentMessage: string, extraKnowledge?
       }
     } catch (e) {}
   }
-  const userParts: any[] = [{ text: `System: ${settings.system_prompt}\n${extraKnowledge ? `知識庫 FAQ（Google 試算表）：\n${extraKnowledge}\n` : ''}Reference: ${settings.reference_text}` }];
+  const userParts: any[] = [{ text: `System: ${settings.system_prompt}\n${buildKnowledgeSection(extraKnowledge)}Reference: ${settings.reference_text}` }];
   if (filePart) userParts.push(filePart);
   userParts.push({ text: `User: ${currentMessage}` });
   const contents = [{ role: 'user', parts: userParts }];
