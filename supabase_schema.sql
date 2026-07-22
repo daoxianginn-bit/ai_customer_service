@@ -20,6 +20,9 @@ CREATE TABLE IF NOT EXISTS public.settings (
     system_prompt TEXT DEFAULT '你是一個專業的客服助手。',
     reference_text TEXT DEFAULT '',
     reference_file_url TEXT DEFAULT '',
+    -- Google 試算表知識庫 (意圖比對 + 一般 QA 來源)
+    knowledge_sheet_id TEXT DEFAULT '',
+    knowledge_sheet_gid TEXT DEFAULT '0',
     line_channel_access_token TEXT,
     line_channel_secret TEXT,
     handover_keywords TEXT DEFAULT '真人,客服,人工',
@@ -67,3 +70,8 @@ USING (bucket_id = 'knowledge_base');
 CREATE POLICY "Allow Auth Insert" ON storage.objects FOR INSERT TO authenticated WITH CHECK (bucket_id = 'knowledge_base');
 CREATE POLICY "Allow Auth Update" ON storage.objects FOR UPDATE TO authenticated USING (bucket_id = 'knowledge_base');
 CREATE POLICY "Allow Auth Delete" ON storage.objects FOR DELETE TO authenticated USING (bucket_id = 'knowledge_base');
+
+-- 6. 【既有專案升級用】若您的資料庫是舊版建立的，CREATE TABLE IF NOT EXISTS 不會補齊新欄位，
+--    請單獨執行以下 ALTER TABLE 語句以支援「Google 試算表知識庫」功能：
+ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS knowledge_sheet_id TEXT DEFAULT '';
+ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS knowledge_sheet_gid TEXT DEFAULT '0';

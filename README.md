@@ -8,6 +8,7 @@
 
 *   **頂級 AI 支援**：首創支援 GPT-5 (Responses API) 與 Gemini 3 (Thinking Level) 最新規格。
 *   **多模態知識庫**：可直接上傳產品手冊 (PDF) 或輸入文字，讓 AI 成為領域專家。
+*   **Google 試算表問答庫**：用一張試算表管理「圖文選單關鍵字 → 固定回覆」，命中時 AI 僅潤飾語氣不竄改事實，未命中則作為一般 QA 知識庫。
 *   **真人轉接系統**：自動偵測關鍵字，即時發送 LINE 推送通知給客服專員。
 *   **極致穩定性**：內建資料庫級去重機制，解決 LINE Webhook 重複發送導致的誤觸問題。
 *   **現代化後台**：使用 React + Tailwind CSS 打造，支援深色模式與行動裝置。
@@ -64,6 +65,45 @@
     *   在 LINE 後台將 Webhook URL 設為：`https://您的專案名稱.netlify.app/.netlify/functions/line-webhook`
     *   開啟 **"Use webhook"** 選項。
 
+### 步驟五：Google 試算表知識庫設定（選填，圖文選單問答用）
+
+若您希望圖文選單（房型介紹、設施及設備、民宿位置、入住須知...）點擊後能回覆固定且準確的內容，可以串接 Google 試算表：
+
+1.  **建立試算表**：新增一份 Google 試算表，欄位格式如下（第一列為標題列）：
+
+    | A 欄：意圖代碼（選填） | B 欄：關鍵字（逗號分隔） | C 欄：回覆內容 |
+    | :--- | :--- | :--- |
+    | room_intro | 房型,房型介紹,房間介紹 | （您的房型介紹文字）|
+    | facilities | 設備,設施,民宿有哪些設施及設備,設施及設備 | （您的設施介紹文字）|
+    | location | 請問民宿位置在哪,位置在哪,位於哪裡 | （地址與交通方式）|
+    | checkin_notice | 入住須知,注意事項,入住事項 | （入住須知文字）|
+    | booking_temp | 我要訂房,訂房 | 目前訂房需由真人客服協助，請點選「真人客服」按鈕，我們將盡快為您服務 |
+
+2.  **建立 Google 服務帳戶（Service Account）**：
+    *   前往 [Google Cloud Console](https://console.cloud.google.com/) 建立一個新專案（或使用現有專案）。
+    *   在左側選單找到 **API 和服務 > 程式庫**，搜尋並啟用 **Google Sheets API**。
+    *   前往 **API 和服務 > 憑證** -> **建立憑證** -> **服務帳戶**，依指示建立完成。
+    *   建立完成後點進該服務帳戶 -> **金鑰** 分頁 -> **新增金鑰** -> 選擇 **JSON** 格式下載。
+    *   打開下載的 JSON 檔，裡面的 `client_email` 就是服務帳戶 Email，`private_key` 就是私鑰。
+
+3.  **將試算表共用給服務帳戶**：
+    *   回到您的 Google 試算表，點右上角 **共用**。
+    *   貼上服務帳戶的 Email（`xxxxx@xxxxx.iam.gserviceaccount.com`），權限設為 **檢視者** 即可，取消勾選「通知使用者」後送出。
+
+4.  **在 Netlify 設定環境變數**：
+
+    | 變數名稱 | 來源 | 說明 |
+    | :--- | :--- | :--- |
+    | `GOOGLE_SERVICE_ACCOUNT_EMAIL` | JSON 金鑰裡的 `client_email` | 後端 Function 讀取試算表用 |
+    | `GOOGLE_PRIVATE_KEY` | JSON 金鑰裡的 `private_key`（含 `-----BEGIN PRIVATE KEY-----` 完整內容） | 後端專用，**絕對機密**，請勿外流 |
+
+    設定完成後，同樣要到 **Deploys > Trigger deploy > Clear cache and deploy site** 重新部署才會生效。
+
+5.  **在後台填入試算表 ID**：
+    *   進入 **AI 客服後台 > AI 指令與知識庫**，找到「Google 試算表知識庫」區塊。
+    *   從試算表網址 `https://docs.google.com/spreadsheets/d/【這一段就是試算表ID】/edit` 複製 ID 填入。
+    *   若使用多分頁，可額外填入分頁 GID（網址結尾 `#gid=數字` 的那個數字），預設為 `0`（第一頁）。
+
 ---
 
 ## 📜 完整資料庫腳本 (SQL)
@@ -92,6 +132,8 @@ CREATE TABLE IF NOT EXISTS public.settings (
     system_prompt TEXT DEFAULT '你是一個專業的客服助手。',
     reference_text TEXT DEFAULT '',
     reference_file_url TEXT DEFAULT '',
+    knowledge_sheet_id TEXT DEFAULT '',
+    knowledge_sheet_gid TEXT DEFAULT '0',
     line_channel_access_token TEXT,
     line_channel_secret TEXT,
     handover_keywords TEXT DEFAULT '真人,客服,人工',
@@ -132,6 +174,12 @@ CREATE POLICY "Allow Auth Insert" ON storage.objects FOR INSERT TO authenticated
 CREATE POLICY "Allow Auth Update" ON storage.objects FOR UPDATE TO authenticated USING (bucket_id = 'knowledge_base');
 CREATE POLICY "Allow Auth Delete" ON storage.objects FOR DELETE TO authenticated USING (bucket_id = 'knowledge_base');
 ```
+
+> **既有專案升級提醒**：若您先前已建立過資料庫，上方的 `CREATE TABLE IF NOT EXISTS` 不會自動補上新欄位，請額外執行以下語句以支援「Google 試算表知識庫」功能：
+> ```sql
+> ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS knowledge_sheet_id TEXT DEFAULT '';
+> ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS knowledge_sheet_gid TEXT DEFAULT '0';
+> ```
 
 ---
 

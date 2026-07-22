@@ -210,6 +210,46 @@ export default function Dashboard() {
               {settings.reference_file_url && <p className="text-xs text-blue-600 mt-2 break-all">{settings.reference_file_url}</p>}
             </div>
           </div>
+
+          <div className="pt-2 border-t">
+            <label className="block text-sm font-bold text-gray-800 mb-1">Google 試算表知識庫（圖文選單問答 / 一般 QA）</label>
+            <p className="text-xs text-gray-500 mb-3 leading-relaxed">
+              用一張試算表管理「關鍵字 → 固定回覆」，圖文選單點擊命中關鍵字時 AI 只會潤飾語氣、不會竄改內容；沒命中的問題則會把整張表當知識庫讓 AI 自由回答。
+              試算表格式：第一列為標題列，A 欄＝意圖代碼（選填）、B 欄＝關鍵字（逗號分隔）、C 欄＝回覆內容。
+            </p>
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">試算表 ID</label>
+                <input
+                  type="text"
+                  name="knowledge_sheet_id"
+                  value={settings.knowledge_sheet_id || ''}
+                  onChange={handleChange}
+                  className="w-full px-4 py-2 border rounded-lg font-mono text-sm"
+                  placeholder="試算表網址 /d/ 與 /edit 之間的那串 ID"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">分頁 GID（選填，預設第一頁）</label>
+                <input
+                  type="text"
+                  name="knowledge_sheet_gid"
+                  value={settings.knowledge_sheet_gid || '0'}
+                  onChange={handleChange}
+                  className="w-full px-4 py-2 border rounded-lg font-mono text-sm"
+                  placeholder="0"
+                />
+              </div>
+            </div>
+            <div className="mt-3 p-3 bg-amber-50 border border-amber-100 rounded-lg text-xs text-amber-800 leading-relaxed">
+              ⚠️ 設定前請先在 Google Cloud Console 建立服務帳戶並啟用 Google Sheets API，取得服務帳戶 Email 後，
+              到你的 Google 試算表點「共用」，把該 Email 加為「檢視者」，並將金鑰填入 Netlify 環境變數
+              <code className="mx-1 px-1 bg-white rounded border">GOOGLE_SERVICE_ACCOUNT_EMAIL</code>
+              與
+              <code className="mx-1 px-1 bg-white rounded border">GOOGLE_PRIVATE_KEY</code>
+              （詳細步驟請參考 README）。
+            </div>
+          </div>
         </div>
       </div>
 
