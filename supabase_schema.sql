@@ -27,7 +27,9 @@ CREATE TABLE IF NOT EXISTS public.settings (
     line_channel_secret TEXT,
     handover_keywords TEXT DEFAULT '真人,客服,人工',
     handover_timeout_minutes INTEGER DEFAULT 30,
-    agent_user_ids TEXT DEFAULT ''
+    agent_user_ids TEXT DEFAULT '',
+    -- 已由 LINE 官方帳號原生「自動回應/圖文選單」處理過的訊息，AI 收到會直接略過不重複回覆
+    skip_ai_keywords TEXT DEFAULT ''
 );
 
 -- 去重記錄表 (防止重試導致狀態回滾)
@@ -75,3 +77,4 @@ CREATE POLICY "Allow Auth Delete" ON storage.objects FOR DELETE TO authenticated
 --    請單獨執行以下 ALTER TABLE 語句以支援「Google 試算表知識庫」功能：
 ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS knowledge_sheet_id TEXT DEFAULT '';
 ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS knowledge_sheet_gid TEXT DEFAULT '0';
+ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS skip_ai_keywords TEXT DEFAULT '';

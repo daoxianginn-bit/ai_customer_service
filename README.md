@@ -110,6 +110,21 @@
     *   從試算表網址 `https://docs.google.com/spreadsheets/d/【這一段就是試算表ID】/edit` 複製 ID 填入。
     *   若使用多分頁，可額外填入分頁 GID（網址結尾 `#gid=數字` 的那個數字），預設為 `0`（第一頁）。
 
+6.  **比對邏輯說明**：使用者傳訊息進來後，系統會依序嘗試三層比對，只要任一層命中就不會往下走：
+    *   **Tier 1 精準關鍵字**：訊息完整包含 B 欄內容（逗號分隔關鍵字模式）時，直接用該筆 C 欄答案潤飾語氣回覆，速度最快、零額外 AI 成本。
+    *   **Tier 1.5 AI 語意路由**：Tier 1 沒命中時，會多打一次 AI，請 AI 只從試算表清單中挑出語意最相符的一筆（例如使用者問「付款方式」，可對應到 B 欄「怎麼付款？」），命中後一樣只潤飾語氣、不能竄改答案內容，確保只要試算表有寫答案，回覆意思一定跟您寫的一致。
+    *   **Tier 2 一般問答**：以上都沒命中，才把整份試算表當參考資料，讓 AI 依系統指令自由回答；若不確定，AI 會誠實告知並建議使用者聯繫真人客服。
+
+### ⚠️ 若圖文選單已有 LINE 官方「自動回應」，請避免與 AI 重複回覆
+
+若您在 **LINE 官方帳號管理後台**（[manager.line.biz](https://manager.line.biz/)）另外針對圖文選單按鈕設定了「自動回應/關鍵字回覆」功能，要注意：LINE 會把使用者點擊按鈕送出的**同一則文字訊息**同時送進「LINE 原生自動回應」與「本系統的 Webhook」，導致顧客會收到**兩則回覆**（LINE 官方的固定回覆 + 本系統 AI 又多回一次，甚至內容互相矛盾）。
+
+解法：進入 **AI 客服後台 > 系統設定**，在「AI 略過不回覆的訊息」欄位填入這些按鈕的文字（需與訊息完全相同，逗號分隔），例如：
+```
+房型介紹, 設施及設備, 民宿位置, 入住須知
+```
+設定後，AI 收到這些訊息會直接略過、不再另外回覆，畫面上只會保留 LINE 原生的自動回應，不會重複。
+
 ---
 
 ## 📜 完整資料庫腳本 (SQL)
@@ -144,7 +159,8 @@ CREATE TABLE IF NOT EXISTS public.settings (
     line_channel_secret TEXT,
     handover_keywords TEXT DEFAULT '真人,客服,人工',
     handover_timeout_minutes INTEGER DEFAULT 30,
-    agent_user_ids TEXT DEFAULT ''
+    agent_user_ids TEXT DEFAULT '',
+    skip_ai_keywords TEXT DEFAULT ''
 );
 
 -- [2] 用戶狀態表
@@ -181,10 +197,11 @@ CREATE POLICY "Allow Auth Update" ON storage.objects FOR UPDATE TO authenticated
 CREATE POLICY "Allow Auth Delete" ON storage.objects FOR DELETE TO authenticated USING (bucket_id = 'knowledge_base');
 ```
 
-> **既有專案升級提醒**：若您先前已建立過資料庫，上方的 `CREATE TABLE IF NOT EXISTS` 不會自動補上新欄位，請額外執行以下語句以支援「Google 試算表知識庫」功能：
+> **既有專案升級提醒**：若您先前已建立過資料庫，上方的 `CREATE TABLE IF NOT EXISTS` 不會自動補上新欄位，請額外執行以下語句以支援「Google 試算表知識庫」與「AI 略過重複回覆」功能：
 > ```sql
 > ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS knowledge_sheet_id TEXT DEFAULT '';
 > ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS knowledge_sheet_gid TEXT DEFAULT '0';
+> ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS skip_ai_keywords TEXT DEFAULT '';
 > ```
 
 ---

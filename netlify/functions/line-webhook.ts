@@ -85,6 +85,19 @@ export const handler: Handler = async (event) => {
         continue;
       }
 
+      // 3.5 已由 LINE 官方帳號原生「自動回應/圖文選單」處理過的訊息，AI 直接略過不重複回覆
+      // （避免同一則訊息同時觸發 LINE 原生自動回應 + 本系統 AI 回覆，造成重複甚至矛盾的兩則訊息）
+      const skipAiKeywords = settings.skip_ai_keywords
+        ?.replace(/，/g, ',')
+        .split(',')
+        .map((k: string) => k.trim())
+        .filter((k: string) => k.length > 0) || [];
+
+      if (skipAiKeywords.includes(userMessage)) {
+        console.log(`[SkipAI] Message already handled by LINE native auto-reply: ${userMessage}`);
+        continue;
+      }
+
       // 4. 真人模式判斷
       if (userState?.is_human_mode) {
         const lastInteraction = new Date(userState.last_human_interaction).getTime();
@@ -108,10 +121,22 @@ export const handler: Handler = async (event) => {
           }
         }
 
-        const matched = knowledgeRows.length ? matchKnowledgeIntent(userMessage, knowledgeRows) : null;
-
+        let matched = knowledgeRows.length ? matchKnowledgeIntent(userMessage, knowledgeRows) : null;
         if (matched) {
           console.log(`[KnowledgeSheet] Exact match: [${matched.category}] ${matched.question}`);
+        } else if (knowledgeRows.length) {
+          // Tier 1 精準比對沒命中時，改用一次額外的 AI 語意路由呼叫，
+          // 從試算表中挑出語意最相符的一筆；命中就強制走 answerWithPolish（保證不竄改事實），
+          // 避免完全交給一般問答的自由生成、單靠 prompt 指令卻不一定被遵守。
+          try {
+            matched = await routeKnowledgeMatch(settings, userMessage, knowledgeRows);
+            if (matched) console.log(`[KnowledgeSheet] Semantic route match: [${matched.category}] ${matched.question}`);
+          } catch (routeErr: any) {
+            console.error('[KnowledgeSheet] route failed:', routeErr.message);
+          }
+        }
+
+        if (matched) {
           aiResult = await answerWithPolish(settings, matched.answer);
         } else {
           const faqContext = buildSheetFaqContext(knowledgeRows);
@@ -131,15 +156,22 @@ export const handler: Handler = async (event) => {
 };
 
 // ========================================================================
-// Google 試算表知識庫（精準關鍵字比對 + 一般 QA 資料來源）
+// Google 試算表知識庫（三層比對：精準關鍵字 → AI 語意路由 → 一般 QA fallback）
 // 試算表格式（第一列為標題列，從第二列開始為資料）：
 //   A欄：category 分類（選填，僅供辨識/顯示用，不參與比對）
 //   B欄：question 問題
-//        - 若填「完整問句」（如：還有房間嗎？有空房嗎？）→ 當一般 QA 知識庫，AI 會找出語意相符的項目回答，
-//          且回答意思必須與 C 欄一致（可換句話說，不可竄改事實）
+//        - 若填「完整問句」（如：還有房間嗎？有空房嗎？）→ 當一般 QA 知識庫使用
 //        - 若填「逗號分隔的短關鍵字」（如：房型,房型介紹,房間介紹）→ 使用者輸入命中任一關鍵字時，
-//          直接使用 C 欄內容並跳過語意判斷（AI 只負責潤飾語氣）
+//          直接使用 C 欄內容並跳過語意判斷（Tier 1，AI 只負責潤飾語氣）
 //   C欄：answer 答案（AI 唯一可信任的事實依據）
+//
+// 比對流程：
+//   Tier 1：matchKnowledgeIntent() 精準字串比對（極快、零成本，但只有輸入完整包含問句/關鍵字才會命中）
+//   Tier 1.5：routeKnowledgeMatch() 額外一次 AI 呼叫，請 AI 只從清單中挑出語意最相符的一筆編號（不作答）。
+//             命中後一樣走 answerWithPolish()，只潤飾語氣、不會竄改事實 —— 確保只要試算表有答案，
+//             回覆意思一定與您寫的一致，不會被一般問答的自由生成能力誤導或忽略指令。
+//   Tier 2：以上都沒命中，才把整份試算表當參考資料，交給 callGPT/callGemini 自由回答（buildKnowledgeSection
+//           仍會附上「意思需一致」的指令作為最後防線，但這一層無法 100% 保證遵守）。
 // ========================================================================
 
 interface KnowledgeRow {
@@ -257,6 +289,37 @@ function matchKnowledgeIntent(userMessage: string, rows: KnowledgeRow[]): Knowle
     }
   }
   return null;
+}
+
+// 語意路由：把整份試算表問題列成清單，請 AI「只挑編號、不要作答」，
+// 避免像一般問答那樣讓 AI 邊挑邊回答、容易忽略「意思必須一致」的規則。
+function buildRoutingPrompt(rows: KnowledgeRow[]): string {
+  const list = rows.map((r, i) => `${i + 1}. [${r.category || '一般'}] ${r.question}`).join('\n');
+  return `你是專門負責「常見問題比對」的助手，這個步驟不需要回答問題本身，只需要判斷比對結果。\n\n` +
+    `常見問題庫清單：\n${list}\n\n` +
+    `請判斷使用者訊息在語意上最符合清單中哪一筆（同一件事、用詞或問法不同也算符合，例如「付款方式」符合「怎麼付款？」、「在哪裡」符合「地址在哪裡？」）。\n` +
+    `規則：\n` +
+    `1. 如果有符合的，只回答該筆前面的編號數字，不要有任何其他文字、標點或說明。\n` +
+    `2. 如果都不符合、或使用者只是打招呼、閒聊、語意不明確，只回答：無\n` +
+    `3. 絕對不要回答問題本身的答案內容，只需要回答編號或「無」。`;
+}
+
+async function routeKnowledgeMatch(settings: any, userMessage: string, rows: KnowledgeRow[]): Promise<KnowledgeRow | null> {
+  if (!rows.length) return null;
+  const routingPrompt = buildRoutingPrompt(rows);
+  let raw = '';
+  if (settings.active_ai === 'gpt') {
+    raw = (await callGPT(settings, userMessage, undefined, routingPrompt)).text;
+  } else {
+    raw = await callGemini(settings, userMessage, undefined, routingPrompt);
+  }
+  const cleaned = (raw || '').trim();
+  if (!cleaned || cleaned.includes('無')) return null;
+  const numMatch = cleaned.match(/\d+/);
+  if (!numMatch) return null;
+  const idx = parseInt(numMatch[0], 10) - 1;
+  if (idx < 0 || idx >= rows.length) return null;
+  return rows[idx];
 }
 
 function buildSheetFaqContext(rows: KnowledgeRow[]): string {

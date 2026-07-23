@@ -285,6 +285,14 @@ export default function Dashboard() {
             <label className="block text-sm font-medium text-gray-700 mb-1">客服專員 LINE IDs (通知用)</label>
                         <input type="text" name="agent_user_ids" value={settings.agent_user_ids || ''} onChange={handleChange} placeholder="U123..., U456..." className="w-full px-4 py-2 border rounded-lg" />
                       </div>
+          <div className="col-span-2">
+            <label className="block text-sm font-medium text-gray-700 mb-1">AI 略過不回覆的訊息 (逗號隔開)</label>
+            <input type="text" name="skip_ai_keywords" value={settings.skip_ai_keywords || ''} onChange={handleChange} placeholder="例如：房型介紹, 設施及設備, 民宿位置, 入住須知" className="w-full px-4 py-2 border rounded-lg" />
+            <p className="text-xs text-gray-500 mt-1">
+              若您在 LINE 官方帳號管理後台的圖文選單已另外設定「自動回應/關鍵字回覆」，同一則訊息會同時觸發那邊的固定回覆與本系統的 AI 回覆，導致重複、甚至互相矛盾的訊息。
+              在這裡填入圖文選單按鈕的文字（需與使用者傳來的訊息完全相同），AI 收到後會直接略過、不再另外回覆，只保留 LINE 原生的自動回應。
+            </p>
+          </div>
                     </div>
                   </div>
                 </div>
