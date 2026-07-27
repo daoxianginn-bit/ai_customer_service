@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase';
-import { Plus, Trash2, CalendarRange, Home, Users, Calculator, Save } from 'lucide-react';
+import { Plus, Trash2, CalendarRange, Home, Users, Calculator } from 'lucide-react';
 import {
   computeQuote,
   QuoteResult,
@@ -48,7 +48,6 @@ export default function BookingManagement() {
   const [packagePricing, setPackagePricing] = useState<any[]>([]);
   const [extraRules, setExtraRules] = useState<any[]>([]);
   const [dateRanges, setDateRanges] = useState<any[]>([]);
-  const [bookingSettings, setBookingSettings] = useState<any>(null);
 
   const [newRange, setNewRange] = useState({ range_type: '旺季', start_date: '', end_date: '', label: '' });
 
@@ -62,14 +61,13 @@ export default function BookingManagement() {
 
   const fetchAll = async () => {
     setLoading(true);
-    const [rt, rp, wp, wpp, epr, dr, st] = await Promise.all([
+    const [rt, rp, wp, wpp, epr, dr] = await Promise.all([
       supabase.from('room_types').select('*').order('display_order'),
       supabase.from('room_pricing').select('*'),
       supabase.from('whole_house_packages').select('*').order('display_order'),
       supabase.from('whole_house_package_pricing').select('*'),
       supabase.from('whole_house_extra_person_rules').select('*'),
       supabase.from('booking_date_ranges').select('*').order('start_date'),
-      supabase.from('settings').select('id, booking_sheet_id, booking_sheet_gid').single(),
     ]);
     setRoomTypes(rt.data || []);
     setRoomPricing(rp.data || []);
@@ -77,7 +75,6 @@ export default function BookingManagement() {
     setPackagePricing(wpp.data || []);
     setExtraRules(epr.data || []);
     setDateRanges(dr.data || []);
-    setBookingSettings(st.data || null);
     setLoading(false);
   };
 
@@ -152,32 +149,21 @@ export default function BookingManagement() {
       alert('請填入起訖日期');
       return;
     }
-    const { data, error } = await supabase
-      .from('booking_date_ranges')
-      .insert({ ...newRange, source: 'manual' })
-      .select()
-      .single();
+    const { data, error } = await supabase.from('booking_date_ranges').insert(newRange).select().single();
     if (!error && data) {
       setDateRanges([...dateRanges, data].sort((a, b) => a.start_date.localeCompare(b.start_date)));
       setNewRange({ range_type: '旺季', start_date: '', end_date: '', label: '' });
     }
   };
 
+  const updateDateRange = async (id: string, field: string, value: any) => {
+    setDateRanges(dateRanges.map((d) => (d.id === id ? { ...d, [field]: value } : d)));
+    await supabase.from('booking_date_ranges').update({ [field]: value }).eq('id', id);
+  };
+
   const deleteDateRange = async (id: string) => {
     await supabase.from('booking_date_ranges').delete().eq('id', id);
     setDateRanges(dateRanges.filter((d) => d.id !== id));
-  };
-
-  const saveBookingSheetSettings = async () => {
-    if (!bookingSettings?.id) return;
-    await supabase
-      .from('settings')
-      .update({
-        booking_sheet_id: bookingSettings.booking_sheet_id,
-        booking_sheet_gid: bookingSettings.booking_sheet_gid,
-      })
-      .eq('id', bookingSettings.id);
-    alert('已儲存');
   };
 
   // ---------------- 測試報價 ----------------
@@ -428,31 +414,7 @@ export default function BookingManagement() {
         <div className="p-6 border-b">
           <h3 className="text-lg font-bold text-gray-800">旺季／連假日期區間</h3>
           <p className="text-sm text-gray-500 mt-1">
-            這裡新增的區間會與 Google 試算表同步的區間合併使用（優先順序：旺季 &gt; 連假 &gt; 一般日期依星期幾判斷）。
-          </p>
-        </div>
-
-        <div className="p-6 border-b bg-gray-50 space-y-3">
-          <p className="text-sm font-medium text-gray-700">Google 試算表同步（選填，格式同「知識庫」試算表：服務帳戶需有檢視權限）</p>
-          <div className="flex flex-wrap gap-3 items-center">
-            <input
-              placeholder="試算表 ID"
-              value={bookingSettings?.booking_sheet_id || ''}
-              onChange={(e) => setBookingSettings({ ...bookingSettings, booking_sheet_id: e.target.value })}
-              className="px-3 py-2 border rounded-lg w-64"
-            />
-            <input
-              placeholder="分頁 GID（預設 0）"
-              value={bookingSettings?.booking_sheet_gid || ''}
-              onChange={(e) => setBookingSettings({ ...bookingSettings, booking_sheet_gid: e.target.value })}
-              className="px-3 py-2 border rounded-lg w-40"
-            />
-            <button onClick={saveBookingSheetSettings} className="flex items-center gap-1 bg-blue-600 text-white px-3 py-2 rounded-lg text-sm hover:bg-blue-700">
-              <Save className="w-4 h-4" /> 儲存
-            </button>
-          </div>
-          <p className="text-xs text-gray-400">
-            試算表格式：第一列標題，A欄=類型（旺季/連假）、B欄=起始日期、C欄=結束日期、D欄=備註。實際讀取會在 Phase 2 串接 LINE 對話時一併實作。
+            完全由這裡新增/編輯/刪除（優先順序：旺季 &gt; 連假 &gt; 一般日期依星期幾判斷）。
           </p>
         </div>
 
@@ -489,19 +451,28 @@ export default function BookingManagement() {
                 <th className="py-3 px-4">起始日期</th>
                 <th className="py-3 px-4">結束日期</th>
                 <th className="py-3 px-4">備註</th>
-                <th className="py-3 px-4">來源</th>
                 <th className="py-3 px-4"></th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
               {dateRanges.map((d) => (
                 <tr key={d.id}>
-                  <td className="py-3 px-4">{d.range_type}</td>
-                  <td className="py-3 px-4">{d.start_date}</td>
-                  <td className="py-3 px-4">{d.end_date}</td>
-                  <td className="py-3 px-4 text-gray-500">{d.label}</td>
-                  <td className="py-3 px-4 text-xs text-gray-400">{d.source === 'sheet' ? '試算表' : '手動'}</td>
-                  <td className="py-3 px-4">
+                  <td className="p-2">
+                    <select value={d.range_type} onChange={(e) => updateDateRange(d.id, 'range_type', e.target.value)} className="px-2 py-1 border rounded bg-white">
+                      <option value="旺季">旺季</option>
+                      <option value="連假">連假</option>
+                    </select>
+                  </td>
+                  <td className="p-2">
+                    <input type="date" defaultValue={d.start_date} onBlur={(e) => updateDateRange(d.id, 'start_date', e.target.value)} className="px-2 py-1 border rounded" />
+                  </td>
+                  <td className="p-2">
+                    <input type="date" defaultValue={d.end_date} onBlur={(e) => updateDateRange(d.id, 'end_date', e.target.value)} className="px-2 py-1 border rounded" />
+                  </td>
+                  <td className="p-2">
+                    <input defaultValue={d.label} onBlur={(e) => updateDateRange(d.id, 'label', e.target.value)} className="w-40 px-2 py-1 border rounded" placeholder="例如：端午連假" />
+                  </td>
+                  <td className="p-2">
                     <button onClick={() => deleteDateRange(d.id)} className="p-1.5 text-red-500 hover:bg-red-50 rounded">
                       <Trash2 className="w-4 h-4" />
                     </button>
@@ -510,7 +481,7 @@ export default function BookingManagement() {
               ))}
               {dateRanges.length === 0 && (
                 <tr>
-                  <td colSpan={6} className="py-10 text-center text-gray-400">
+                  <td colSpan={5} className="py-10 text-center text-gray-400">
                     尚未設定任何日期區間
                   </td>
                 </tr>

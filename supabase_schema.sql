@@ -29,10 +29,7 @@ CREATE TABLE IF NOT EXISTS public.settings (
     handover_timeout_minutes INTEGER DEFAULT 30,
     agent_user_ids TEXT DEFAULT '',
     -- 已由 LINE 官方帳號原生「自動回應/圖文選單」處理過的訊息，AI 收到會直接略過不重複回覆
-    skip_ai_keywords TEXT DEFAULT '',
-    -- 訂房功能：日期區間（旺季/連假）Google 試算表來源
-    booking_sheet_id TEXT DEFAULT '',
-    booking_sheet_gid TEXT DEFAULT '0'
+    skip_ai_keywords TEXT DEFAULT ''
 );
 
 -- 去重記錄表 (防止重試導致狀態回滾)
@@ -103,14 +100,13 @@ CREATE TABLE IF NOT EXISTS public.whole_house_extra_person_rules (
     UNIQUE (rule_type, tier)
 );
 
--- 日期區間（旺季／連假），可由 Google 試算表同步或後台手動新增，兩者merge使用
+-- 日期區間（旺季／連假），完全由後台維護介面新增/編輯/刪除
 CREATE TABLE IF NOT EXISTS public.booking_date_ranges (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     range_type TEXT NOT NULL, -- '旺季' / '連假'（純文字，未來可擴充新類型）
     start_date DATE NOT NULL,
     end_date DATE NOT NULL,
     label TEXT DEFAULT '',
-    source TEXT DEFAULT 'manual', -- 'manual'（後台新增）/ 'sheet'（試算表同步，僅供顯示區分，不影響比對邏輯）
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
 );
 
@@ -160,8 +156,11 @@ ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS skip_ai_keywords TEXT DEFAU
 ALTER TABLE public.user_states ADD COLUMN IF NOT EXISTS conversation_history TEXT DEFAULT '[]';
 
 -- 7. 【既有專案升級用】支援「訂房管理 Phase 1」功能：
-ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS booking_sheet_id TEXT DEFAULT '';
-ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS booking_sheet_gid TEXT DEFAULT '0';
+-- 日期區間改為純後台維護，若您先前已執行過含 booking_sheet_id/booking_sheet_gid 的舊版腳本，
+-- 以下語句會把這兩個欄位與 booking_date_ranges 的 source 欄位清掉（不影響其他資料）：
+ALTER TABLE public.settings DROP COLUMN IF EXISTS booking_sheet_id;
+ALTER TABLE public.settings DROP COLUMN IF EXISTS booking_sheet_gid;
+ALTER TABLE public.booking_date_ranges DROP COLUMN IF EXISTS source;
 
 CREATE TABLE IF NOT EXISTS public.room_types (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -212,7 +211,6 @@ CREATE TABLE IF NOT EXISTS public.booking_date_ranges (
     start_date DATE NOT NULL,
     end_date DATE NOT NULL,
     label TEXT DEFAULT '',
-    source TEXT DEFAULT 'manual',
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
 );
 
