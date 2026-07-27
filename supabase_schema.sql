@@ -120,13 +120,22 @@ ALTER TABLE public.whole_house_package_pricing ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.whole_house_extra_person_rules ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.booking_date_ranges ENABLE ROW LEVEL SECURITY;
 
+-- 用 DROP + CREATE 讓整份腳本可重複執行（不管是全新資料庫，或先前已跑過任何一版）都不會因為 policy 已存在而報錯
+DROP POLICY IF EXISTS "Allow Auth Access" ON public.settings;
 CREATE POLICY "Allow Auth Access" ON public.settings FOR ALL USING (auth.role() = 'authenticated');
+DROP POLICY IF EXISTS "Allow Auth Access States" ON public.user_states;
 CREATE POLICY "Allow Auth Access States" ON public.user_states FOR ALL USING (auth.role() = 'authenticated');
+DROP POLICY IF EXISTS "Allow Auth Access Room Types" ON public.room_types;
 CREATE POLICY "Allow Auth Access Room Types" ON public.room_types FOR ALL USING (auth.role() = 'authenticated');
+DROP POLICY IF EXISTS "Allow Auth Access Room Pricing" ON public.room_pricing;
 CREATE POLICY "Allow Auth Access Room Pricing" ON public.room_pricing FOR ALL USING (auth.role() = 'authenticated');
+DROP POLICY IF EXISTS "Allow Auth Access WH Packages" ON public.whole_house_packages;
 CREATE POLICY "Allow Auth Access WH Packages" ON public.whole_house_packages FOR ALL USING (auth.role() = 'authenticated');
+DROP POLICY IF EXISTS "Allow Auth Access WH Package Pricing" ON public.whole_house_package_pricing;
 CREATE POLICY "Allow Auth Access WH Package Pricing" ON public.whole_house_package_pricing FOR ALL USING (auth.role() = 'authenticated');
+DROP POLICY IF EXISTS "Allow Auth Access WH Extra Person Rules" ON public.whole_house_extra_person_rules;
 CREATE POLICY "Allow Auth Access WH Extra Person Rules" ON public.whole_house_extra_person_rules FOR ALL USING (auth.role() = 'authenticated');
+DROP POLICY IF EXISTS "Allow Auth Access Booking Date Ranges" ON public.booking_date_ranges;
 CREATE POLICY "Allow Auth Access Booking Date Ranges" ON public.booking_date_ranges FOR ALL USING (auth.role() = 'authenticated');
 
 -- 4. 初始資料
@@ -139,13 +148,17 @@ VALUES ('knowledge_base', 'knowledge_base', true)
 ON CONFLICT (id) DO NOTHING;
 
 -- 允許任何人讀取檔案
+DROP POLICY IF EXISTS "Allow Public Select" ON storage.objects;
 CREATE POLICY "Allow Public Select" ON storage.objects
 FOR SELECT TO public
 USING (bucket_id = 'knowledge_base');
 
 -- 允許已登入的管理員上傳/更新/刪除檔案
+DROP POLICY IF EXISTS "Allow Auth Insert" ON storage.objects;
 CREATE POLICY "Allow Auth Insert" ON storage.objects FOR INSERT TO authenticated WITH CHECK (bucket_id = 'knowledge_base');
+DROP POLICY IF EXISTS "Allow Auth Update" ON storage.objects;
 CREATE POLICY "Allow Auth Update" ON storage.objects FOR UPDATE TO authenticated USING (bucket_id = 'knowledge_base');
+DROP POLICY IF EXISTS "Allow Auth Delete" ON storage.objects;
 CREATE POLICY "Allow Auth Delete" ON storage.objects FOR DELETE TO authenticated USING (bucket_id = 'knowledge_base');
 
 -- 6. 【既有專案升級用】若您的資料庫是舊版建立的，CREATE TABLE IF NOT EXISTS 不會補齊新欄位，
