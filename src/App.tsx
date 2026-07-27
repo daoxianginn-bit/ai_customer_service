@@ -4,6 +4,7 @@ import { supabase } from './lib/supabase';
 import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
 import AgentService from './pages/AgentService';
+import BookingManagement from './pages/BookingManagement';
 import Layout from './components/Layout';
 
 function App() {
@@ -78,6 +79,7 @@ function App() {
         <Route element={session ? <Layout /> : <Navigate to="/login" />}>
           <Route path="/" element={<Dashboard />} />
           <Route path="/agent" element={<AgentService />} />
+          <Route path="/booking" element={<BookingManagement />} />
         </Route>
         <Route path="*" element={<Navigate to="/" />} />
       </Routes>

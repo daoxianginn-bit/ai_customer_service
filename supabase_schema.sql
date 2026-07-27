@@ -29,7 +29,10 @@ CREATE TABLE IF NOT EXISTS public.settings (
     handover_timeout_minutes INTEGER DEFAULT 30,
     agent_user_ids TEXT DEFAULT '',
     -- 已由 LINE 官方帳號原生「自動回應/圖文選單」處理過的訊息，AI 收到會直接略過不重複回覆
-    skip_ai_keywords TEXT DEFAULT ''
+    skip_ai_keywords TEXT DEFAULT '',
+    -- 訂房功能：日期區間（旺季/連假）Google 試算表來源
+    booking_sheet_id TEXT DEFAULT '',
+    booking_sheet_gid TEXT DEFAULT '0'
 );
 
 -- 去重記錄表 (防止重試導致狀態回滾)
@@ -48,12 +51,87 @@ CREATE TABLE IF NOT EXISTS public.user_states (
     conversation_history TEXT DEFAULT '[]' -- AI 對話記憶：最近幾輪對話紀錄（JSON 陣列）
 );
 
+-- 2.5 訂房功能（Phase 1：房型／定價／包棟方案／加人規則／日期區間）
+-- 設計原則：定價一律用「房型/方案 + tier 文字欄位」正規化存放，
+-- 之後要新增定價級距（例如「旺季平日」）只需要多一筆資料，不需要改表結構。
+
+-- 房型主檔
+CREATE TABLE IF NOT EXISTS public.room_types (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL,
+    floor TEXT DEFAULT '',
+    capacity INTEGER NOT NULL,
+    display_order INTEGER DEFAULT 0, -- 房型分配演算法會依此順序優先選用（例如同容納人數時優先低樓層）
+    is_active BOOLEAN DEFAULT true,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+);
+
+-- 房型 × 定價級距（tier 留空/沒有這筆資料 = 該 tier 不開放個別租房，只能包棟）
+CREATE TABLE IF NOT EXISTS public.room_pricing (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    room_type_id UUID NOT NULL REFERENCES public.room_types(id) ON DELETE CASCADE,
+    tier TEXT NOT NULL, -- 例如：平日／小假日／連假／旺季／定價（純文字，可自由擴充）
+    price NUMERIC,
+    UNIQUE (room_type_id, tier)
+);
+
+-- 包棟方案（依動人數級距，如 10/12/14/16）
+CREATE TABLE IF NOT EXISTS public.whole_house_packages (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    occupancy INTEGER NOT NULL, -- 該方案基礎可入住人數
+    room_combo TEXT DEFAULT '', -- 房型人數搭配說明文字，如「4+4+2」，純顯示用
+    display_order INTEGER DEFAULT 0,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+);
+
+-- 包棟方案 × 定價級距
+CREATE TABLE IF NOT EXISTS public.whole_house_package_pricing (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    package_id UUID NOT NULL REFERENCES public.whole_house_packages(id) ON DELETE CASCADE,
+    tier TEXT NOT NULL,
+    price NUMERIC,
+    UNIQUE (package_id, tier)
+);
+
+-- 包棟超過基礎人數時的加人規則（不加床不多開房 / 不加床多開房）
+CREATE TABLE IF NOT EXISTS public.whole_house_extra_person_rules (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    rule_type TEXT NOT NULL, -- 'no_extra_room'（不多開房）/ 'extra_room'（多開房），純文字可擴充
+    rule_label TEXT DEFAULT '',
+    tier TEXT NOT NULL,
+    price NUMERIC,
+    UNIQUE (rule_type, tier)
+);
+
+-- 日期區間（旺季／連假），可由 Google 試算表同步或後台手動新增，兩者merge使用
+CREATE TABLE IF NOT EXISTS public.booking_date_ranges (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    range_type TEXT NOT NULL, -- '旺季' / '連假'（純文字，未來可擴充新類型）
+    start_date DATE NOT NULL,
+    end_date DATE NOT NULL,
+    label TEXT DEFAULT '',
+    source TEXT DEFAULT 'manual', -- 'manual'（後台新增）/ 'sheet'（試算表同步，僅供顯示區分，不影響比對邏輯）
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+);
+
 -- 3. 啟用 RLS
 ALTER TABLE public.settings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.user_states ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.room_types ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.room_pricing ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.whole_house_packages ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.whole_house_package_pricing ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.whole_house_extra_person_rules ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.booking_date_ranges ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY "Allow Auth Access" ON public.settings FOR ALL USING (auth.role() = 'authenticated');
 CREATE POLICY "Allow Auth Access States" ON public.user_states FOR ALL USING (auth.role() = 'authenticated');
+CREATE POLICY "Allow Auth Access Room Types" ON public.room_types FOR ALL USING (auth.role() = 'authenticated');
+CREATE POLICY "Allow Auth Access Room Pricing" ON public.room_pricing FOR ALL USING (auth.role() = 'authenticated');
+CREATE POLICY "Allow Auth Access WH Packages" ON public.whole_house_packages FOR ALL USING (auth.role() = 'authenticated');
+CREATE POLICY "Allow Auth Access WH Package Pricing" ON public.whole_house_package_pricing FOR ALL USING (auth.role() = 'authenticated');
+CREATE POLICY "Allow Auth Access WH Extra Person Rules" ON public.whole_house_extra_person_rules FOR ALL USING (auth.role() = 'authenticated');
+CREATE POLICY "Allow Auth Access Booking Date Ranges" ON public.booking_date_ranges FOR ALL USING (auth.role() = 'authenticated');
 
 -- 4. 初始資料
 INSERT INTO public.settings (id) SELECT gen_random_uuid() WHERE NOT EXISTS (SELECT 1 FROM public.settings);
@@ -80,3 +158,89 @@ ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS knowledge_sheet_id TEXT DEF
 ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS knowledge_sheet_gid TEXT DEFAULT '0';
 ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS skip_ai_keywords TEXT DEFAULT '';
 ALTER TABLE public.user_states ADD COLUMN IF NOT EXISTS conversation_history TEXT DEFAULT '[]';
+
+-- 7. 【既有專案升級用】支援「訂房管理 Phase 1」功能：
+ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS booking_sheet_id TEXT DEFAULT '';
+ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS booking_sheet_gid TEXT DEFAULT '0';
+
+CREATE TABLE IF NOT EXISTS public.room_types (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL,
+    floor TEXT DEFAULT '',
+    capacity INTEGER NOT NULL,
+    display_order INTEGER DEFAULT 0,
+    is_active BOOLEAN DEFAULT true,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS public.room_pricing (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    room_type_id UUID NOT NULL REFERENCES public.room_types(id) ON DELETE CASCADE,
+    tier TEXT NOT NULL,
+    price NUMERIC,
+    UNIQUE (room_type_id, tier)
+);
+
+CREATE TABLE IF NOT EXISTS public.whole_house_packages (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    occupancy INTEGER NOT NULL,
+    room_combo TEXT DEFAULT '',
+    display_order INTEGER DEFAULT 0,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS public.whole_house_package_pricing (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    package_id UUID NOT NULL REFERENCES public.whole_house_packages(id) ON DELETE CASCADE,
+    tier TEXT NOT NULL,
+    price NUMERIC,
+    UNIQUE (package_id, tier)
+);
+
+CREATE TABLE IF NOT EXISTS public.whole_house_extra_person_rules (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    rule_type TEXT NOT NULL,
+    rule_label TEXT DEFAULT '',
+    tier TEXT NOT NULL,
+    price NUMERIC,
+    UNIQUE (rule_type, tier)
+);
+
+CREATE TABLE IF NOT EXISTS public.booking_date_ranges (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    range_type TEXT NOT NULL,
+    start_date DATE NOT NULL,
+    end_date DATE NOT NULL,
+    label TEXT DEFAULT '',
+    source TEXT DEFAULT 'manual',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+);
+
+ALTER TABLE public.room_types ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.room_pricing ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.whole_house_packages ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.whole_house_package_pricing ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.whole_house_extra_person_rules ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.booking_date_ranges ENABLE ROW LEVEL SECURITY;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'room_types' AND policyname = 'Allow Auth Access Room Types') THEN
+        CREATE POLICY "Allow Auth Access Room Types" ON public.room_types FOR ALL USING (auth.role() = 'authenticated');
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'room_pricing' AND policyname = 'Allow Auth Access Room Pricing') THEN
+        CREATE POLICY "Allow Auth Access Room Pricing" ON public.room_pricing FOR ALL USING (auth.role() = 'authenticated');
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'whole_house_packages' AND policyname = 'Allow Auth Access WH Packages') THEN
+        CREATE POLICY "Allow Auth Access WH Packages" ON public.whole_house_packages FOR ALL USING (auth.role() = 'authenticated');
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'whole_house_package_pricing' AND policyname = 'Allow Auth Access WH Package Pricing') THEN
+        CREATE POLICY "Allow Auth Access WH Package Pricing" ON public.whole_house_package_pricing FOR ALL USING (auth.role() = 'authenticated');
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'whole_house_extra_person_rules' AND policyname = 'Allow Auth Access WH Extra Person Rules') THEN
+        CREATE POLICY "Allow Auth Access WH Extra Person Rules" ON public.whole_house_extra_person_rules FOR ALL USING (auth.role() = 'authenticated');
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'booking_date_ranges' AND policyname = 'Allow Auth Access Booking Date Ranges') THEN
+        CREATE POLICY "Allow Auth Access Booking Date Ranges" ON public.booking_date_ranges FOR ALL USING (auth.role() = 'authenticated');
+    END IF;
+END $$;
