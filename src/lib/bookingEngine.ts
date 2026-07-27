@@ -24,7 +24,6 @@ export interface RoomPricing {
 export interface WholeHousePackage {
   id: string;
   occupancy: number;
-  room_combo: string;
   display_order: number;
 }
 
@@ -99,6 +98,27 @@ export function getAvailableIndividualRooms(
   return rooms.sort((a, b) => b.capacity - a.capacity || a.display_order - b.display_order);
 }
 
+/**
+ * 共用的貪婪分配演算法：優先用容量 <= 剩餘人數中最大的項目去塞，
+ * 塞不下時用剩下最小的項目補齊（會有空位，但至少能容納）。
+ * 傳入的 items 必須已排序：capacity desc, display_order asc。
+ */
+function greedyPack<T extends { capacity: number }>(headcount: number, items: T[]): { items: T[]; success: boolean } {
+  const pool = [...items];
+  const assigned: T[] = [];
+  let remaining = headcount;
+
+  while (remaining > 0 && pool.length > 0) {
+    let idx = pool.findIndex((r) => r.capacity <= remaining);
+    if (idx === -1) idx = pool.length - 1; // 沒有完全塞得下的項目，用剩下最小的補齊
+    const item = pool.splice(idx, 1)[0];
+    assigned.push(item);
+    remaining -= item.capacity;
+  }
+
+  return { items: assigned, success: remaining <= 0 };
+}
+
 export interface RoomAllocationResult {
   success: boolean; // false = 可用房型的總容納人數不足以容納顧客人數
   rooms: AvailableRoom[];
@@ -107,29 +127,28 @@ export interface RoomAllocationResult {
 }
 
 /**
- * 貪婪演算法分配房型：優先用容量 <= 剩餘人數中最大的房間去塞，
- * 塞不下時用剩下最小的房間補齊（會有空位，但至少能容納）。
+ * 分配房型並計算價格：只能用在已依 tier 篩出「有定價」的房型清單（AvailableRoom，含 price）。
  * 資料驅動、房型增減不需要改邏輯，會自動反映在分配結果。
  */
 export function allocateIndividualRooms(headcount: number, availableRooms: AvailableRoom[]): RoomAllocationResult {
-  const pool = [...availableRooms]; // 已由呼叫端排序：capacity desc, display_order asc
-  const assigned: AvailableRoom[] = [];
-  let remaining = headcount;
-
-  while (remaining > 0 && pool.length > 0) {
-    let idx = pool.findIndex((r) => r.capacity <= remaining);
-    if (idx === -1) idx = pool.length - 1; // 沒有完全塞得下的房間，用剩下最小的房間補齊
-    const room = pool.splice(idx, 1)[0];
-    assigned.push(room);
-    remaining -= room.capacity;
-  }
-
+  const { items: assigned, success } = greedyPack(headcount, availableRooms);
   return {
-    success: remaining <= 0,
+    success,
     rooms: assigned,
     totalCapacity: assigned.reduce((s, r) => s + r.capacity, 0),
     totalPrice: assigned.reduce((s, r) => s + r.price, 0),
   };
+}
+
+/**
+ * 自動建議包棟方案的房型組合：用同一套貪婪演算法，但對象是全部啟用中的房型（不受 tier 定價限制），
+ * 純粹用來在後台「新增包棟方案」時，依動人數自動勾好建議組合，管理者仍可手動調整勾選。
+ */
+export function suggestRoomCombo(occupancy: number, roomTypes: RoomType[]): RoomType[] {
+  const pool = roomTypes
+    .filter((r) => r.is_active)
+    .sort((a, b) => b.capacity - a.capacity || a.display_order - b.display_order);
+  return greedyPack(occupancy, pool).items;
 }
 
 export interface ExtraPersonOption {
@@ -204,16 +223,49 @@ export interface QuoteInput {
   maxOccupancy: number;
 }
 
+export interface Recommendation {
+  recommended: 'individual' | 'wholeHouse' | null; // null＝兩者都無法報價，或價格剛好一樣
+  savings: number | null; // 選擇 recommended 那個選項，比另一個選項省下多少錢
+}
+
+/**
+ * 自動比較「個別租房」與「包棟」兩種選項，算出比較划算的一方跟省下多少錢。
+ * 不需要管理者設定任何比較規則——單純的資料比較，兩邊都沒資料時無法比較。
+ * 包棟若有多種加人選項（不多開房／多開房），比較時取最便宜的那個。
+ */
+export function compareOptions(
+  individualOption: RoomAllocationResult | null,
+  wholeHouseOption: WholeHouseQuote | null
+): Recommendation {
+  const individualTotal = individualOption?.success ? individualOption.totalPrice : null;
+  const wholeHouseTotal = wholeHouseOption
+    ? wholeHouseOption.extraPersonOptions.length
+      ? Math.min(...wholeHouseOption.extraPersonOptions.map((o) => o.grandTotal))
+      : wholeHouseOption.basePrice
+    : null;
+
+  if (individualTotal == null && wholeHouseTotal == null) return { recommended: null, savings: null };
+  if (individualTotal == null) return { recommended: 'wholeHouse', savings: null };
+  if (wholeHouseTotal == null) return { recommended: 'individual', savings: null };
+
+  const diff = individualTotal - wholeHouseTotal;
+  if (diff > 0) return { recommended: 'wholeHouse', savings: diff };
+  if (diff < 0) return { recommended: 'individual', savings: -diff };
+  return { recommended: null, savings: 0 };
+}
+
 export interface QuoteResult {
   date: Date;
   tier: string;
   headcount: number;
   individualOption: RoomAllocationResult | null; // null＝該 tier 不開放個別租房，只能包棟
   wholeHouseOption: WholeHouseQuote | null; // null＝沒有對應的包棟報價資料，或超過最大接待人數
+  recommendation: Recommendation;
 }
 
 /**
- * 統整報價：同時算出「個別租房」與「包棟」兩種選項，交給對話流程呈現給顧客選擇。
+ * 統整報價：同時算出「個別租房」與「包棟」兩種選項，並自動比較出推薦選項與省多少錢，
+ * 交給對話流程呈現給顧客選擇。
  */
 export function computeQuote(input: QuoteInput): QuoteResult {
   const tier = resolvePricingTier(input.date, input.dateRanges);
@@ -227,6 +279,7 @@ export function computeQuote(input: QuoteInput): QuoteResult {
     tier,
     input.maxOccupancy
   );
+  const recommendation = compareOptions(individualOption, wholeHouseOption);
 
-  return { date: input.date, tier, headcount: input.headcount, individualOption, wholeHouseOption };
+  return { date: input.date, tier, headcount: input.headcount, individualOption, wholeHouseOption, recommendation };
 }

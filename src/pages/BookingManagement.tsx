@@ -1,38 +1,27 @@
-import { useEffect, useState } from 'react';
+import { useState, useEffect } from 'react';
 import { supabase } from '../lib/supabase';
-import { Plus, Trash2, CalendarRange, Home, Users, Calculator } from 'lucide-react';
+import { Plus, Trash2, CalendarRange, Home, Users, Calculator, Save, Wand2 } from 'lucide-react';
 import {
   computeQuote,
+  suggestRoomCombo,
+  getAvailableIndividualRooms,
+  allocateIndividualRooms,
+  selectWholeHousePackage,
+  compareOptions,
   QuoteResult,
 } from '../lib/bookingEngine';
 
 // 房型/包棟方案定價目前支援的 tier，對應 bookingEngine.resolvePricingTier() 實際會判斷出來的級距。
-// 加人規則不含「定價」（原始表格也沒有這欄）。
 const PRICING_TIERS = ['平日', '小假日', '連假', '旺季', '定價'];
-const EXTRA_PERSON_TIERS = ['平日', '小假日', '連假', '旺季'];
+// 自動報價總表只顯示會被實際判斷出來的營運 tier（不含「定價」這種純參考價）。
+const MATRIX_TIERS = ['平日', '小假日', '連假', '旺季'];
 const RULE_TYPE_OPTIONS = [
   { value: 'no_extra_room', label: '不多開房' },
   { value: 'extra_room', label: '多開房' },
 ];
 
-async function upsertTierPrice(
-  table: string,
-  idField: string,
-  idValue: string,
-  tier: string,
-  priceInput: string,
-  list: any[],
-  setList: (v: any[]) => void
-) {
-  const price = priceInput === '' ? null : Number(priceInput);
-  const existing = list.find((p) => p[idField] === idValue && p.tier === tier);
-  if (existing) {
-    setList(list.map((p) => (p === existing ? { ...p, price } : p)));
-    await supabase.from(table).update({ price }).eq(idField, idValue).eq('tier', tier);
-  } else {
-    const { data, error } = await supabase.from(table).insert({ [idField]: idValue, tier, price }).select().single();
-    if (!error && data) setList([...list, data]);
-  }
+function newId(): string {
+  return crypto.randomUUID();
 }
 
 function getTierPrice(list: any[], idField: string, idValue: string, tier: string): string {
@@ -40,16 +29,42 @@ function getTierPrice(list: any[], idField: string, idValue: string, tier: strin
   return found && found.price != null ? String(found.price) : '';
 }
 
+function setTierPrice(
+  list: any[],
+  setList: (v: any[]) => void,
+  idField: string,
+  idValue: string,
+  tier: string,
+  priceInput: string
+) {
+  const price = priceInput === '' ? null : Number(priceInput);
+  const existing = list.find((p) => p[idField] === idValue && p.tier === tier);
+  if (existing) {
+    setList(list.map((p) => (p === existing ? { ...p, price } : p)));
+  } else {
+    setList([...list, { id: newId(), [idField]: idValue, tier, price }]);
+  }
+}
+
 export default function BookingManagement() {
   const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+
+  const [settingsId, setSettingsId] = useState<string | null>(null);
+  const [wholeHouseEnabled, setWholeHouseEnabled] = useState(true);
+
   const [roomTypes, setRoomTypes] = useState<any[]>([]);
   const [roomPricing, setRoomPricing] = useState<any[]>([]);
   const [packages, setPackages] = useState<any[]>([]);
   const [packagePricing, setPackagePricing] = useState<any[]>([]);
+  const [packageRooms, setPackageRooms] = useState<any[]>([]);
   const [extraRules, setExtraRules] = useState<any[]>([]);
   const [dateRanges, setDateRanges] = useState<any[]>([]);
 
+  const [pendingDeletes, setPendingDeletes] = useState<{ table: string; id: string }[]>([]);
+
   const [newRange, setNewRange] = useState({ range_type: '旺季', start_date: '', end_date: '', label: '' });
+  const [newPackage, setNewPackage] = useState<{ occupancy: number; roomIds: string[] }>({ occupancy: 10, roomIds: [] });
 
   const [quoteDate, setQuoteDate] = useState('');
   const [quoteHeadcount, setQuoteHeadcount] = useState(4);
@@ -61,109 +76,144 @@ export default function BookingManagement() {
 
   const fetchAll = async () => {
     setLoading(true);
-    const [rt, rp, wp, wpp, epr, dr] = await Promise.all([
+    const [st, rt, rp, wp, wpp, wpr, epr, dr] = await Promise.all([
+      supabase.from('settings').select('id, booking_whole_house_enabled').single(),
       supabase.from('room_types').select('*').order('display_order'),
       supabase.from('room_pricing').select('*'),
       supabase.from('whole_house_packages').select('*').order('display_order'),
       supabase.from('whole_house_package_pricing').select('*'),
+      supabase.from('whole_house_package_rooms').select('*'),
       supabase.from('whole_house_extra_person_rules').select('*'),
       supabase.from('booking_date_ranges').select('*').order('start_date'),
     ]);
+    setSettingsId(st.data?.id || null);
+    setWholeHouseEnabled(st.data?.booking_whole_house_enabled ?? true);
     setRoomTypes(rt.data || []);
     setRoomPricing(rp.data || []);
     setPackages(wp.data || []);
     setPackagePricing(wpp.data || []);
+    setPackageRooms(wpr.data || []);
     setExtraRules(epr.data || []);
     setDateRanges(dr.data || []);
+    setPendingDeletes([]);
+    setNewPackage({ occupancy: 10, roomIds: [] });
     setLoading(false);
   };
 
+  const queueDelete = (table: string, id: string) => setPendingDeletes((prev) => [...prev, { table, id }]);
+
+  // ---------------- 儲存 ----------------
+  const handleSaveAll = async () => {
+    setSaving(true);
+    try {
+      if (settingsId) {
+        await supabase.from('settings').update({ booking_whole_house_enabled: wholeHouseEnabled }).eq('id', settingsId);
+      }
+      if (roomTypes.length) await supabase.from('room_types').upsert(roomTypes);
+      if (roomPricing.length) await supabase.from('room_pricing').upsert(roomPricing);
+      if (packages.length) await supabase.from('whole_house_packages').upsert(packages);
+      if (packagePricing.length) await supabase.from('whole_house_package_pricing').upsert(packagePricing);
+      if (packageRooms.length) await supabase.from('whole_house_package_rooms').upsert(packageRooms);
+      if (extraRules.length) await supabase.from('whole_house_extra_person_rules').upsert(extraRules);
+      if (dateRanges.length) await supabase.from('booking_date_ranges').upsert(dateRanges);
+
+      for (const del of pendingDeletes) {
+        await supabase.from(del.table).delete().eq('id', del.id);
+      }
+
+      await fetchAll();
+      alert('已儲存！');
+    } catch (err: any) {
+      alert(`儲存失敗：${err.message}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   // ---------------- 房型 ----------------
-  const addRoomType = async () => {
-    const { data, error } = await supabase
-      .from('room_types')
-      .insert({ name: '新房型', floor: '', capacity: 2, display_order: roomTypes.length })
-      .select()
-      .single();
-    if (!error && data) setRoomTypes([...roomTypes, data]);
+  const addRoomType = () => {
+    setRoomTypes([...roomTypes, { id: newId(), name: '新房型', floor: '', capacity: 2, display_order: roomTypes.length, is_active: true }]);
   };
 
-  const updateRoomType = async (id: string, field: string, value: any) => {
+  const updateRoomType = (id: string, field: string, value: any) => {
     setRoomTypes(roomTypes.map((r) => (r.id === id ? { ...r, [field]: value } : r)));
-    await supabase.from('room_types').update({ [field]: value }).eq('id', id);
   };
 
-  const deleteRoomType = async (id: string) => {
-    if (!confirm('確定要刪除這個房型嗎？相關定價也會一併刪除。')) return;
-    await supabase.from('room_types').delete().eq('id', id);
+  const deleteRoomType = (id: string) => {
+    if (!confirm('確定要刪除這個房型嗎？相關定價與包棟房型組合也會一併刪除。')) return;
     setRoomTypes(roomTypes.filter((r) => r.id !== id));
     setRoomPricing(roomPricing.filter((p) => p.room_type_id !== id));
+    setPackageRooms(packageRooms.filter((pr) => pr.room_type_id !== id));
+    queueDelete('room_types', id);
   };
 
   // ---------------- 包棟方案 ----------------
-  const addPackage = async () => {
-    const { data, error } = await supabase
-      .from('whole_house_packages')
-      .insert({ occupancy: 10, room_combo: '', display_order: packages.length })
-      .select()
-      .single();
-    if (!error && data) setPackages([...packages, data]);
+  const applySuggestedCombo = (occupancy: number) => {
+    const suggested = suggestRoomCombo(occupancy, roomTypes);
+    setNewPackage({ occupancy, roomIds: suggested.map((r) => r.id) });
   };
 
-  const updatePackage = async (id: string, field: string, value: any) => {
-    setPackages(packages.map((p) => (p.id === id ? { ...p, [field]: value } : p)));
-    await supabase.from('whole_house_packages').update({ [field]: value }).eq('id', id);
+  const toggleNewPackageRoom = (roomId: string) => {
+    setNewPackage((prev) => ({
+      ...prev,
+      roomIds: prev.roomIds.includes(roomId) ? prev.roomIds.filter((id) => id !== roomId) : [...prev.roomIds, roomId],
+    }));
   };
 
-  const deletePackage = async (id: string) => {
-    if (!confirm('確定要刪除這個包棟方案嗎？相關定價也會一併刪除。')) return;
-    await supabase.from('whole_house_packages').delete().eq('id', id);
+  const newPackageCapacity = newPackage.roomIds.reduce((s, id) => s + (roomTypes.find((r) => r.id === id)?.capacity || 0), 0);
+
+  const addPackage = () => {
+    const pkgId = newId();
+    setPackages([...packages, { id: pkgId, occupancy: newPackage.occupancy, display_order: packages.length }]);
+    setPackageRooms([...packageRooms, ...newPackage.roomIds.map((roomId) => ({ id: newId(), package_id: pkgId, room_type_id: roomId }))]);
+    setNewPackage({ occupancy: 10, roomIds: [] });
+  };
+
+  const deletePackage = (id: string) => {
+    if (!confirm('確定要刪除這個包棟方案嗎？相關定價與房型組合也會一併刪除。')) return;
     setPackages(packages.filter((p) => p.id !== id));
     setPackagePricing(packagePricing.filter((p) => p.package_id !== id));
+    setPackageRooms(packageRooms.filter((pr) => pr.package_id !== id));
+    queueDelete('whole_house_packages', id);
+  };
+
+  const packageRoomNames = (packageId: string): string => {
+    const roomIds = packageRooms.filter((pr) => pr.package_id === packageId).map((pr) => pr.room_type_id);
+    return roomTypes.filter((r) => roomIds.includes(r.id)).map((r) => r.name).join('、') || '（未設定房型）';
   };
 
   // ---------------- 加人規則 ----------------
-  const addExtraRule = async () => {
-    const { data, error } = await supabase
-      .from('whole_house_extra_person_rules')
-      .insert({ rule_type: 'no_extra_room', rule_label: '不多開房', tier: '平日', price: null })
-      .select()
-      .single();
-    if (!error && data) setExtraRules([...extraRules, data]);
+  const addExtraRule = () => {
+    setExtraRules([...extraRules, { id: newId(), rule_type: 'no_extra_room', rule_label: '不多開房', tier: '平日', price: null }]);
   };
 
-  const updateExtraRule = async (id: string, field: string, value: any) => {
+  const updateExtraRule = (id: string, field: string, value: any) => {
     setExtraRules(extraRules.map((r) => (r.id === id ? { ...r, [field]: value } : r)));
-    await supabase.from('whole_house_extra_person_rules').update({ [field]: value }).eq('id', id);
   };
 
-  const deleteExtraRule = async (id: string) => {
+  const deleteExtraRule = (id: string) => {
     if (!confirm('確定要刪除這筆加人規則嗎？')) return;
-    await supabase.from('whole_house_extra_person_rules').delete().eq('id', id);
     setExtraRules(extraRules.filter((r) => r.id !== id));
+    queueDelete('whole_house_extra_person_rules', id);
   };
 
   // ---------------- 日期區間 ----------------
-  const addDateRange = async () => {
+  const addDateRange = () => {
     if (!newRange.start_date || !newRange.end_date) {
       alert('請填入起訖日期');
       return;
     }
-    const { data, error } = await supabase.from('booking_date_ranges').insert(newRange).select().single();
-    if (!error && data) {
-      setDateRanges([...dateRanges, data].sort((a, b) => a.start_date.localeCompare(b.start_date)));
-      setNewRange({ range_type: '旺季', start_date: '', end_date: '', label: '' });
-    }
+    setDateRanges([...dateRanges, { id: newId(), ...newRange }].sort((a, b) => a.start_date.localeCompare(b.start_date)));
+    setNewRange({ range_type: '旺季', start_date: '', end_date: '', label: '' });
   };
 
-  const updateDateRange = async (id: string, field: string, value: any) => {
+  const updateDateRange = (id: string, field: string, value: any) => {
     setDateRanges(dateRanges.map((d) => (d.id === id ? { ...d, [field]: value } : d)));
-    await supabase.from('booking_date_ranges').update({ [field]: value }).eq('id', id);
   };
 
-  const deleteDateRange = async (id: string) => {
-    await supabase.from('booking_date_ranges').delete().eq('id', id);
+  const deleteDateRange = (id: string) => {
     setDateRanges(dateRanges.filter((d) => d.id !== id));
+    queueDelete('booking_date_ranges', id);
   };
 
   // ---------------- 測試報價 ----------------
@@ -179,26 +229,56 @@ export default function BookingManagement() {
       dateRanges: dateRanges.map((d) => ({ range_type: d.range_type, start_date: d.start_date, end_date: d.end_date })),
       roomTypes,
       roomPricing,
-      packages,
-      packagePricing,
-      extraPersonRules: extraRules,
+      packages: wholeHouseEnabled ? packages : [],
+      packagePricing: wholeHouseEnabled ? packagePricing : [],
+      extraPersonRules: wholeHouseEnabled ? extraRules : [],
       maxOccupancy,
     });
     setQuoteResult(result);
+  };
+
+  // ---------------- 自動報價總表 ----------------
+  const packageOccupancies = packages.map((p) => p.occupancy);
+  const matrixMin = packageOccupancies.length ? Math.min(...packageOccupancies) : 0;
+  const matrixMax = packageOccupancies.length ? Math.max(...packageOccupancies) : 0;
+  const matrixRows: number[] = [];
+  for (let h = matrixMin; h <= matrixMax; h++) matrixRows.push(h);
+
+  const computeMatrixCell = (headcount: number, tier: string) => {
+    const availableRooms = getAvailableIndividualRooms(tier, roomTypes, roomPricing);
+    const individualOption = availableRooms.length ? allocateIndividualRooms(headcount, availableRooms) : null;
+    const wholeHouseOption = selectWholeHousePackage(headcount, packages, packagePricing, extraRules, tier, matrixMax);
+    const recommendation = compareOptions(individualOption, wholeHouseOption);
+    const total = wholeHouseOption
+      ? wholeHouseOption.extraPersonOptions.length
+        ? Math.min(...wholeHouseOption.extraPersonOptions.map((o) => o.grandTotal))
+        : wholeHouseOption.basePrice
+      : null;
+    return { total, recommendation };
   };
 
   if (loading) return <div className="p-8 text-center text-gray-500">載入中...</div>;
 
   return (
     <div className="max-w-6xl mx-auto space-y-6">
-      <div className="bg-white p-6 rounded-xl shadow-sm border">
-        <h2 className="text-2xl font-bold text-gray-800 flex items-center gap-2">
-          <CalendarRange className="w-6 h-6 text-blue-600" />
-          訂房管理（Phase 1：資料設定）
-        </h2>
-        <p className="text-gray-500 mt-1">
-          維護房型、定價、包棟方案與日期區間。這些資料會用於報價引擎計算，尚未串接 LINE 對話（Phase 2 才會串接）。
-        </p>
+      <div className="bg-white p-6 rounded-xl shadow-sm border flex justify-between items-start gap-4">
+        <div>
+          <h2 className="text-2xl font-bold text-gray-800 flex items-center gap-2">
+            <CalendarRange className="w-6 h-6 text-blue-600" />
+            訂房管理（Phase 1：資料設定）
+          </h2>
+          <p className="text-gray-500 mt-1">
+            所有變更會先暫存在畫面上，按「儲存變更」才會真正寫入資料庫，避免不小心異動。
+          </p>
+        </div>
+        <button
+          onClick={handleSaveAll}
+          disabled={saving}
+          className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 disabled:opacity-50 whitespace-nowrap"
+        >
+          <Save className="w-4 h-4" />
+          {saving ? '儲存中...' : '儲存變更'}
+        </button>
       </div>
 
       {/* 房型與定價 */}
@@ -231,16 +311,16 @@ export default function BookingManagement() {
               {roomTypes.map((r) => (
                 <tr key={r.id}>
                   <td className="p-2">
-                    <input defaultValue={r.name} onBlur={(e) => updateRoomType(r.id, 'name', e.target.value)} className="w-28 px-2 py-1 border rounded" />
+                    <input value={r.name} onChange={(e) => updateRoomType(r.id, 'name', e.target.value)} className="w-28 px-2 py-1 border rounded" />
                   </td>
                   <td className="p-2">
-                    <input defaultValue={r.floor} onBlur={(e) => updateRoomType(r.id, 'floor', e.target.value)} className="w-16 px-2 py-1 border rounded" placeholder="2F" />
+                    <input value={r.floor} onChange={(e) => updateRoomType(r.id, 'floor', e.target.value)} className="w-16 px-2 py-1 border rounded" placeholder="2F" />
                   </td>
                   <td className="p-2">
-                    <input type="number" defaultValue={r.capacity} onBlur={(e) => updateRoomType(r.id, 'capacity', Number(e.target.value))} className="w-16 px-2 py-1 border rounded" />
+                    <input type="number" value={r.capacity} onChange={(e) => updateRoomType(r.id, 'capacity', Number(e.target.value))} className="w-16 px-2 py-1 border rounded" />
                   </td>
                   <td className="p-2">
-                    <input type="number" defaultValue={r.display_order} onBlur={(e) => updateRoomType(r.id, 'display_order', Number(e.target.value))} className="w-14 px-2 py-1 border rounded" />
+                    <input type="number" value={r.display_order} onChange={(e) => updateRoomType(r.id, 'display_order', Number(e.target.value))} className="w-14 px-2 py-1 border rounded" />
                   </td>
                   <td className="p-2 text-center">
                     <input type="checkbox" checked={r.is_active} onChange={(e) => updateRoomType(r.id, 'is_active', e.target.checked)} />
@@ -249,8 +329,8 @@ export default function BookingManagement() {
                     <td key={tier} className="p-2">
                       <input
                         type="number"
-                        defaultValue={getTierPrice(roomPricing, 'room_type_id', r.id, tier)}
-                        onBlur={(e) => upsertTierPrice('room_pricing', 'room_type_id', r.id, tier, e.target.value, roomPricing, setRoomPricing)}
+                        value={getTierPrice(roomPricing, 'room_type_id', r.id, tier)}
+                        onChange={(e) => setTierPrice(roomPricing, setRoomPricing, 'room_type_id', r.id, tier, e.target.value)}
                         className="w-20 px-2 py-1 border rounded"
                         placeholder="留空=不開放"
                       />
@@ -285,128 +365,211 @@ export default function BookingManagement() {
             <Users className="w-5 h-5 text-purple-600" />
             包棟方案與定價
           </h3>
-          <button onClick={addPackage} className="flex items-center gap-1 bg-purple-600 text-white px-3 py-1.5 rounded-lg text-sm hover:bg-purple-700">
-            <Plus className="w-4 h-4" /> 新增方案
-          </button>
+          <label className="flex items-center gap-2 text-sm text-gray-600 cursor-pointer">
+            啟用包棟方案
+            <input type="checkbox" checked={wholeHouseEnabled} onChange={(e) => setWholeHouseEnabled(e.target.checked)} className="w-4 h-4" />
+          </label>
         </div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-sm">
-            <thead className="bg-gray-50 border-b">
-              <tr className="text-gray-600">
-                <th className="py-3 px-4">動人數</th>
-                <th className="py-3 px-4">房型人數搭配（說明用）</th>
-                <th className="py-3 px-4">排序</th>
-                {PRICING_TIERS.map((t) => (
-                  <th key={t} className="py-3 px-4">{t}</th>
-                ))}
-                <th className="py-3 px-4"></th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100">
-              {packages.map((p) => (
-                <tr key={p.id}>
-                  <td className="p-2">
-                    <input type="number" defaultValue={p.occupancy} onBlur={(e) => updatePackage(p.id, 'occupancy', Number(e.target.value))} className="w-16 px-2 py-1 border rounded" />
-                  </td>
-                  <td className="p-2">
-                    <input defaultValue={p.room_combo} onBlur={(e) => updatePackage(p.id, 'room_combo', e.target.value)} className="w-32 px-2 py-1 border rounded" placeholder="4+4+2" />
-                  </td>
-                  <td className="p-2">
-                    <input type="number" defaultValue={p.display_order} onBlur={(e) => updatePackage(p.id, 'display_order', Number(e.target.value))} className="w-14 px-2 py-1 border rounded" />
-                  </td>
-                  {PRICING_TIERS.map((tier) => (
-                    <td key={tier} className="p-2">
-                      <input
-                        type="number"
-                        defaultValue={getTierPrice(packagePricing, 'package_id', p.id, tier)}
-                        onBlur={(e) => upsertTierPrice('whole_house_package_pricing', 'package_id', p.id, tier, e.target.value, packagePricing, setPackagePricing)}
-                        className="w-20 px-2 py-1 border rounded"
-                      />
-                    </td>
-                  ))}
-                  <td className="p-2">
-                    <button onClick={() => deletePackage(p.id)} className="p-1.5 text-red-500 hover:bg-red-50 rounded">
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  </td>
-                </tr>
-              ))}
-              {packages.length === 0 && (
-                <tr>
-                  <td colSpan={4 + PRICING_TIERS.length} className="py-10 text-center text-gray-400">
-                    尚未設定包棟方案，點右上角「新增方案」開始
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
 
-      {/* 加人規則 */}
-      <div className="bg-white rounded-xl shadow-sm border overflow-hidden">
-        <div className="flex justify-between items-center p-6 border-b">
-          <h3 className="text-lg font-bold text-gray-800">包棟超額加人規則</h3>
-          <button onClick={addExtraRule} className="flex items-center gap-1 bg-gray-700 text-white px-3 py-1.5 rounded-lg text-sm hover:bg-gray-800">
-            <Plus className="w-4 h-4" /> 新增規則
-          </button>
-        </div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-sm">
-            <thead className="bg-gray-50 border-b">
-              <tr className="text-gray-600">
-                <th className="py-3 px-4">類型</th>
-                <th className="py-3 px-4">顯示名稱</th>
-                <th className="py-3 px-4">定價 tier</th>
-                <th className="py-3 px-4">每人加價</th>
-                <th className="py-3 px-4"></th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100">
-              {extraRules.map((r) => (
-                <tr key={r.id}>
-                  <td className="p-2">
-                    <select value={r.rule_type} onChange={(e) => updateExtraRule(r.id, 'rule_type', e.target.value)} className="px-2 py-1 border rounded bg-white">
-                      {RULE_TYPE_OPTIONS.map((o) => (
-                        <option key={o.value} value={o.value}>{o.label}</option>
+        {!wholeHouseEnabled ? (
+          <p className="p-6 text-sm text-gray-400">已關閉包棟方案，顧客只會看到個別房型租房選項。開啟後可設定包棟人數級距與定價。</p>
+        ) : (
+          <>
+            <div className="p-6 border-b bg-gray-50 space-y-3">
+              <p className="text-sm font-medium text-gray-700">新增方案</p>
+              <div className="flex flex-wrap items-center gap-3">
+                <span className="text-sm text-gray-500">動人數</span>
+                <input
+                  type="number"
+                  value={newPackage.occupancy}
+                  onChange={(e) => applySuggestedCombo(Number(e.target.value))}
+                  className="w-20 px-2 py-1 border rounded"
+                />
+                <span className="text-xs text-gray-400 flex items-center gap-1">
+                  <Wand2 className="w-3.5 h-3.5" />
+                  已自動建議下方房型組合，可手動調整（已勾選容納：{newPackageCapacity} 人）
+                </span>
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
+                {roomTypes.filter((r) => r.is_active).map((r) => {
+                  const checked = newPackage.roomIds.includes(r.id);
+                  return (
+                    <label
+                      key={r.id}
+                      className={`flex items-center gap-2 px-3 py-2 border rounded-lg text-sm cursor-pointer ${checked ? 'bg-purple-50 border-purple-300' : 'border-gray-200'}`}
+                    >
+                      <input type="checkbox" checked={checked} onChange={() => toggleNewPackageRoom(r.id)} />
+                      {r.name}（{r.capacity}人）
+                    </label>
+                  );
+                })}
+              </div>
+              <button onClick={addPackage} className="flex items-center gap-1 bg-purple-600 text-white px-3 py-1.5 rounded-lg text-sm hover:bg-purple-700">
+                <Plus className="w-4 h-4" /> 新增這個方案
+              </button>
+            </div>
+
+            <div className="overflow-x-auto border-b">
+              <table className="w-full text-left text-sm">
+                <thead className="bg-gray-50 border-b">
+                  <tr className="text-gray-600">
+                    <th className="py-3 px-4">動人數</th>
+                    <th className="py-3 px-4">房型組合</th>
+                    {PRICING_TIERS.map((t) => (
+                      <th key={t} className="py-3 px-4">{t}</th>
+                    ))}
+                    <th className="py-3 px-4"></th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {packages.map((p) => (
+                    <tr key={p.id}>
+                      <td className="p-2">
+                        <input type="number" value={p.occupancy} onChange={(e) => setPackages(packages.map((x) => (x.id === p.id ? { ...x, occupancy: Number(e.target.value) } : x)))} className="w-16 px-2 py-1 border rounded" />
+                      </td>
+                      <td className="p-2 text-gray-600">{packageRoomNames(p.id)}</td>
+                      {PRICING_TIERS.map((tier) => (
+                        <td key={tier} className="p-2">
+                          <input
+                            type="number"
+                            value={getTierPrice(packagePricing, 'package_id', p.id, tier)}
+                            onChange={(e) => setTierPrice(packagePricing, setPackagePricing, 'package_id', p.id, tier, e.target.value)}
+                            className="w-20 px-2 py-1 border rounded"
+                          />
+                        </td>
                       ))}
-                    </select>
-                  </td>
-                  <td className="p-2">
-                    <input defaultValue={r.rule_label} onBlur={(e) => updateExtraRule(r.id, 'rule_label', e.target.value)} className="w-32 px-2 py-1 border rounded" placeholder="不加床、不多開房" />
-                  </td>
-                  <td className="p-2">
-                    <select value={r.tier} onChange={(e) => updateExtraRule(r.id, 'tier', e.target.value)} className="px-2 py-1 border rounded bg-white">
-                      {EXTRA_PERSON_TIERS.map((t) => (
-                        <option key={t} value={t}>{t}</option>
+                      <td className="p-2">
+                        <button onClick={() => deletePackage(p.id)} className="p-1.5 text-red-500 hover:bg-red-50 rounded">
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                  {packages.length === 0 && (
+                    <tr>
+                      <td colSpan={3 + PRICING_TIERS.length} className="py-10 text-center text-gray-400">
+                        尚未設定包棟方案
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="p-6 border-b">
+              <div className="flex justify-between items-center mb-3">
+                <p className="text-sm font-medium text-gray-700">超額加人規則</p>
+                <button onClick={addExtraRule} className="flex items-center gap-1 bg-gray-700 text-white px-3 py-1.5 rounded-lg text-sm hover:bg-gray-800">
+                  <Plus className="w-4 h-4" /> 新增規則
+                </button>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-sm">
+                  <thead className="bg-gray-50 border-b">
+                    <tr className="text-gray-600">
+                      <th className="py-2 px-3">類型</th>
+                      <th className="py-2 px-3">顯示名稱</th>
+                      <th className="py-2 px-3">tier</th>
+                      <th className="py-2 px-3">每人加價</th>
+                      <th className="py-2 px-3"></th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100">
+                    {extraRules.map((r) => (
+                      <tr key={r.id}>
+                        <td className="p-2">
+                          <select value={r.rule_type} onChange={(e) => updateExtraRule(r.id, 'rule_type', e.target.value)} className="px-2 py-1 border rounded bg-white">
+                            {RULE_TYPE_OPTIONS.map((o) => (
+                              <option key={o.value} value={o.value}>{o.label}</option>
+                            ))}
+                          </select>
+                        </td>
+                        <td className="p-2">
+                          <input value={r.rule_label} onChange={(e) => updateExtraRule(r.id, 'rule_label', e.target.value)} className="w-32 px-2 py-1 border rounded" placeholder="不加床、不多開房" />
+                        </td>
+                        <td className="p-2">
+                          <select value={r.tier} onChange={(e) => updateExtraRule(r.id, 'tier', e.target.value)} className="px-2 py-1 border rounded bg-white">
+                            {MATRIX_TIERS.map((t) => (
+                              <option key={t} value={t}>{t}</option>
+                            ))}
+                          </select>
+                        </td>
+                        <td className="p-2">
+                          <input
+                            type="number"
+                            value={r.price ?? ''}
+                            onChange={(e) => updateExtraRule(r.id, 'price', e.target.value === '' ? null : Number(e.target.value))}
+                            className="w-24 px-2 py-1 border rounded"
+                          />
+                        </td>
+                        <td className="p-2">
+                          <button onClick={() => deleteExtraRule(r.id)} className="p-1.5 text-red-500 hover:bg-red-50 rounded">
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                    {extraRules.length === 0 && (
+                      <tr>
+                        <td colSpan={5} className="py-6 text-center text-gray-400">
+                          尚未設定加人規則
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {matrixRows.length > 0 && (
+              <div className="p-6">
+                <p className="text-sm font-medium text-gray-700 flex items-center gap-2">
+                  <Calculator className="w-4 h-4 text-orange-600" />
+                  自動報價總表（唯讀，即時算好）
+                </p>
+                <p className="text-xs text-gray-400 mb-3">資料改了會自動重算，不用理解演算法，直接看數字對不對；「與個別租房比較」是自動算出來的省多少錢。</p>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-sm">
+                    <thead className="bg-gray-50 border-b">
+                      <tr className="text-gray-600">
+                        <th className="py-2 px-3">人數</th>
+                        {MATRIX_TIERS.map((t) => (
+                          <th key={t} className="py-2 px-3">{t}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100">
+                      {matrixRows.map((h) => (
+                        <tr key={h}>
+                          <td className="py-2 px-3 font-semibold">{h} 人</td>
+                          {MATRIX_TIERS.map((tier) => {
+                            const { total, recommendation } = computeMatrixCell(h, tier);
+                            return (
+                              <td key={tier} className="py-2 px-3">
+                                {total == null ? (
+                                  <span className="text-gray-300">—</span>
+                                ) : (
+                                  <div>
+                                    <div>NT$ {total.toLocaleString()}</div>
+                                    {recommendation.recommended === 'wholeHouse' && recommendation.savings ? (
+                                      <span className="inline-block mt-0.5 text-xs bg-green-50 text-green-700 px-2 py-0.5 rounded">
+                                        包棟省 NT$ {recommendation.savings.toLocaleString()}
+                                      </span>
+                                    ) : null}
+                                  </div>
+                                )}
+                              </td>
+                            );
+                          })}
+                        </tr>
                       ))}
-                    </select>
-                  </td>
-                  <td className="p-2">
-                    <input
-                      type="number"
-                      defaultValue={r.price ?? ''}
-                      onBlur={(e) => updateExtraRule(r.id, 'price', e.target.value === '' ? null : Number(e.target.value))}
-                      className="w-24 px-2 py-1 border rounded"
-                    />
-                  </td>
-                  <td className="p-2">
-                    <button onClick={() => deleteExtraRule(r.id)} className="p-1.5 text-red-500 hover:bg-red-50 rounded">
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  </td>
-                </tr>
-              ))}
-              {extraRules.length === 0 && (
-                <tr>
-                  <td colSpan={5} className="py-10 text-center text-gray-400">
-                    尚未設定加人規則
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </>
+        )}
       </div>
 
       {/* 日期區間 */}
@@ -464,13 +627,13 @@ export default function BookingManagement() {
                     </select>
                   </td>
                   <td className="p-2">
-                    <input type="date" defaultValue={d.start_date} onBlur={(e) => updateDateRange(d.id, 'start_date', e.target.value)} className="px-2 py-1 border rounded" />
+                    <input type="date" value={d.start_date} onChange={(e) => updateDateRange(d.id, 'start_date', e.target.value)} className="px-2 py-1 border rounded" />
                   </td>
                   <td className="p-2">
-                    <input type="date" defaultValue={d.end_date} onBlur={(e) => updateDateRange(d.id, 'end_date', e.target.value)} className="px-2 py-1 border rounded" />
+                    <input type="date" value={d.end_date} onChange={(e) => updateDateRange(d.id, 'end_date', e.target.value)} className="px-2 py-1 border rounded" />
                   </td>
                   <td className="p-2">
-                    <input defaultValue={d.label} onBlur={(e) => updateDateRange(d.id, 'label', e.target.value)} className="w-40 px-2 py-1 border rounded" placeholder="例如：端午連假" />
+                    <input value={d.label} onChange={(e) => updateDateRange(d.id, 'label', e.target.value)} className="w-40 px-2 py-1 border rounded" placeholder="例如：端午連假" />
                   </td>
                   <td className="p-2">
                     <button onClick={() => deleteDateRange(d.id)} className="p-1.5 text-red-500 hover:bg-red-50 rounded">
@@ -498,7 +661,7 @@ export default function BookingManagement() {
             <Calculator className="w-5 h-5 text-orange-600" />
             測試報價
           </h3>
-          <p className="text-sm text-gray-500 mt-1">用來驗證上面填的資料算出來的價格是否正確，尚未接上 LINE 對話。</p>
+          <p className="text-sm text-gray-500 mt-1">用畫面上目前（含未儲存）的資料試算，方便您調整完馬上驗證，不用先儲存。</p>
         </div>
         <div className="p-6 flex flex-wrap gap-3 items-end border-b">
           <div>
@@ -518,6 +681,11 @@ export default function BookingManagement() {
           <div className="p-6 space-y-4">
             <p className="text-sm text-gray-600">
               判定 tier：<span className="font-bold text-gray-800">{quoteResult.tier}</span>
+              {quoteResult.recommendation.recommended && quoteResult.recommendation.savings ? (
+                <span className="ml-3 text-xs bg-green-50 text-green-700 px-2 py-0.5 rounded">
+                  推薦{quoteResult.recommendation.recommended === 'wholeHouse' ? '包棟' : '個別租房'}，可省 NT$ {quoteResult.recommendation.savings.toLocaleString()}
+                </span>
+              ) : null}
             </p>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -545,12 +713,14 @@ export default function BookingManagement() {
 
               <div className="border rounded-lg p-4">
                 <h4 className="font-semibold text-gray-700 mb-2">包棟</h4>
-                {!quoteResult.wholeHouseOption ? (
+                {!wholeHouseEnabled ? (
+                  <p className="text-sm text-gray-400">目前已關閉包棟方案</p>
+                ) : !quoteResult.wholeHouseOption ? (
                   <p className="text-sm text-gray-400">沒有對應的包棟報價資料，或超過最大接待人數</p>
                 ) : (
                   <div className="text-sm space-y-1">
                     <div className="flex justify-between">
-                      <span>方案基礎（{quoteResult.wholeHouseOption.package.occupancy}人：{quoteResult.wholeHouseOption.package.room_combo}）</span>
+                      <span>方案基礎（{quoteResult.wholeHouseOption.package.occupancy}人：{packageRoomNames(quoteResult.wholeHouseOption.package.id)}）</span>
                       <span>NT$ {quoteResult.wholeHouseOption.basePrice}</span>
                     </div>
                     {quoteResult.wholeHouseOption.extraPersons > 0 && (
