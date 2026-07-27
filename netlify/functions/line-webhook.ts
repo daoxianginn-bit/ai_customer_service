@@ -109,7 +109,11 @@ export const handler: Handler = async (event) => {
       // 5. 呼叫 AI（先比對 Google 試算表知識庫意圖，命中則 AI 潤飾固定答案；未命中才走一般 QA）
       if (!settings.is_ai_enabled) continue;
 
+      // 帶入最近的對話紀錄，避免 AI 每則訊息都當成獨立問題，答非所問（例如顧客回「好」卻不知道在回應什麼）
+      const history = loadConversationHistory(userState);
+
       let aiResult = '';
+      let aiError = false;
       try {
         let knowledgeRows: KnowledgeRow[] = [];
         if (settings.knowledge_sheet_id) {
@@ -140,15 +144,20 @@ export const handler: Handler = async (event) => {
           aiResult = await answerWithPolish(settings, matched.answer);
         } else {
           const faqContext = buildSheetFaqContext(knowledgeRows);
-          if (settings.active_ai === 'gpt') aiResult = (await callGPT(settings, userMessage, faqContext)).text;
-          else aiResult = await callGemini(settings, userMessage, faqContext);
+          if (settings.active_ai === 'gpt') aiResult = (await callGPT(settings, userMessage, faqContext, undefined, history)).text;
+          else aiResult = await callGemini(settings, userMessage, faqContext, undefined, history);
         }
       } catch (e: any) {
         aiResult = `❌ AI 錯誤：\n${e.message}`;
+        aiError = true;
       }
 
       if (aiResult) {
         await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: aiResult });
+        // AI 錯誤訊息不存入歷史，避免污染後續對話上下文
+        if (!aiError) {
+          await saveConversationHistory(userId, history, userMessage, aiResult);
+        }
       }
     }
   }
@@ -346,12 +355,60 @@ async function answerWithPolish(settings: any, rawAnswer: string): Promise<strin
 }
 
 // ========================================================================
+// 對話記憶：讓 AI 知道同一位顧客最近說過什麼，避免每則訊息都被當成獨立問題
+// （例如顧客回「好」卻答非所問）。只在一般問答（Tier 2）帶入，
+// Tier 1/1.5 的 answerWithPolish 與語意路由呼叫是單次任務，不需要對話歷史。
+// ========================================================================
+
+const HISTORY_TTL_MS = 30 * 60 * 1000; // 超過 30 分鐘沒互動，視為新話題，不再帶入舊歷史
+const HISTORY_MAX_TURNS = 6; // 最多帶入/保留最近 6 則訊息（約 3 輪對話），兼顧上下文與 API 成本
+
+interface HistoryEntry {
+  role: 'user' | 'assistant';
+  content: string;
+  ts: number;
+}
+
+function loadConversationHistory(userState: any): HistoryEntry[] {
+  if (!userState?.conversation_history) return [];
+  let parsed: HistoryEntry[] = [];
+  try {
+    parsed = JSON.parse(userState.conversation_history);
+  } catch {
+    return [];
+  }
+  const now = Date.now();
+  return (parsed || []).filter((h) => h && now - h.ts < HISTORY_TTL_MS).slice(-HISTORY_MAX_TURNS);
+}
+
+async function saveConversationHistory(userId: string, priorHistory: HistoryEntry[], userMessage: string, aiResult: string) {
+  const now = Date.now();
+  const updated: HistoryEntry[] = [
+    ...priorHistory,
+    { role: 'user', content: userMessage, ts: now },
+    { role: 'assistant', content: aiResult, ts: now },
+  ].slice(-HISTORY_MAX_TURNS);
+
+  try {
+    await supabase.from('user_states').upsert({ line_user_id: userId, conversation_history: JSON.stringify(updated) });
+  } catch (e: any) {
+    console.error('[History] save failed:', e.message);
+  }
+}
+
+function formatHistoryText(history: HistoryEntry[]): string {
+  if (!history.length) return '';
+  return history.map((h) => `${h.role === 'user' ? 'User' : 'Assistant'}: ${h.content}`).join('\n') + '\n';
+}
+
+// ========================================================================
 // AI 呼叫 (GPT / Gemini)
 // extraKnowledge：一般 QA fallback 時，把試算表整理成 FAQ 塞進去補強知識庫
 // overrideSystemPrompt：意圖命中後的「限定改寫」模式，會完全取代 system_prompt/參考文字/檔案內容
+// history：最近幾輪對話紀錄，只在一般問答（未帶 overrideSystemPrompt）時使用
 // ========================================================================
 
-async function callGPT(settings: any, currentMessage: string, extraKnowledge?: string, overrideSystemPrompt?: string) {
+async function callGPT(settings: any, currentMessage: string, extraKnowledge?: string, overrideSystemPrompt?: string, history: HistoryEntry[] = []) {
   const isGPT5 = settings.gpt_model_name.includes('gpt-5');
 
   let systemContent: string;
@@ -368,7 +425,7 @@ async function callGPT(settings: any, currentMessage: string, extraKnowledge?: s
   if (isGPT5) {
     const body: any = {
       model: settings.gpt_model_name,
-      input: `System: ${systemContent}\nUser: ${currentMessage}`,
+      input: `System: ${systemContent}\n${formatHistoryText(history)}User: ${currentMessage}`,
       reasoning: { effort: settings.gpt_reasoning_effort || 'none' },
       text: { verbosity: settings.gpt_verbosity || 'medium' }
     };
@@ -383,7 +440,11 @@ async function callGPT(settings: any, currentMessage: string, extraKnowledge?: s
   }
 
   const openai = new OpenAI({ apiKey: settings.gpt_api_key });
-  const messages: any[] = [{ role: 'system', content: systemContent }, { role: 'user', content: currentMessage }];
+  const messages: any[] = [
+    { role: 'system', content: systemContent },
+    ...history.map((h) => ({ role: h.role, content: h.content })),
+    { role: 'user', content: currentMessage },
+  ];
   const params: any = { model: settings.gpt_model_name, messages };
   if (settings.gpt_model_name.startsWith('o1') || settings.gpt_model_name.startsWith('o3')) {
     params.max_completion_tokens = settings.gpt_max_tokens;
@@ -395,7 +456,7 @@ async function callGPT(settings: any, currentMessage: string, extraKnowledge?: s
   return { text: completion.choices[0].message.content || '' };
 }
 
-async function callGemini(settings: any, currentMessage: string, extraKnowledge?: string, overrideSystemPrompt?: string) {
+async function callGemini(settings: any, currentMessage: string, extraKnowledge?: string, overrideSystemPrompt?: string, history: HistoryEntry[] = []) {
   if (overrideSystemPrompt) {
     const contents = [{ role: 'user', parts: [{ text: overrideSystemPrompt }, { text: `User: ${currentMessage}` }] }];
     return callGeminiRaw(settings, contents);
@@ -411,10 +472,11 @@ async function callGemini(settings: any, currentMessage: string, extraKnowledge?
       }
     } catch (e) {}
   }
+  const historyContents = history.map((h) => ({ role: h.role === 'user' ? 'user' : 'model', parts: [{ text: h.content }] }));
   const userParts: any[] = [{ text: `System: ${settings.system_prompt}\n${buildKnowledgeSection(extraKnowledge)}Reference: ${settings.reference_text}` }];
   if (filePart) userParts.push(filePart);
   userParts.push({ text: `User: ${currentMessage}` });
-  const contents = [{ role: 'user', parts: userParts }];
+  const contents = [...historyContents, { role: 'user', parts: userParts }];
   return callGeminiRaw(settings, contents);
 }
 

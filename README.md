@@ -170,7 +170,8 @@ CREATE TABLE IF NOT EXISTS public.user_states (
     is_human_mode BOOLEAN DEFAULT false,
     last_human_interaction TIMESTAMP WITH TIME ZONE,
     last_ai_reset_at TIMESTAMP WITH TIME ZONE,
-    last_event_id TEXT -- LINE 去重機制關鍵
+    last_event_id TEXT, -- LINE 去重機制關鍵
+    conversation_history TEXT DEFAULT '[]' -- AI 對話記憶：最近幾輪對話紀錄（JSON 陣列）
 );
 
 -- [3] 事件去重表
@@ -197,12 +198,17 @@ CREATE POLICY "Allow Auth Update" ON storage.objects FOR UPDATE TO authenticated
 CREATE POLICY "Allow Auth Delete" ON storage.objects FOR DELETE TO authenticated USING (bucket_id = 'knowledge_base');
 ```
 
-> **既有專案升級提醒**：若您先前已建立過資料庫，上方的 `CREATE TABLE IF NOT EXISTS` 不會自動補上新欄位，請額外執行以下語句以支援「Google 試算表知識庫」與「AI 略過重複回覆」功能：
+> **既有專案升級提醒**：若您先前已建立過資料庫，上方的 `CREATE TABLE IF NOT EXISTS` 不會自動補上新欄位，請額外執行以下語句以支援「Google 試算表知識庫」「AI 略過重複回覆」與「AI 對話記憶」功能：
 > ```sql
 > ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS knowledge_sheet_id TEXT DEFAULT '';
 > ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS knowledge_sheet_gid TEXT DEFAULT '0';
 > ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS skip_ai_keywords TEXT DEFAULT '';
+> ALTER TABLE public.user_states ADD COLUMN IF NOT EXISTS conversation_history TEXT DEFAULT '[]';
 > ```
+
+### 🧠 AI 對話記憶
+
+AI 會記住每位顧客最近約 3 輪（6 則）的對話內容，超過 30 分鐘沒有新訊息則視為新話題、不再帶入舊的對話紀錄。這讓顧客可以像「有哪幾種房型？」→「好，麻煩介紹」這樣自然接續發問，AI 也能正確理解上下文，不會答非所問。此功能僅記錄「AI 回覆」的對話，轉真人客服期間的訊息不會計入。
 
 ---
 

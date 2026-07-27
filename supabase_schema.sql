@@ -44,7 +44,8 @@ CREATE TABLE IF NOT EXISTS public.user_states (
     nickname TEXT,
     is_human_mode BOOLEAN DEFAULT false,
     last_human_interaction TIMESTAMP WITH TIME ZONE,
-    last_ai_reset_at TIMESTAMP WITH TIME ZONE -- 新增：記錄手動重設時間
+    last_ai_reset_at TIMESTAMP WITH TIME ZONE, -- 新增：記錄手動重設時間
+    conversation_history TEXT DEFAULT '[]' -- AI 對話記憶：最近幾輪對話紀錄（JSON 陣列）
 );
 
 -- 3. 啟用 RLS
@@ -78,3 +79,4 @@ CREATE POLICY "Allow Auth Delete" ON storage.objects FOR DELETE TO authenticated
 ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS knowledge_sheet_id TEXT DEFAULT '';
 ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS knowledge_sheet_gid TEXT DEFAULT '0';
 ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS skip_ai_keywords TEXT DEFAULT '';
+ALTER TABLE public.user_states ADD COLUMN IF NOT EXISTS conversation_history TEXT DEFAULT '[]';
