@@ -11,6 +11,7 @@ export interface RoomType {
   name: string;
   floor: string;
   capacity: number;
+  max_extra_persons: number; // 最多可加人數（加床，不加開房），0=不支援加人
   display_order: number;
   is_active: boolean;
 }
@@ -19,6 +20,12 @@ export interface RoomPricing {
   room_type_id: string;
   tier: string;
   price: number | null;
+}
+
+export interface RoomExtraPersonPricing {
+  room_type_id: string;
+  tier: string;
+  price: number | null; // 該房型「加人不加房」每人加價
 }
 
 export interface WholeHousePackage {
@@ -75,24 +82,27 @@ export function resolvePricingTier(date: Date, dateRanges: DateRange[]): string 
   return day === 5 || day === 6 ? TIER_SEMI_HOLIDAY : TIER_WEEKDAY;
 }
 
-export type AvailableRoom = RoomType & { price: number };
+export type AvailableRoom = RoomType & { price: number; extraPersonPrice: number | null };
 
 /**
  * 找出某 tier 目前開放個別租房的房型。
  * 該 tier 沒有價格資料（room_pricing 沒有這筆、或 price 是 null）＝不開放個別租房，只能包棟。
  * 這是資料驅動設計：後台補上該 tier 的價格，系統就會自動開放個別租房，不需要另外維護開放日曆。
+ * 一併帶入該房型「加人不加房」的加價（沒有資料就是 null，代表這個 tier 該房型不能加人）。
  */
 export function getAvailableIndividualRooms(
   tier: string,
   roomTypes: RoomType[],
-  roomPricing: RoomPricing[]
+  roomPricing: RoomPricing[],
+  roomExtraPersonPricing: RoomExtraPersonPricing[] = []
 ): AvailableRoom[] {
   const rooms: AvailableRoom[] = [];
   for (const r of roomTypes) {
     if (!r.is_active) continue;
     const pricing = roomPricing.find((p) => p.room_type_id === r.id && p.tier === tier);
     if (pricing && pricing.price != null) {
-      rooms.push({ ...r, price: pricing.price });
+      const extraPricing = roomExtraPersonPricing.find((p) => p.room_type_id === r.id && p.tier === tier);
+      rooms.push({ ...r, price: pricing.price, extraPersonPrice: extraPricing?.price ?? null });
     }
   }
   return rooms.sort((a, b) => b.capacity - a.capacity || a.display_order - b.display_order);
@@ -127,7 +137,7 @@ export interface RoomAllocationResult {
 }
 
 /**
- * 分配房型並計算價格：只能用在已依 tier 篩出「有定價」的房型清單（AvailableRoom，含 price）。
+ * 分配房型並計算價格（「加開房」選項）：只能用在已依 tier 篩出「有定價」的房型清單（AvailableRoom，含 price）。
  * 資料驅動、房型增減不需要改邏輯，會自動反映在分配結果。
  */
 export function allocateIndividualRooms(headcount: number, availableRooms: AvailableRoom[]): RoomAllocationResult {
@@ -138,6 +148,66 @@ export function allocateIndividualRooms(headcount: number, availableRooms: Avail
     totalCapacity: assigned.reduce((s, r) => s + r.capacity, 0),
     totalPrice: assigned.reduce((s, r) => s + r.price, 0),
   };
+}
+
+export interface ExtraPersonRoomAssignment {
+  room: AvailableRoom;
+  extraCount: number;
+  extraPrice: number; // 這間房加人的總加價（extraCount × 每人加價）
+}
+
+export interface IndividualExtraPersonOption {
+  baseRooms: AvailableRoom[]; // 用到的房間（比「加開房」選項少一間）
+  extraAssignments: ExtraPersonRoomAssignment[];
+  totalPrice: number;
+}
+
+/**
+ * 「加人不加房」選項：把「加開房」選項裡最後（最小）一間房拿掉，
+ * 改把差額人數以加人方式塞進其餘已選房間（優先用加人單價最低的房間），
+ * 若已選房間的加人名額不夠塞下差額，代表這個選項不成立（回傳 null）。
+ * 只嘗試拿掉最後一間房，不做窮舉最佳化——對應「一堆人剛好多 1、2 位」這種最常見的情境。
+ */
+function tryExtraPersonAlternative(headcount: number, openRoomRooms: AvailableRoom[]): IndividualExtraPersonOption | null {
+  if (openRoomRooms.length < 2) return null; // 只有一間房就沒有「少開一間」的空間
+
+  const baseRooms = openRoomRooms.slice(0, -1);
+  const covered = baseRooms.reduce((s, r) => s + r.capacity, 0);
+  const shortfall = headcount - covered;
+  if (shortfall <= 0) return null;
+
+  const candidates = baseRooms
+    .filter((r) => r.extraPersonPrice != null && r.max_extra_persons > 0)
+    .sort((a, b) => (a.extraPersonPrice as number) - (b.extraPersonPrice as number));
+
+  let remaining = shortfall;
+  const extraAssignments: ExtraPersonRoomAssignment[] = [];
+  for (const room of candidates) {
+    if (remaining <= 0) break;
+    const take = Math.min(room.max_extra_persons, remaining);
+    if (take <= 0) continue;
+    extraAssignments.push({ room, extraCount: take, extraPrice: (room.extraPersonPrice as number) * take });
+    remaining -= take;
+  }
+  if (remaining > 0) return null; // 加人名額不足以覆蓋差額，這個選項不成立
+
+  const baseTotal = baseRooms.reduce((s, r) => s + r.price, 0);
+  const extraTotal = extraAssignments.reduce((s, a) => s + a.extraPrice, 0);
+  return { baseRooms, extraAssignments, totalPrice: baseTotal + extraTotal };
+}
+
+export interface IndividualOptions {
+  openRoomOption: RoomAllocationResult; // 加開房
+  extraPersonOption: IndividualExtraPersonOption | null; // 加人不加房，null＝不適用（房間數不足 2 間，或加人名額不夠）
+}
+
+/**
+ * 統整個別租房的兩種選項：加開房、加人不加房，交給對話流程呈現給顧客選擇。
+ */
+export function computeIndividualOptions(headcount: number, availableRooms: AvailableRoom[]): IndividualOptions {
+  const openRoomOption = allocateIndividualRooms(headcount, availableRooms);
+  const extraPersonOption = openRoomOption.success ? tryExtraPersonAlternative(headcount, openRoomOption.rooms) : null;
+  return { openRoomOption, extraPersonOption };
 }
 
 /**
@@ -217,6 +287,7 @@ export interface QuoteInput {
   dateRanges: DateRange[];
   roomTypes: RoomType[];
   roomPricing: RoomPricing[];
+  roomExtraPersonPricing: RoomExtraPersonPricing[];
   packages: WholeHousePackage[];
   packagePricing: WholeHousePackagePricing[];
   extraPersonRules: ExtraPersonRule[];
@@ -228,16 +299,25 @@ export interface Recommendation {
   savings: number | null; // 選擇 recommended 那個選項，比另一個選項省下多少錢
 }
 
+function cheapestIndividualTotal(individualOption: IndividualOptions | null): number | null {
+  if (!individualOption) return null;
+  const openTotal = individualOption.openRoomOption.success ? individualOption.openRoomOption.totalPrice : null;
+  const extraTotal = individualOption.extraPersonOption?.totalPrice ?? null;
+  if (openTotal == null) return extraTotal;
+  if (extraTotal == null) return openTotal;
+  return Math.min(openTotal, extraTotal);
+}
+
 /**
  * 自動比較「個別租房」與「包棟」兩種選項，算出比較划算的一方跟省下多少錢。
  * 不需要管理者設定任何比較規則——單純的資料比較，兩邊都沒資料時無法比較。
- * 包棟若有多種加人選項（不多開房／多開房），比較時取最便宜的那個。
+ * 個別租房若有加開房／加人不加房兩種選項，包棟若有多種加人選項，比較時都取各自最便宜的那個。
  */
 export function compareOptions(
-  individualOption: RoomAllocationResult | null,
+  individualOption: IndividualOptions | null,
   wholeHouseOption: WholeHouseQuote | null
 ): Recommendation {
-  const individualTotal = individualOption?.success ? individualOption.totalPrice : null;
+  const individualTotal = cheapestIndividualTotal(individualOption);
   const wholeHouseTotal = wholeHouseOption
     ? wholeHouseOption.extraPersonOptions.length
       ? Math.min(...wholeHouseOption.extraPersonOptions.map((o) => o.grandTotal))
@@ -258,7 +338,7 @@ export interface QuoteResult {
   date: Date;
   tier: string;
   headcount: number;
-  individualOption: RoomAllocationResult | null; // null＝該 tier 不開放個別租房，只能包棟
+  individualOption: IndividualOptions | null; // null＝該 tier 不開放個別租房，只能包棟
   wholeHouseOption: WholeHouseQuote | null; // null＝沒有對應的包棟報價資料，或超過最大接待人數
   recommendation: Recommendation;
 }
@@ -269,8 +349,8 @@ export interface QuoteResult {
  */
 export function computeQuote(input: QuoteInput): QuoteResult {
   const tier = resolvePricingTier(input.date, input.dateRanges);
-  const availableRooms = getAvailableIndividualRooms(tier, input.roomTypes, input.roomPricing);
-  const individualOption = availableRooms.length ? allocateIndividualRooms(input.headcount, availableRooms) : null;
+  const availableRooms = getAvailableIndividualRooms(tier, input.roomTypes, input.roomPricing, input.roomExtraPersonPricing);
+  const individualOption = availableRooms.length ? computeIndividualOptions(input.headcount, availableRooms) : null;
   const wholeHouseOption = selectWholeHousePackage(
     input.headcount,
     input.packages,

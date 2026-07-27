@@ -5,7 +5,7 @@ import {
   computeQuote,
   suggestRoomCombo,
   getAvailableIndividualRooms,
-  allocateIndividualRooms,
+  computeIndividualOptions,
   selectWholeHousePackage,
   compareOptions,
   QuoteResult,
@@ -55,6 +55,7 @@ export default function BookingManagement() {
 
   const [roomTypes, setRoomTypes] = useState<any[]>([]);
   const [roomPricing, setRoomPricing] = useState<any[]>([]);
+  const [roomExtraPersonPricing, setRoomExtraPersonPricing] = useState<any[]>([]);
   const [packages, setPackages] = useState<any[]>([]);
   const [packagePricing, setPackagePricing] = useState<any[]>([]);
   const [packageRooms, setPackageRooms] = useState<any[]>([]);
@@ -76,10 +77,11 @@ export default function BookingManagement() {
 
   const fetchAll = async () => {
     setLoading(true);
-    const [st, rt, rp, wp, wpp, wpr, epr, dr] = await Promise.all([
+    const [st, rt, rp, rep, wp, wpp, wpr, epr, dr] = await Promise.all([
       supabase.from('settings').select('id, booking_whole_house_enabled').single(),
       supabase.from('room_types').select('*').order('display_order'),
       supabase.from('room_pricing').select('*'),
+      supabase.from('room_extra_person_pricing').select('*'),
       supabase.from('whole_house_packages').select('*').order('display_order'),
       supabase.from('whole_house_package_pricing').select('*'),
       supabase.from('whole_house_package_rooms').select('*'),
@@ -90,6 +92,7 @@ export default function BookingManagement() {
     setWholeHouseEnabled(st.data?.booking_whole_house_enabled ?? true);
     setRoomTypes(rt.data || []);
     setRoomPricing(rp.data || []);
+    setRoomExtraPersonPricing(rep.data || []);
     setPackages(wp.data || []);
     setPackagePricing(wpp.data || []);
     setPackageRooms(wpr.data || []);
@@ -111,6 +114,7 @@ export default function BookingManagement() {
       }
       if (roomTypes.length) await supabase.from('room_types').upsert(roomTypes);
       if (roomPricing.length) await supabase.from('room_pricing').upsert(roomPricing);
+      if (roomExtraPersonPricing.length) await supabase.from('room_extra_person_pricing').upsert(roomExtraPersonPricing);
       if (packages.length) await supabase.from('whole_house_packages').upsert(packages);
       if (packagePricing.length) await supabase.from('whole_house_package_pricing').upsert(packagePricing);
       if (packageRooms.length) await supabase.from('whole_house_package_rooms').upsert(packageRooms);
@@ -132,7 +136,7 @@ export default function BookingManagement() {
 
   // ---------------- 房型 ----------------
   const addRoomType = () => {
-    setRoomTypes([...roomTypes, { id: newId(), name: '新房型', floor: '', capacity: 2, display_order: roomTypes.length, is_active: true }]);
+    setRoomTypes([...roomTypes, { id: newId(), name: '新房型', floor: '', capacity: 2, max_extra_persons: 0, display_order: roomTypes.length, is_active: true }]);
   };
 
   const updateRoomType = (id: string, field: string, value: any) => {
@@ -143,6 +147,7 @@ export default function BookingManagement() {
     if (!confirm('確定要刪除這個房型嗎？相關定價與包棟房型組合也會一併刪除。')) return;
     setRoomTypes(roomTypes.filter((r) => r.id !== id));
     setRoomPricing(roomPricing.filter((p) => p.room_type_id !== id));
+    setRoomExtraPersonPricing(roomExtraPersonPricing.filter((p) => p.room_type_id !== id));
     setPackageRooms(packageRooms.filter((pr) => pr.room_type_id !== id));
     queueDelete('room_types', id);
   };
@@ -229,6 +234,7 @@ export default function BookingManagement() {
       dateRanges: dateRanges.map((d) => ({ range_type: d.range_type, start_date: d.start_date, end_date: d.end_date })),
       roomTypes,
       roomPricing,
+      roomExtraPersonPricing,
       packages: wholeHouseEnabled ? packages : [],
       packagePricing: wholeHouseEnabled ? packagePricing : [],
       extraPersonRules: wholeHouseEnabled ? extraRules : [],
@@ -245,8 +251,8 @@ export default function BookingManagement() {
   for (let h = matrixMin; h <= matrixMax; h++) matrixRows.push(h);
 
   const computeMatrixCell = (headcount: number, tier: string) => {
-    const availableRooms = getAvailableIndividualRooms(tier, roomTypes, roomPricing);
-    const individualOption = availableRooms.length ? allocateIndividualRooms(headcount, availableRooms) : null;
+    const availableRooms = getAvailableIndividualRooms(tier, roomTypes, roomPricing, roomExtraPersonPricing);
+    const individualOption = availableRooms.length ? computeIndividualOptions(headcount, availableRooms) : null;
     const wholeHouseOption = selectWholeHousePackage(headcount, packages, packagePricing, extraRules, tier, matrixMax);
     const recommendation = compareOptions(individualOption, wholeHouseOption);
     const total = wholeHouseOption
@@ -299,6 +305,7 @@ export default function BookingManagement() {
                 <th className="py-3 px-4">房型名稱</th>
                 <th className="py-3 px-4">樓層</th>
                 <th className="py-3 px-4">容納人數</th>
+                <th className="py-3 px-4">最多加人</th>
                 <th className="py-3 px-4">排序</th>
                 <th className="py-3 px-4">啟用</th>
                 {PRICING_TIERS.map((t) => (
@@ -318,6 +325,9 @@ export default function BookingManagement() {
                   </td>
                   <td className="p-2">
                     <input type="number" value={r.capacity} onChange={(e) => updateRoomType(r.id, 'capacity', Number(e.target.value))} className="w-16 px-2 py-1 border rounded" />
+                  </td>
+                  <td className="p-2">
+                    <input type="number" min={0} value={r.max_extra_persons ?? 0} onChange={(e) => updateRoomType(r.id, 'max_extra_persons', Number(e.target.value))} className="w-16 px-2 py-1 border rounded" title="0＝不支援加人" />
                   </td>
                   <td className="p-2">
                     <input type="number" value={r.display_order} onChange={(e) => updateRoomType(r.id, 'display_order', Number(e.target.value))} className="w-14 px-2 py-1 border rounded" />
@@ -345,7 +355,7 @@ export default function BookingManagement() {
               ))}
               {roomTypes.length === 0 && (
                 <tr>
-                  <td colSpan={6 + PRICING_TIERS.length} className="py-10 text-center text-gray-400">
+                  <td colSpan={7 + PRICING_TIERS.length} className="py-10 text-center text-gray-400">
                     尚未設定房型，點右上角「新增房型」開始
                   </td>
                 </tr>
@@ -354,8 +364,49 @@ export default function BookingManagement() {
           </table>
         </div>
         <p className="text-xs text-gray-400 px-6 py-3 border-t">
-          某個 tier 留空＝該 tier 不開放個別租房（顧客只能選包棟）。之後要開放，把價格填上即可，不用額外設定日期區間。
+          某個 tier 留空＝該 tier 不開放個別租房（顧客只能選包棟）。之後要開放，把價格填上即可，不用額外設定日期區間。「最多加人」設 0 代表該房型不支援加人不加房，人數超過容納人數時只能開另一間房。
         </p>
+
+        <div className="p-6 border-t">
+          <p className="text-sm font-medium text-gray-700 mb-1">加人不加房：每人加價</p>
+          <p className="text-xs text-gray-400 mb-3">只有「最多加人」大於 0 的房型才會出現在這裡。例如某人數剛好多 1、2 位時，系統會優先試算「塞進已選房間加價」跟「多開一間房」兩種選項，讓顧客選。</p>
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-sm">
+              <thead className="bg-gray-50 border-b">
+                <tr className="text-gray-600">
+                  <th className="py-2 px-3">房型</th>
+                  {MATRIX_TIERS.map((t) => (
+                    <th key={t} className="py-2 px-3">{t}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {roomTypes.filter((r) => (r.max_extra_persons ?? 0) > 0).map((r) => (
+                  <tr key={r.id}>
+                    <td className="py-2 px-3 font-medium">{r.name}（最多加 {r.max_extra_persons} 人）</td>
+                    {MATRIX_TIERS.map((tier) => (
+                      <td key={tier} className="p-2">
+                        <input
+                          type="number"
+                          value={getTierPrice(roomExtraPersonPricing, 'room_type_id', r.id, tier)}
+                          onChange={(e) => setTierPrice(roomExtraPersonPricing, setRoomExtraPersonPricing, 'room_type_id', r.id, tier, e.target.value)}
+                          className="w-20 px-2 py-1 border rounded"
+                        />
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+                {roomTypes.filter((r) => (r.max_extra_persons ?? 0) > 0).length === 0 && (
+                  <tr>
+                    <td colSpan={1 + MATRIX_TIERS.length} className="py-6 text-center text-gray-400">
+                      目前沒有房型設定「最多加人」大於 0
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
       </div>
 
       {/* 包棟方案與定價 */}
@@ -693,20 +744,51 @@ export default function BookingManagement() {
                 <h4 className="font-semibold text-gray-700 mb-2">個別租房</h4>
                 {!quoteResult.individualOption ? (
                   <p className="text-sm text-gray-400">此 tier 不開放個別租房，只能包棟</p>
-                ) : !quoteResult.individualOption.success ? (
-                  <p className="text-sm text-red-500">目前房型總容量不足以容納 {quoteResult.headcount} 人</p>
                 ) : (
-                  <div className="text-sm space-y-1">
-                    {quoteResult.individualOption.rooms.map((r, i) => (
-                      <div key={i} className="flex justify-between">
-                        <span>{r.name}（{r.floor} / {r.capacity}人）</span>
-                        <span>NT$ {r.price}</span>
-                      </div>
-                    ))}
-                    <div className="flex justify-between font-bold border-t pt-1 mt-1">
-                      <span>總計</span>
-                      <span>NT$ {quoteResult.individualOption.totalPrice}</span>
+                  <div className="space-y-4">
+                    <div>
+                      <p className="text-xs font-medium text-gray-500 mb-1">方案一：加開房</p>
+                      {!quoteResult.individualOption.openRoomOption.success ? (
+                        <p className="text-sm text-red-500">目前房型總容量不足以容納 {quoteResult.headcount} 人</p>
+                      ) : (
+                        <div className="text-sm space-y-1">
+                          {quoteResult.individualOption.openRoomOption.rooms.map((r, i) => (
+                            <div key={i} className="flex justify-between">
+                              <span>{r.name}（{r.floor} / {r.capacity}人）</span>
+                              <span>NT$ {r.price}</span>
+                            </div>
+                          ))}
+                          <div className="flex justify-between font-bold border-t pt-1 mt-1">
+                            <span>總計</span>
+                            <span>NT$ {quoteResult.individualOption.openRoomOption.totalPrice}</span>
+                          </div>
+                        </div>
+                      )}
                     </div>
+
+                    {quoteResult.individualOption.extraPersonOption && (
+                      <div className="border-t pt-3">
+                        <p className="text-xs font-medium text-gray-500 mb-1">方案二：加人不加房</p>
+                        <div className="text-sm space-y-1">
+                          {quoteResult.individualOption.extraPersonOption.baseRooms.map((r, i) => (
+                            <div key={i} className="flex justify-between">
+                              <span>{r.name}（{r.floor} / {r.capacity}人）</span>
+                              <span>NT$ {r.price}</span>
+                            </div>
+                          ))}
+                          {quoteResult.individualOption.extraPersonOption.extraAssignments.map((a, i) => (
+                            <div key={i} className="flex justify-between text-gray-600">
+                              <span>　{a.room.name} 加 {a.extraCount} 人</span>
+                              <span>NT$ {a.extraPrice}</span>
+                            </div>
+                          ))}
+                          <div className="flex justify-between font-bold border-t pt-1 mt-1">
+                            <span>總計</span>
+                            <span>NT$ {quoteResult.individualOption.extraPersonOption.totalPrice}</span>
+                          </div>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>

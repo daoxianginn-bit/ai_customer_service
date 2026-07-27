@@ -216,6 +216,7 @@ AI 會記住每位顧客最近約 3 輪（6 則）的對話內容，超過 30 �
 新增「訂房管理」後台頁面（側邊選單），用來維護：
 
 *   **房型與定價**：房型名稱、樓層、容納人數，以及各定價 tier（平日／小假日／連假／旺季／定價）的價格。某個 tier 留空＝該 tier 不開放個別租房（只能包棟），之後把價格填上即可自動開放，不需要另外維護「開放日期」。
+*   **個別租房「加人不加房」**：每個房型可設定「最多加人數」與各 tier 的每人加價（例如 4 人房最多加 1 人變 5 人）。報價時系統會同時算出「加開房」與「加人不加房」兩種方案（例如 5 人時，是要多開一間小房間、還是在已選的房間加床加價），兩種都呈現讓顧客選，不會自動幫顧客決定。
 *   **包棟方案與定價（可開關）**：頁面上有「啟用包棟方案」開關，不需要包棟功能的民宿可以直接關掉、整塊設定收起來。啟用後，只要輸入動人數，系統會用跟「個別租房」同一套演算法**自動建議房型組合**（打勾即可，不用手打「4+4+2」這種文字），加人規則就在同一張卡片下方，不用來回切換。
 *   **自動報價總表**：包棟方案卡片最下方會即時算出每個人數、每個 tier 的最終價格，並自動跟「個別租房」比較、標示「包棟省 NT$X」，不需要自己心算或一組一組用測試報價確認。
 *   **旺季／連假日期區間**：完全由後台「訂房管理」頁面新增/編輯/刪除；一般日期（不在旺季/連假）純粹依星期幾判斷平日(日~四)/小假日(五~六)。
@@ -225,7 +226,7 @@ AI 會記住每位顧客最近約 3 輪（6 則）的對話內容，超過 30 �
 
 目前報價計算完全由程式碼確定性運算（`src/lib/bookingEngine.ts`），AI 不參與金額計算，避免報價出錯。**這個階段尚未串接 LINE「我要訂房」對話流程與訂單／訂金／退款管理，屬於後續 Phase 2～4 的範圍。**
 
-完整資料表結構請參考 [`supabase_schema.sql`](./supabase_schema.sql) 中的 `room_types`、`room_pricing`、`whole_house_packages`、`whole_house_package_pricing`、`whole_house_package_rooms`、`whole_house_extra_person_rules`、`booking_date_ranges`。若您先前已建立過資料庫，請執行該檔案第 7 節的升級用 SQL。
+完整資料表結構請參考 [`supabase_schema.sql`](./supabase_schema.sql) 中的 `room_types`、`room_pricing`、`room_extra_person_pricing`、`whole_house_packages`、`whole_house_package_pricing`、`whole_house_package_rooms`、`whole_house_extra_person_rules`、`booking_date_ranges`。若您先前已建立過資料庫，請執行該檔案第 7 節的升級用 SQL。
 
 ---
 

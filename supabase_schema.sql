@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS public.room_types (
     name TEXT NOT NULL,
     floor TEXT DEFAULT '',
     capacity INTEGER NOT NULL,
+    max_extra_persons INTEGER DEFAULT 0, -- 該房型最多可加人數（加床，不加開房），0=不支援加人
     display_order INTEGER DEFAULT 0, -- 房型分配演算法會依此順序優先選用（例如同容納人數時優先低樓層）
     is_active BOOLEAN DEFAULT true,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
@@ -70,6 +71,16 @@ CREATE TABLE IF NOT EXISTS public.room_pricing (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     room_type_id UUID NOT NULL REFERENCES public.room_types(id) ON DELETE CASCADE,
     tier TEXT NOT NULL, -- 例如：平日／小假日／連假／旺季／定價（純文字，可自由擴充）
+    price NUMERIC,
+    UNIQUE (room_type_id, tier)
+);
+
+-- 個別租房「加人不加房」的每人加價（例如 4 人房加 1 人變 5 人的加價），
+-- 只有在該房型 max_extra_persons > 0 時才會被引擎採用。
+CREATE TABLE IF NOT EXISTS public.room_extra_person_pricing (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    room_type_id UUID NOT NULL REFERENCES public.room_types(id) ON DELETE CASCADE,
+    tier TEXT NOT NULL,
     price NUMERIC,
     UNIQUE (room_type_id, tier)
 );
@@ -124,6 +135,7 @@ ALTER TABLE public.settings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.user_states ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.room_types ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.room_pricing ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.room_extra_person_pricing ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.whole_house_packages ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.whole_house_package_pricing ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.whole_house_package_rooms ENABLE ROW LEVEL SECURITY;
@@ -139,6 +151,8 @@ DROP POLICY IF EXISTS "Allow Auth Access Room Types" ON public.room_types;
 CREATE POLICY "Allow Auth Access Room Types" ON public.room_types FOR ALL USING (auth.role() = 'authenticated');
 DROP POLICY IF EXISTS "Allow Auth Access Room Pricing" ON public.room_pricing;
 CREATE POLICY "Allow Auth Access Room Pricing" ON public.room_pricing FOR ALL USING (auth.role() = 'authenticated');
+DROP POLICY IF EXISTS "Allow Auth Access Room Extra Person Pricing" ON public.room_extra_person_pricing;
+CREATE POLICY "Allow Auth Access Room Extra Person Pricing" ON public.room_extra_person_pricing FOR ALL USING (auth.role() = 'authenticated');
 DROP POLICY IF EXISTS "Allow Auth Access WH Packages" ON public.whole_house_packages;
 CREATE POLICY "Allow Auth Access WH Packages" ON public.whole_house_packages FOR ALL USING (auth.role() = 'authenticated');
 DROP POLICY IF EXISTS "Allow Auth Access WH Package Pricing" ON public.whole_house_package_pricing;
@@ -189,18 +203,29 @@ ALTER TABLE public.booking_date_ranges DROP COLUMN IF EXISTS source;
 ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS booking_whole_house_enabled BOOLEAN DEFAULT true;
 -- 包棟房型組合改用真實房型關聯（whole_house_package_rooms），取代手打文字欄位：
 ALTER TABLE public.whole_house_packages DROP COLUMN IF EXISTS room_combo;
+-- 個別租房支援「加人不加房」：
+ALTER TABLE public.room_types ADD COLUMN IF NOT EXISTS max_extra_persons INTEGER DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS public.room_types (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name TEXT NOT NULL,
     floor TEXT DEFAULT '',
     capacity INTEGER NOT NULL,
+    max_extra_persons INTEGER DEFAULT 0,
     display_order INTEGER DEFAULT 0,
     is_active BOOLEAN DEFAULT true,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS public.room_pricing (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    room_type_id UUID NOT NULL REFERENCES public.room_types(id) ON DELETE CASCADE,
+    tier TEXT NOT NULL,
+    price NUMERIC,
+    UNIQUE (room_type_id, tier)
+);
+
+CREATE TABLE IF NOT EXISTS public.room_extra_person_pricing (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     room_type_id UUID NOT NULL REFERENCES public.room_types(id) ON DELETE CASCADE,
     tier TEXT NOT NULL,
@@ -250,6 +275,7 @@ CREATE TABLE IF NOT EXISTS public.booking_date_ranges (
 
 ALTER TABLE public.room_types ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.room_pricing ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.room_extra_person_pricing ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.whole_house_packages ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.whole_house_package_pricing ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.whole_house_package_rooms ENABLE ROW LEVEL SECURITY;
@@ -263,6 +289,9 @@ BEGIN
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'room_pricing' AND policyname = 'Allow Auth Access Room Pricing') THEN
         CREATE POLICY "Allow Auth Access Room Pricing" ON public.room_pricing FOR ALL USING (auth.role() = 'authenticated');
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'room_extra_person_pricing' AND policyname = 'Allow Auth Access Room Extra Person Pricing') THEN
+        CREATE POLICY "Allow Auth Access Room Extra Person Pricing" ON public.room_extra_person_pricing FOR ALL USING (auth.role() = 'authenticated');
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'whole_house_packages' AND policyname = 'Allow Auth Access WH Packages') THEN
         CREATE POLICY "Allow Auth Access WH Packages" ON public.whole_house_packages FOR ALL USING (auth.role() = 'authenticated');
