@@ -140,6 +140,17 @@ export function allocateIndividualRooms(headcount: number, availableRooms: Avail
   };
 }
 
+/**
+ * 自動建議包棟方案的房型組合：用同一套貪婪演算法，但對象是全部啟用中的房型（不受 tier 定價限制），
+ * 純粹用來在後台「新增包棟方案」時，依動人數自動勾好建議組合，管理者仍可手動調整勾選。
+ */
+export function suggestRoomCombo(occupancy: number, roomTypes: RoomType[]): RoomType[] {
+  const pool = roomTypes
+    .filter((r) => r.is_active)
+    .sort((a, b) => b.capacity - a.capacity || a.display_order - b.display_order);
+  return greedyPack(occupancy, pool).items;
+}
+
 export interface ExtraPersonOption {
   rule_type: string;
   rule_label: string;
