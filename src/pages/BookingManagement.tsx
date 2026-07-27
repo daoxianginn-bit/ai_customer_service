@@ -1,9 +1,8 @@
 import { useState, useEffect } from 'react';
 import { supabase } from '../lib/supabase';
-import { Plus, Trash2, CalendarRange, Home, Users, Calculator, Save, Wand2 } from 'lucide-react';
+import { Plus, Trash2, CalendarRange, Home, Users, Calculator, Save } from 'lucide-react';
 import {
   computeQuote,
-  suggestRoomCombo,
   getAvailableIndividualRooms,
   allocateIndividualRooms,
   selectWholeHousePackage,
@@ -57,14 +56,12 @@ export default function BookingManagement() {
   const [roomPricing, setRoomPricing] = useState<any[]>([]);
   const [packages, setPackages] = useState<any[]>([]);
   const [packagePricing, setPackagePricing] = useState<any[]>([]);
-  const [packageRooms, setPackageRooms] = useState<any[]>([]);
   const [extraRules, setExtraRules] = useState<any[]>([]);
   const [dateRanges, setDateRanges] = useState<any[]>([]);
 
   const [pendingDeletes, setPendingDeletes] = useState<{ table: string; id: string }[]>([]);
 
   const [newRange, setNewRange] = useState({ range_type: '旺季', start_date: '', end_date: '', label: '' });
-  const [newPackage, setNewPackage] = useState<{ occupancy: number; roomIds: string[] }>({ occupancy: 10, roomIds: [] });
 
   const [quoteDate, setQuoteDate] = useState('');
   const [quoteHeadcount, setQuoteHeadcount] = useState(4);
@@ -76,13 +73,12 @@ export default function BookingManagement() {
 
   const fetchAll = async () => {
     setLoading(true);
-    const [st, rt, rp, wp, wpp, wpr, epr, dr] = await Promise.all([
+    const [st, rt, rp, wp, wpp, epr, dr] = await Promise.all([
       supabase.from('settings').select('id, booking_whole_house_enabled').single(),
       supabase.from('room_types').select('*').order('display_order'),
       supabase.from('room_pricing').select('*'),
       supabase.from('whole_house_packages').select('*').order('display_order'),
       supabase.from('whole_house_package_pricing').select('*'),
-      supabase.from('whole_house_package_rooms').select('*'),
       supabase.from('whole_house_extra_person_rules').select('*'),
       supabase.from('booking_date_ranges').select('*').order('start_date'),
     ]);
@@ -92,11 +88,9 @@ export default function BookingManagement() {
     setRoomPricing(rp.data || []);
     setPackages(wp.data || []);
     setPackagePricing(wpp.data || []);
-    setPackageRooms(wpr.data || []);
     setExtraRules(epr.data || []);
     setDateRanges(dr.data || []);
     setPendingDeletes([]);
-    setNewPackage({ occupancy: 10, roomIds: [] });
     setLoading(false);
   };
 
@@ -113,7 +107,6 @@ export default function BookingManagement() {
       if (roomPricing.length) await supabase.from('room_pricing').upsert(roomPricing);
       if (packages.length) await supabase.from('whole_house_packages').upsert(packages);
       if (packagePricing.length) await supabase.from('whole_house_package_pricing').upsert(packagePricing);
-      if (packageRooms.length) await supabase.from('whole_house_package_rooms').upsert(packageRooms);
       if (extraRules.length) await supabase.from('whole_house_extra_person_rules').upsert(extraRules);
       if (dateRanges.length) await supabase.from('booking_date_ranges').upsert(dateRanges);
 
@@ -140,46 +133,24 @@ export default function BookingManagement() {
   };
 
   const deleteRoomType = (id: string) => {
-    if (!confirm('確定要刪除這個房型嗎？相關定價與包棟房型組合也會一併刪除。')) return;
+    if (!confirm('確定要刪除這個房型嗎？相關定價也會一併刪除。')) return;
     setRoomTypes(roomTypes.filter((r) => r.id !== id));
     setRoomPricing(roomPricing.filter((p) => p.room_type_id !== id));
-    setPackageRooms(packageRooms.filter((pr) => pr.room_type_id !== id));
     queueDelete('room_types', id);
   };
 
   // ---------------- 包棟方案 ----------------
-  const applySuggestedCombo = (occupancy: number) => {
-    const suggested = suggestRoomCombo(occupancy, roomTypes);
-    setNewPackage({ occupancy, roomIds: suggested.map((r) => r.id) });
-  };
-
-  const toggleNewPackageRoom = (roomId: string) => {
-    setNewPackage((prev) => ({
-      ...prev,
-      roomIds: prev.roomIds.includes(roomId) ? prev.roomIds.filter((id) => id !== roomId) : [...prev.roomIds, roomId],
-    }));
-  };
-
-  const newPackageCapacity = newPackage.roomIds.reduce((s, id) => s + (roomTypes.find((r) => r.id === id)?.capacity || 0), 0);
-
+  // 包棟＝整棟都算在內，價格只跟人數級距有關，不需要指定房型組合。
+  // 「用哪幾間房」只在個別租房（非包棟）情境下才有意義，由房型與定價那張表的分配演算法處理。
   const addPackage = () => {
-    const pkgId = newId();
-    setPackages([...packages, { id: pkgId, occupancy: newPackage.occupancy, display_order: packages.length }]);
-    setPackageRooms([...packageRooms, ...newPackage.roomIds.map((roomId) => ({ id: newId(), package_id: pkgId, room_type_id: roomId }))]);
-    setNewPackage({ occupancy: 10, roomIds: [] });
+    setPackages([...packages, { id: newId(), occupancy: 10, display_order: packages.length }]);
   };
 
   const deletePackage = (id: string) => {
-    if (!confirm('確定要刪除這個包棟方案嗎？相關定價與房型組合也會一併刪除。')) return;
+    if (!confirm('確定要刪除這個包棟方案嗎？相關定價也會一併刪除。')) return;
     setPackages(packages.filter((p) => p.id !== id));
     setPackagePricing(packagePricing.filter((p) => p.package_id !== id));
-    setPackageRooms(packageRooms.filter((pr) => pr.package_id !== id));
     queueDelete('whole_house_packages', id);
-  };
-
-  const packageRoomNames = (packageId: string): string => {
-    const roomIds = packageRooms.filter((pr) => pr.package_id === packageId).map((pr) => pr.room_type_id);
-    return roomTypes.filter((r) => roomIds.includes(r.id)).map((r) => r.name).join('、') || '（未設定房型）';
   };
 
   // ---------------- 加人規則 ----------------
@@ -375,38 +346,11 @@ export default function BookingManagement() {
           <p className="p-6 text-sm text-gray-400">已關閉包棟方案，顧客只會看到個別房型租房選項。開啟後可設定包棟人數級距與定價。</p>
         ) : (
           <>
-            <div className="p-6 border-b bg-gray-50 space-y-3">
-              <p className="text-sm font-medium text-gray-700">新增方案</p>
-              <div className="flex flex-wrap items-center gap-3">
-                <span className="text-sm text-gray-500">動人數</span>
-                <input
-                  type="number"
-                  value={newPackage.occupancy}
-                  onChange={(e) => applySuggestedCombo(Number(e.target.value))}
-                  className="w-20 px-2 py-1 border rounded"
-                />
-                <span className="text-xs text-gray-400 flex items-center gap-1">
-                  <Wand2 className="w-3.5 h-3.5" />
-                  已自動建議下方房型組合，可手動調整（已勾選容納：{newPackageCapacity} 人）
-                </span>
-              </div>
-              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
-                {roomTypes.filter((r) => r.is_active).map((r) => {
-                  const checked = newPackage.roomIds.includes(r.id);
-                  return (
-                    <label
-                      key={r.id}
-                      className={`flex items-center gap-2 px-3 py-2 border rounded-lg text-sm cursor-pointer ${checked ? 'bg-purple-50 border-purple-300' : 'border-gray-200'}`}
-                    >
-                      <input type="checkbox" checked={checked} onChange={() => toggleNewPackageRoom(r.id)} />
-                      {r.name}（{r.capacity}人）
-                    </label>
-                  );
-                })}
-              </div>
+            <div className="p-6 border-b bg-gray-50">
               <button onClick={addPackage} className="flex items-center gap-1 bg-purple-600 text-white px-3 py-1.5 rounded-lg text-sm hover:bg-purple-700">
-                <Plus className="w-4 h-4" /> 新增這個方案
+                <Plus className="w-4 h-4" /> 新增方案
               </button>
+              <p className="text-xs text-gray-400 mt-2">包棟是整棟都算在內，不用指定房型，只需要設定動人數與各 tier 價格。</p>
             </div>
 
             <div className="overflow-x-auto border-b">
@@ -414,7 +358,6 @@ export default function BookingManagement() {
                 <thead className="bg-gray-50 border-b">
                   <tr className="text-gray-600">
                     <th className="py-3 px-4">動人數</th>
-                    <th className="py-3 px-4">房型組合</th>
                     {PRICING_TIERS.map((t) => (
                       <th key={t} className="py-3 px-4">{t}</th>
                     ))}
@@ -427,7 +370,6 @@ export default function BookingManagement() {
                       <td className="p-2">
                         <input type="number" value={p.occupancy} onChange={(e) => setPackages(packages.map((x) => (x.id === p.id ? { ...x, occupancy: Number(e.target.value) } : x)))} className="w-16 px-2 py-1 border rounded" />
                       </td>
-                      <td className="p-2 text-gray-600">{packageRoomNames(p.id)}</td>
                       {PRICING_TIERS.map((tier) => (
                         <td key={tier} className="p-2">
                           <input
@@ -447,7 +389,7 @@ export default function BookingManagement() {
                   ))}
                   {packages.length === 0 && (
                     <tr>
-                      <td colSpan={3 + PRICING_TIERS.length} className="py-10 text-center text-gray-400">
+                      <td colSpan={2 + PRICING_TIERS.length} className="py-10 text-center text-gray-400">
                         尚未設定包棟方案
                       </td>
                     </tr>
@@ -720,7 +662,7 @@ export default function BookingManagement() {
                 ) : (
                   <div className="text-sm space-y-1">
                     <div className="flex justify-between">
-                      <span>方案基礎（{quoteResult.wholeHouseOption.package.occupancy}人：{packageRoomNames(quoteResult.wholeHouseOption.package.id)}）</span>
+                      <span>方案基礎（{quoteResult.wholeHouseOption.package.occupancy}人）</span>
                       <span>NT$ {quoteResult.wholeHouseOption.basePrice}</span>
                     </div>
                     {quoteResult.wholeHouseOption.extraPersons > 0 && (
