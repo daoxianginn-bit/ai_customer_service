@@ -31,7 +31,12 @@ CREATE TABLE IF NOT EXISTS public.settings (
     -- 已由 LINE 官方帳號原生「自動回應/圖文選單」處理過的訊息，AI 收到會直接略過不重複回覆
     skip_ai_keywords TEXT DEFAULT '',
     -- 是否開放包棟方案（關閉時後台不顯示包棟相關設定，對話流程也不會詢問是否包棟）
-    booking_whole_house_enabled BOOLEAN DEFAULT true
+    booking_whole_house_enabled BOOLEAN DEFAULT true,
+    -- 連住折扣（固定金額，全部 tier 統一，只套用在第二晚（含）以後）
+    consecutive_stay_discount_cleaning NUMERIC DEFAULT 0, -- 需打掃，每晚折抵金額
+    consecutive_stay_discount_no_cleaning NUMERIC DEFAULT 0, -- 無需打掃，每晚折抵金額
+    -- 訂房對話流程（Phase 2）：訊息包含這些關鍵字就開始/重置訂房會話狀態
+    booking_trigger_keywords TEXT DEFAULT '我要訂房,訂房'
 );
 
 -- 去重記錄表 (防止重試導致狀態回滾)
@@ -47,7 +52,8 @@ CREATE TABLE IF NOT EXISTS public.user_states (
     is_human_mode BOOLEAN DEFAULT false,
     last_human_interaction TIMESTAMP WITH TIME ZONE,
     last_ai_reset_at TIMESTAMP WITH TIME ZONE, -- 新增：記錄手動重設時間
-    conversation_history TEXT DEFAULT '[]' -- AI 對話記憶：最近幾輪對話紀錄（JSON 陣列）
+    conversation_history TEXT DEFAULT '[]', -- AI 對話記憶：最近幾輪對話紀錄（JSON 陣列）
+    booking_session TEXT -- 訂房對話流程（Phase 2）：進行中的訂房詢問狀態（JSON），null＝目前沒有進行中的詢問
 );
 
 -- 2.5 訂房功能（Phase 1：房型／定價／包棟方案／加人規則／日期區間）
@@ -120,6 +126,14 @@ CREATE TABLE IF NOT EXISTS public.whole_house_extra_person_rules (
     UNIQUE (rule_type, tier)
 );
 
+-- 促銷方案（名稱 + 折扣%，只套用在多晚報價的第一晚），可重複使用
+CREATE TABLE IF NOT EXISTS public.promotions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL,
+    discount_percent NUMERIC NOT NULL DEFAULT 0, -- 例如 15 代表折扣 15%
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+);
+
 -- 日期區間（旺季／連假），完全由後台維護介面新增/編輯/刪除
 CREATE TABLE IF NOT EXISTS public.booking_date_ranges (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -140,6 +154,7 @@ ALTER TABLE public.whole_house_packages ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.whole_house_package_pricing ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.whole_house_package_rooms ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.whole_house_extra_person_rules ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.promotions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.booking_date_ranges ENABLE ROW LEVEL SECURITY;
 
 -- 用 DROP + CREATE 讓整份腳本可重複執行（不管是全新資料庫，或先前已跑過任何一版）都不會因為 policy 已存在而報錯
@@ -161,6 +176,8 @@ DROP POLICY IF EXISTS "Allow Auth Access WH Package Rooms" ON public.whole_house
 CREATE POLICY "Allow Auth Access WH Package Rooms" ON public.whole_house_package_rooms FOR ALL USING (auth.role() = 'authenticated');
 DROP POLICY IF EXISTS "Allow Auth Access WH Extra Person Rules" ON public.whole_house_extra_person_rules;
 CREATE POLICY "Allow Auth Access WH Extra Person Rules" ON public.whole_house_extra_person_rules FOR ALL USING (auth.role() = 'authenticated');
+DROP POLICY IF EXISTS "Allow Auth Access Promotions" ON public.promotions;
+CREATE POLICY "Allow Auth Access Promotions" ON public.promotions FOR ALL USING (auth.role() = 'authenticated');
 DROP POLICY IF EXISTS "Allow Auth Access Booking Date Ranges" ON public.booking_date_ranges;
 CREATE POLICY "Allow Auth Access Booking Date Ranges" ON public.booking_date_ranges FOR ALL USING (auth.role() = 'authenticated');
 
@@ -205,6 +222,19 @@ ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS booking_whole_house_enabled
 ALTER TABLE public.whole_house_packages DROP COLUMN IF EXISTS room_combo;
 -- 個別租房支援「加人不加房」：
 ALTER TABLE public.room_types ADD COLUMN IF NOT EXISTS max_extra_persons INTEGER DEFAULT 0;
+-- 連住折扣（固定金額，全部 tier 統一）：
+ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS consecutive_stay_discount_cleaning NUMERIC DEFAULT 0;
+ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS consecutive_stay_discount_no_cleaning NUMERIC DEFAULT 0;
+-- 訂房對話流程（Phase 2）：
+ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS booking_trigger_keywords TEXT DEFAULT '我要訂房,訂房';
+ALTER TABLE public.user_states ADD COLUMN IF NOT EXISTS booking_session TEXT;
+
+CREATE TABLE IF NOT EXISTS public.promotions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL,
+    discount_percent NUMERIC NOT NULL DEFAULT 0,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+);
 
 CREATE TABLE IF NOT EXISTS public.room_types (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -280,6 +310,7 @@ ALTER TABLE public.whole_house_packages ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.whole_house_package_pricing ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.whole_house_package_rooms ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.whole_house_extra_person_rules ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.promotions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.booking_date_ranges ENABLE ROW LEVEL SECURITY;
 
 DO $$
@@ -304,6 +335,9 @@ BEGIN
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'whole_house_extra_person_rules' AND policyname = 'Allow Auth Access WH Extra Person Rules') THEN
         CREATE POLICY "Allow Auth Access WH Extra Person Rules" ON public.whole_house_extra_person_rules FOR ALL USING (auth.role() = 'authenticated');
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'promotions' AND policyname = 'Allow Auth Access Promotions') THEN
+        CREATE POLICY "Allow Auth Access Promotions" ON public.promotions FOR ALL USING (auth.role() = 'authenticated');
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'booking_date_ranges' AND policyname = 'Allow Auth Access Booking Date Ranges') THEN
         CREATE POLICY "Allow Auth Access Booking Date Ranges" ON public.booking_date_ranges FOR ALL USING (auth.role() = 'authenticated');

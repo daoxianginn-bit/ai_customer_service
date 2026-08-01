@@ -4,6 +4,7 @@ import { createClient } from '@supabase/supabase-js';
 import OpenAI from 'openai';
 import fetch from 'node-fetch';
 import crypto from 'crypto';
+import { computeMultiNightQuote } from '../../src/lib/bookingEngine';
 
 const supabase = createClient(
   process.env.SUPABASE_URL || '',
@@ -51,16 +52,8 @@ export const handler: Handler = async (event) => {
       const { data: userState } = await supabase.from('user_states').select('*').eq('line_user_id', userId).single();
 
       // 3. 關鍵字偵測 (轉真人客服)
-      const handoverKeywords = settings.handover_keywords
-        ?.replace(/，/g, ',')
-        .split(',')
-        .map((k: string) => k.trim())
-        .filter((k: string) => k.length > 0) || [];
-
-      const matchedKeyword = handoverKeywords.find((k: string) => {
-        if (k.length === 1) return userMessage === k;
-        return userMessage.includes(k);
-      });
+      const handoverKeywords = parseCsvKeywords(settings.handover_keywords);
+      const matchedKeyword = matchKeyword(userMessage, handoverKeywords);
 
       if (matchedKeyword) {
         console.log(`[Handover] Triggered by keyword: ${matchedKeyword}`);
@@ -87,14 +80,10 @@ export const handler: Handler = async (event) => {
 
       // 3.5 已由 LINE 官方帳號原生「自動回應/圖文選單」處理過的訊息，AI 直接略過不重複回覆
       // （避免同一則訊息同時觸發 LINE 原生自動回應 + 本系統 AI 回覆，造成重複甚至矛盾的兩則訊息）
-      const skipAiKeywords = settings.skip_ai_keywords
-        ?.replace(/，/g, ',')
-        .split(',')
-        .map((k: string) => k.trim())
-        .filter((k: string) => k.length > 0) || [];
-
-      if (skipAiKeywords.includes(userMessage)) {
-        console.log(`[SkipAI] Message already handled by LINE native auto-reply: ${userMessage}`);
+      const skipAiKeywords = parseCsvKeywords(settings.skip_ai_keywords);
+      const matchedSkipKeyword = matchKeyword(userMessage, skipAiKeywords);
+      if (matchedSkipKeyword) {
+        console.log(`[SkipAI] Message already handled by LINE native auto-reply: ${matchedSkipKeyword}`);
         continue;
       }
 
@@ -104,6 +93,25 @@ export const handler: Handler = async (event) => {
         const timeoutMs = (settings.handover_timeout_minutes || 30) * 60 * 1000;
         if (new Date().getTime() - lastInteraction < timeoutMs) continue;
         await supabase.from('user_states').update({ is_human_mode: false }).eq('line_user_id', userId);
+      }
+
+      // 4.5 訂房對話流程（Phase 2）：偵測「我要訂房」觸發詞、或延續進行中的訂房詢問。
+      // 日期/晚數/金額一律由 computeMultiNightQuote() 確定性計算，AI 只負責從對話中擷取欄位與潤飾回覆文字，
+      // 避免像一般問答那樣讓 AI 自己算晚數/金額，容易算錯（例如把 7/30 入住 7/31 退房誤算成兩晚）。
+      if (settings.is_ai_enabled) {
+        const bookingTriggerKeywords = parseCsvKeywords(settings.booking_trigger_keywords || '我要訂房,訂房');
+        const isBookingTrigger = !!matchKeyword(userMessage, bookingTriggerKeywords);
+        const existingBookingSession = loadBookingSession(userState);
+        const activeBookingSession = existingBookingSession || (isBookingTrigger ? { collected: { ...EMPTY_BOOKING_FIELDS }, updatedAt: Date.now() } : null);
+
+        if (activeBookingSession) {
+          try {
+            await handleBookingFlow(lineClient, lineEvent, settings, userId, userMessage, activeBookingSession);
+          } catch (e: any) {
+            console.error('[Booking] flow failed:', e.message);
+          }
+          continue;
+        }
       }
 
       // 5. 呼叫 AI（先比對 Google 試算表知識庫意圖，命中則 AI 潤飾固定答案；未命中才走一般 QA）
@@ -163,6 +171,264 @@ export const handler: Handler = async (event) => {
   }
   return { statusCode: 200, body: 'OK' };
 };
+
+// ========================================================================
+// 關鍵字比對共用工具
+// ========================================================================
+
+function parseCsvKeywords(raw: string | null | undefined): string[] {
+  return (raw || '')
+    .replace(/，/g, ',')
+    .split(',')
+    .map((k) => k.trim())
+    .filter((k) => k.length > 0);
+}
+
+function matchKeyword(userMessage: string, keywords: string[]): string | undefined {
+  return keywords.find((k) => (k.length === 1 ? userMessage === k : userMessage.includes(k)));
+}
+
+// ========================================================================
+// 訂房對話流程（Phase 2）
+// 設計原則：日期判斷、晚數計算、金額計算全部交給 computeMultiNightQuote()（純程式碼），
+// AI 只負責①從對話中擷取結構化欄位、②把算好的報價結果包裝成口語化文字，
+// 絕對不讓 AI 自己計算晚數或金額——這正是實測發現「7/30 入住 7/31 退房被算成兩晚」的root cause。
+// ========================================================================
+
+const BOOKING_SESSION_TTL_MS = 30 * 60 * 1000; // 30 分鐘沒有新回覆，視為放棄這次詢問（與對話記憶 TTL 一致）
+
+interface BookingCollectedFields {
+  checkin_date: string | null; // YYYY-MM-DD
+  checkout_date: string | null; // YYYY-MM-DD
+  headcount: number | null;
+  whole_house: boolean | null;
+  kids: boolean | null;
+  special_request: boolean | null;
+}
+
+interface BookingSession {
+  collected: BookingCollectedFields;
+  updatedAt: number;
+}
+
+const EMPTY_BOOKING_FIELDS: BookingCollectedFields = {
+  checkin_date: null,
+  checkout_date: null,
+  headcount: null,
+  whole_house: null,
+  kids: null,
+  special_request: null,
+};
+
+const BOOKING_FIELD_LABELS: Record<string, string> = {
+  checkin_date: '入住日期',
+  checkout_date: '退房日期',
+  headcount: '入住人數',
+  whole_house: '是否包棟',
+};
+
+function loadBookingSession(userState: any): BookingSession | null {
+  if (!userState?.booking_session) return null;
+  try {
+    const parsed = JSON.parse(userState.booking_session);
+    if (!parsed || Date.now() - parsed.updatedAt > BOOKING_SESSION_TTL_MS) return null;
+    return { collected: { ...EMPTY_BOOKING_FIELDS, ...parsed.collected }, updatedAt: parsed.updatedAt };
+  } catch {
+    return null;
+  }
+}
+
+async function saveBookingSession(userId: string, collected: BookingCollectedFields) {
+  try {
+    await supabase.from('user_states').upsert({ line_user_id: userId, booking_session: JSON.stringify({ collected, updatedAt: Date.now() }) });
+  } catch (e: any) {
+    console.error('[Booking] save session failed:', e.message);
+  }
+}
+
+async function clearBookingSession(userId: string) {
+  try {
+    await supabase.from('user_states').update({ booking_session: null }).eq('line_user_id', userId);
+  } catch (e: any) {
+    console.error('[Booking] clear session failed:', e.message);
+  }
+}
+
+// 只做欄位擷取，不作答、不計算，避免跟一般問答一樣被誤導去自由發揮
+function buildBookingExtractionPrompt(todayIso: string, collected: BookingCollectedFields): string {
+  return (
+    `你是專門負責「訂房資訊擷取」的助手，這個步驟不需要回答問題、不需要計算晚數或金額，只需要從對話中擷取欄位。\n` +
+    `今天的日期是 ${todayIso}。\n\n` +
+    `需要擷取的欄位（JSON 格式）：\n` +
+    `- checkin_date：入住日期，轉換成 YYYY-MM-DD。若使用者只寫月/日（如「7/30」），用今天日期推算最合理的年份：日期還沒過就用今年，已經過了就用明年。\n` +
+    `- checkout_date：退房日期，格式同上。\n` +
+    `- headcount：入住人數，純數字。\n` +
+    `- whole_house：是否包棟，true/false。\n` +
+    `- kids：是否有小朋友同行，true/false。\n` +
+    `- special_request：是否有特殊需求，true/false。\n\n` +
+    `目前已經確認的欄位：${JSON.stringify(collected)}\n\n` +
+    `規則：\n` +
+    `1. 只回傳一個 JSON 物件，包含以上 6 個欄位，不要加任何其他文字、不要用 markdown code block。\n` +
+    `2. 從對話中能確定的欄位才填值，不確定或沒提到的欄位維持已知欄位的值（已知也是 null 就填 null），絕對不要自己猜測。\n` +
+    `3. 不要計算入住晚數或任何金額，那不是這個步驟的工作。`
+  );
+}
+
+function parseBookingExtraction(raw: string, collected: BookingCollectedFields): BookingCollectedFields {
+  try {
+    const cleaned = raw.trim().replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '');
+    const parsed = JSON.parse(cleaned);
+    const merged: BookingCollectedFields = { ...collected };
+    (Object.keys(EMPTY_BOOKING_FIELDS) as (keyof BookingCollectedFields)[]).forEach((key) => {
+      if (parsed[key] !== undefined && parsed[key] !== null) {
+        (merged as any)[key] = parsed[key];
+      }
+    });
+    return merged;
+  } catch {
+    return collected; // 解析失敗就維持原本已知欄位，不覆蓋、不中斷
+  }
+}
+
+async function extractBookingFields(settings: any, userMessage: string, collected: BookingCollectedFields): Promise<BookingCollectedFields> {
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const prompt = buildBookingExtractionPrompt(todayIso, collected);
+  let raw = '';
+  if (settings.active_ai === 'gpt') {
+    raw = (await callGPT(settings, userMessage, undefined, prompt)).text;
+  } else {
+    raw = await callGemini(settings, userMessage, undefined, prompt);
+  }
+  return parseBookingExtraction(raw, collected);
+}
+
+function getMissingRequiredBookingFields(collected: BookingCollectedFields): string[] {
+  const required: (keyof BookingCollectedFields)[] = ['checkin_date', 'checkout_date', 'headcount', 'whole_house'];
+  return required.filter((k) => collected[k] === null || collected[k] === undefined).map((k) => BOOKING_FIELD_LABELS[k]);
+}
+
+function buildAskMissingFieldsMessage(missing: string[]): string {
+  return `謝謝您提供的資訊！還需要麻煩您補充以下資訊，我們才能幫您試算：\n${missing.map((m) => `・${m}`).join('\n')}`;
+}
+
+async function fetchBookingData() {
+  const [rt, rp, rep, wp, wpp, epr, dr] = await Promise.all([
+    supabase.from('room_types').select('*'),
+    supabase.from('room_pricing').select('*'),
+    supabase.from('room_extra_person_pricing').select('*'),
+    supabase.from('whole_house_packages').select('*'),
+    supabase.from('whole_house_package_pricing').select('*'),
+    supabase.from('whole_house_extra_person_rules').select('*'),
+    supabase.from('booking_date_ranges').select('*'),
+  ]);
+  return {
+    roomTypes: rt.data || [],
+    roomPricing: rp.data || [],
+    roomExtraPersonPricing: rep.data || [],
+    packages: wp.data || [],
+    packagePricing: wpp.data || [],
+    extraPersonRules: epr.data || [],
+    dateRanges: (dr.data || []).map((d: any) => ({ range_type: d.range_type, start_date: d.start_date, end_date: d.end_date })),
+  };
+}
+
+function buildBookingQuoteSummary(
+  collected: BookingCollectedFields,
+  nights: number,
+  option: { nights: { date: Date; tier: string; discountedPrice: number | null }[]; total: number | null },
+  useWholeHouse: boolean
+): string {
+  const lines: string[] = [];
+  lines.push(`入住日期：${collected.checkin_date}`);
+  lines.push(`退房日期：${collected.checkout_date}（共 ${nights} 晚）`);
+  lines.push(`入住人數：${collected.headcount} 人`);
+  lines.push(`方案類型：${useWholeHouse ? '包棟' : '個別租房'}`);
+  if (collected.kids) lines.push('顧客提及有小朋友同行');
+  if (collected.special_request) lines.push('顧客提及有特殊需求，需真人客服確認細節');
+
+  if (option.total == null) {
+    lines.push('很抱歉，這個日期／人數組合目前無法自動試算（可能是該時段未開放此方案，或超過可接待人數），需要真人客服協助確認。');
+  } else {
+    lines.push('每晚明細：');
+    for (const n of option.nights) {
+      lines.push(`　${n.date.toISOString().slice(0, 10)}（${n.tier}）：${n.discountedPrice == null ? '無法報價' : `NT$ ${n.discountedPrice.toLocaleString()}`}`);
+    }
+    lines.push(`預估總價：NT$ ${option.total.toLocaleString()}`);
+  }
+  lines.push('以上為初步試算，實際房況與價格仍需真人客服確認後才算完成訂房。');
+  return lines.join('\n');
+}
+
+async function handleBookingFlow(
+  lineClient: Client,
+  lineEvent: any,
+  settings: any,
+  userId: string,
+  userMessage: string,
+  session: BookingSession
+) {
+  let collected = session.collected;
+  try {
+    collected = await extractBookingFields(settings, userMessage, collected);
+  } catch (e: any) {
+    console.error('[Booking] field extraction failed:', e.message);
+  }
+
+  const missing = getMissingRequiredBookingFields(collected);
+  if (missing.length > 0) {
+    await saveBookingSession(userId, collected);
+    await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: buildAskMissingFieldsMessage(missing) });
+    return;
+  }
+
+  const checkinDate = new Date(`${collected.checkin_date}T00:00:00`);
+  const checkoutDate = new Date(`${collected.checkout_date}T00:00:00`);
+  const nights = Math.round((checkoutDate.getTime() - checkinDate.getTime()) / 86400000);
+
+  if (!Number.isFinite(nights) || nights <= 0) {
+    await saveBookingSession(userId, { ...collected, checkin_date: null, checkout_date: null });
+    await lineClient.replyMessage(lineEvent.replyToken, {
+      type: 'text',
+      text: '不好意思，入住日期與退房日期看起來有點對不上（退房日期需要晚於入住日期），麻煩您再提供一次正確的入住與退房日期喔。',
+    });
+    return;
+  }
+
+  try {
+    const data = await fetchBookingData();
+    const maxOccupancy = data.packages.length ? Math.max(...data.packages.map((p: any) => p.occupancy)) : 0;
+    const result = computeMultiNightQuote({
+      checkInDate: checkinDate,
+      nights,
+      headcount: collected.headcount as number,
+      dateRanges: data.dateRanges,
+      roomTypes: data.roomTypes,
+      roomPricing: data.roomPricing,
+      roomExtraPersonPricing: data.roomExtraPersonPricing,
+      packages: settings.booking_whole_house_enabled ? data.packages : [],
+      packagePricing: settings.booking_whole_house_enabled ? data.packagePricing : [],
+      extraPersonRules: settings.booking_whole_house_enabled ? data.extraPersonRules : [],
+      maxOccupancy,
+      promotion: null,
+      consecutiveStayDiscountPerNight: 0,
+    });
+
+    const useWholeHouse = collected.whole_house === true;
+    const chosenOption = useWholeHouse ? result.wholeHouse : result.individual;
+    const rawSummary = buildBookingQuoteSummary(collected, nights, chosenOption, useWholeHouse);
+    const polished = await answerWithPolish(settings, rawSummary);
+
+    await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: polished });
+  } catch (e: any) {
+    console.error('[Booking] quote failed:', e.message);
+    await lineClient.replyMessage(lineEvent.replyToken, {
+      type: 'text',
+      text: '不好意思，剛剛試算報價時出了一點狀況，麻煩您點選「真人客服」按鈕，我們會盡快為您確認房況與價格。',
+    });
+  } finally {
+    await clearBookingSession(userId);
+  }
+}
 
 // ========================================================================
 // Google 試算表知識庫（三層比對：精準關鍵字 → AI 語意路由 → 一般 QA fallback）

@@ -41,7 +41,7 @@ export interface WholeHousePackagePricing {
 }
 
 export interface ExtraPersonRule {
-  rule_type: string; // 'no_extra_room'（不多開房）/ 'extra_room'（多開房）
+  rule_type: string; // 'no_extra_room'（不開房）/ 'extra_room'（開房）
   rule_label: string;
   tier: string;
   price: number | null;
@@ -281,6 +281,33 @@ export function selectWholeHousePackage(
   return { package: base, basePrice, extraPersons, extraPersonOptions };
 }
 
+export interface WholeHouseUpgradeOption {
+  package: WholeHousePackage; // 升等後套用的級距（基礎人數 >= 需求人數，取最小的一個）
+  price: number; // 直接套用該級距的整組價格，不額外計算加人費
+}
+
+/**
+ * 包棟「升等方案」：人數卡在兩個級距中間時（例如 11 人卡在 10/12 級距之間），
+ * 直接跳去用上一個更大的級距整組價格（例如 11 人直接套用 12 人級距價格），不計算超額加人費。
+ * 這跟 selectWholeHousePackage()（維持在較小級距、超額用加人規則計算）是兩種獨立算法，
+ * 提供給「自動報價總表」同時呈現兩種價格讓管理者比較。
+ */
+export function selectWholeHouseUpgradeOption(
+  headcount: number,
+  packages: WholeHousePackage[],
+  packagePricing: WholeHousePackagePricing[],
+  tier: string
+): WholeHouseUpgradeOption | null {
+  const eligible = [...packages].filter((p) => p.occupancy >= headcount).sort((a, b) => a.occupancy - b.occupancy);
+  const upgradePackage = eligible[0];
+  if (!upgradePackage) return null; // 沒有夠大的級距可以直接套用
+
+  const pricing = packagePricing.find((p) => p.package_id === upgradePackage.id && p.tier === tier);
+  if (!pricing || pricing.price == null) return null;
+
+  return { package: upgradePackage, price: pricing.price };
+}
+
 export interface QuoteInput {
   date: Date;
   headcount: number;
@@ -362,4 +389,134 @@ export function computeQuote(input: QuoteInput): QuoteResult {
   const recommendation = compareOptions(individualOption, wholeHouseOption);
 
   return { date: input.date, tier, headcount: input.headcount, individualOption, wholeHouseOption, recommendation };
+}
+
+// ============================================================================
+// 多晚報價（促銷方案 + 連住折扣）
+// 設計原則：促銷方案（%折扣）只套用在第一晚；連住折扣（固定金額）只套用在第二晚（含）以後，
+// 依「需打掃／無需打掃」對應不同金額。兩者都是在「個別租房」與「包棟」各自最便宜的當晚價格上
+// 疊加計算，不影響 computeQuote() 既有的單晚報價邏輯。
+// ============================================================================
+
+export interface Promotion {
+  id: string;
+  name: string;
+  discount_percent: number;
+}
+
+export interface NightlyPrice {
+  date: Date;
+  tier: string;
+  rawPrice: number | null; // 該晚原始價格（尚未套用促銷/連住折扣），null＝當晚這個方案不可用
+  discountedPrice: number | null;
+}
+
+export interface MultiNightOption {
+  nights: NightlyPrice[];
+  total: number | null; // null＝有任一晚不可用，整段住宿這個方案不成立
+}
+
+export interface MultiNightQuoteInput {
+  checkInDate: Date;
+  nights: number; // 住宿晚數，1 晚時等同單晚邏輯只套用促銷、不套用連住折扣
+  headcount: number;
+  dateRanges: DateRange[];
+  roomTypes: RoomType[];
+  roomPricing: RoomPricing[];
+  roomExtraPersonPricing: RoomExtraPersonPricing[];
+  packages: WholeHousePackage[];
+  packagePricing: WholeHousePackagePricing[];
+  extraPersonRules: ExtraPersonRule[];
+  maxOccupancy: number;
+  promotion: Promotion | null; // 只套用在第一晚
+  consecutiveStayDiscountPerNight: number; // 固定金額，需打掃/無需打掃對應的金額由呼叫端算好傳進來
+}
+
+export interface MultiNightQuoteResult {
+  checkInDate: Date;
+  nights: number;
+  headcount: number;
+  individual: MultiNightOption;
+  wholeHouse: MultiNightOption;
+}
+
+function cheapestIndividualNightPrice(
+  tier: string,
+  headcount: number,
+  roomTypes: RoomType[],
+  roomPricing: RoomPricing[],
+  roomExtraPersonPricing: RoomExtraPersonPricing[]
+): number | null {
+  const availableRooms = getAvailableIndividualRooms(tier, roomTypes, roomPricing, roomExtraPersonPricing);
+  if (!availableRooms.length) return null;
+  const options = computeIndividualOptions(headcount, availableRooms);
+  const candidates: number[] = [];
+  if (options.openRoomOption.success) candidates.push(options.openRoomOption.totalPrice);
+  if (options.extraPersonOption) candidates.push(options.extraPersonOption.totalPrice);
+  return candidates.length ? Math.min(...candidates) : null;
+}
+
+function cheapestWholeHouseNightPrice(
+  tier: string,
+  headcount: number,
+  packages: WholeHousePackage[],
+  packagePricing: WholeHousePackagePricing[],
+  extraPersonRules: ExtraPersonRule[],
+  maxOccupancy: number
+): number | null {
+  const candidates: number[] = [];
+  const base = selectWholeHousePackage(headcount, packages, packagePricing, extraPersonRules, tier, maxOccupancy);
+  if (base) {
+    candidates.push(base.extraPersonOptions.length ? Math.min(...base.extraPersonOptions.map((o) => o.grandTotal)) : base.basePrice);
+  }
+  const upgrade = selectWholeHouseUpgradeOption(headcount, packages, packagePricing, tier);
+  if (upgrade) candidates.push(upgrade.price);
+  return candidates.length ? Math.min(...candidates) : null;
+}
+
+/**
+ * 統整多晚報價：每一晚各自依當天日期判斷 tier、各自算出當晚最便宜的價格，
+ * 第一晚套用促銷方案 %折扣（若有設定），第二晚（含）以後再扣除連住折扣固定金額。
+ * 個別租房與包棟分開計算、分開加總，交給對話流程或後台呈現兩種總價供比較。
+ */
+export function computeMultiNightQuote(input: MultiNightQuoteInput): MultiNightQuoteResult {
+  const individualNights: NightlyPrice[] = [];
+  const wholeHouseNights: NightlyPrice[] = [];
+
+  for (let i = 0; i < input.nights; i++) {
+    const date = new Date(input.checkInDate);
+    date.setDate(date.getDate() + i);
+    const tier = resolvePricingTier(date, input.dateRanges);
+    const isFirstNight = i === 0;
+
+    const applyDiscounts = (raw: number | null): number | null => {
+      if (raw == null) return null;
+      let price = raw;
+      if (isFirstNight && input.promotion) {
+        price = price * (1 - input.promotion.discount_percent / 100);
+      } else if (!isFirstNight) {
+        price = Math.max(0, price - input.consecutiveStayDiscountPerNight);
+      }
+      return price;
+    };
+
+    const individualRaw = cheapestIndividualNightPrice(tier, input.headcount, input.roomTypes, input.roomPricing, input.roomExtraPersonPricing);
+    const wholeHouseRaw = cheapestWholeHouseNightPrice(tier, input.headcount, input.packages, input.packagePricing, input.extraPersonRules, input.maxOccupancy);
+
+    individualNights.push({ date, tier, rawPrice: individualRaw, discountedPrice: applyDiscounts(individualRaw) });
+    wholeHouseNights.push({ date, tier, rawPrice: wholeHouseRaw, discountedPrice: applyDiscounts(wholeHouseRaw) });
+  }
+
+  const sumOrNull = (nights: NightlyPrice[]): number | null =>
+    nights.length && nights.every((n) => n.discountedPrice != null)
+      ? nights.reduce((s, n) => s + (n.discountedPrice as number), 0)
+      : null;
+
+  return {
+    checkInDate: input.checkInDate,
+    nights: input.nights,
+    headcount: input.headcount,
+    individual: { nights: individualNights, total: sumOrNull(individualNights) },
+    wholeHouse: { nights: wholeHouseNights, total: sumOrNull(wholeHouseNights) },
+  };
 }

@@ -2,13 +2,14 @@ import { useState, useEffect } from 'react';
 import { supabase } from '../lib/supabase';
 import { Plus, Trash2, CalendarRange, Home, Users, Calculator, Save, Wand2 } from 'lucide-react';
 import {
-  computeQuote,
   suggestRoomCombo,
   getAvailableIndividualRooms,
   computeIndividualOptions,
   selectWholeHousePackage,
+  selectWholeHouseUpgradeOption,
   compareOptions,
-  QuoteResult,
+  computeMultiNightQuote,
+  MultiNightQuoteResult,
 } from '../lib/bookingEngine';
 
 // 房型/包棟方案定價目前支援的 tier，對應 bookingEngine.resolvePricingTier() 實際會判斷出來的級距。
@@ -16,8 +17,8 @@ const PRICING_TIERS = ['平日', '小假日', '連假', '旺季', '定價'];
 // 自動報價總表只顯示會被實際判斷出來的營運 tier（不含「定價」這種純參考價）。
 const MATRIX_TIERS = ['平日', '小假日', '連假', '旺季'];
 const RULE_TYPE_OPTIONS = [
-  { value: 'no_extra_room', label: '不多開房' },
-  { value: 'extra_room', label: '多開房' },
+  { value: 'no_extra_room', label: '不開房' },
+  { value: 'extra_room', label: '開房' },
 ];
 
 function newId(): string {
@@ -52,6 +53,9 @@ export default function BookingManagement() {
 
   const [settingsId, setSettingsId] = useState<string | null>(null);
   const [wholeHouseEnabled, setWholeHouseEnabled] = useState(true);
+  const [discountCleaning, setDiscountCleaning] = useState(0);
+  const [discountNoCleaning, setDiscountNoCleaning] = useState(0);
+  const [bookingTriggerKeywords, setBookingTriggerKeywords] = useState('');
 
   const [roomTypes, setRoomTypes] = useState<any[]>([]);
   const [roomPricing, setRoomPricing] = useState<any[]>([]);
@@ -61,6 +65,7 @@ export default function BookingManagement() {
   const [packageRooms, setPackageRooms] = useState<any[]>([]);
   const [extraRules, setExtraRules] = useState<any[]>([]);
   const [dateRanges, setDateRanges] = useState<any[]>([]);
+  const [promotions, setPromotions] = useState<any[]>([]);
 
   const [pendingDeletes, setPendingDeletes] = useState<{ table: string; id: string }[]>([]);
 
@@ -69,7 +74,10 @@ export default function BookingManagement() {
 
   const [quoteDate, setQuoteDate] = useState('');
   const [quoteHeadcount, setQuoteHeadcount] = useState(4);
-  const [quoteResult, setQuoteResult] = useState<QuoteResult | null>(null);
+  const [quoteNights, setQuoteNights] = useState(1);
+  const [quotePromotionId, setQuotePromotionId] = useState<string>('');
+  const [quoteCleaningOption, setQuoteCleaningOption] = useState<'cleaning' | 'noCleaning'>('noCleaning');
+  const [quoteResult, setQuoteResult] = useState<MultiNightQuoteResult | null>(null);
 
   useEffect(() => {
     fetchAll();
@@ -77,8 +85,8 @@ export default function BookingManagement() {
 
   const fetchAll = async () => {
     setLoading(true);
-    const [st, rt, rp, rep, wp, wpp, wpr, epr, dr] = await Promise.all([
-      supabase.from('settings').select('id, booking_whole_house_enabled').single(),
+    const [st, rt, rp, rep, wp, wpp, wpr, epr, dr, promo] = await Promise.all([
+      supabase.from('settings').select('id, booking_whole_house_enabled, consecutive_stay_discount_cleaning, consecutive_stay_discount_no_cleaning, booking_trigger_keywords').single(),
       supabase.from('room_types').select('*').order('display_order'),
       supabase.from('room_pricing').select('*'),
       supabase.from('room_extra_person_pricing').select('*'),
@@ -87,9 +95,13 @@ export default function BookingManagement() {
       supabase.from('whole_house_package_rooms').select('*'),
       supabase.from('whole_house_extra_person_rules').select('*'),
       supabase.from('booking_date_ranges').select('*').order('start_date'),
+      supabase.from('promotions').select('*').order('created_at'),
     ]);
     setSettingsId(st.data?.id || null);
     setWholeHouseEnabled(st.data?.booking_whole_house_enabled ?? true);
+    setDiscountCleaning(st.data?.consecutive_stay_discount_cleaning ?? 0);
+    setDiscountNoCleaning(st.data?.consecutive_stay_discount_no_cleaning ?? 0);
+    setBookingTriggerKeywords(st.data?.booking_trigger_keywords ?? '我要訂房,訂房');
     setRoomTypes(rt.data || []);
     setRoomPricing(rp.data || []);
     setRoomExtraPersonPricing(rep.data || []);
@@ -98,6 +110,7 @@ export default function BookingManagement() {
     setPackageRooms(wpr.data || []);
     setExtraRules(epr.data || []);
     setDateRanges(dr.data || []);
+    setPromotions(promo.data || []);
     setPendingDeletes([]);
     setNewPackage({ occupancy: 10, roomIds: [] });
     setLoading(false);
@@ -110,7 +123,15 @@ export default function BookingManagement() {
     setSaving(true);
     try {
       if (settingsId) {
-        await supabase.from('settings').update({ booking_whole_house_enabled: wholeHouseEnabled }).eq('id', settingsId);
+        await supabase
+          .from('settings')
+          .update({
+            booking_whole_house_enabled: wholeHouseEnabled,
+            consecutive_stay_discount_cleaning: discountCleaning,
+            consecutive_stay_discount_no_cleaning: discountNoCleaning,
+            booking_trigger_keywords: bookingTriggerKeywords,
+          })
+          .eq('id', settingsId);
       }
       if (roomTypes.length) await supabase.from('room_types').upsert(roomTypes);
       if (roomPricing.length) await supabase.from('room_pricing').upsert(roomPricing);
@@ -120,6 +141,7 @@ export default function BookingManagement() {
       if (packageRooms.length) await supabase.from('whole_house_package_rooms').upsert(packageRooms);
       if (extraRules.length) await supabase.from('whole_house_extra_person_rules').upsert(extraRules);
       if (dateRanges.length) await supabase.from('booking_date_ranges').upsert(dateRanges);
+      if (promotions.length) await supabase.from('promotions').upsert(promotions);
 
       for (const del of pendingDeletes) {
         await supabase.from(del.table).delete().eq('id', del.id);
@@ -189,7 +211,7 @@ export default function BookingManagement() {
 
   // ---------------- 加人規則 ----------------
   const addExtraRule = () => {
-    setExtraRules([...extraRules, { id: newId(), rule_type: 'no_extra_room', rule_label: '不多開房', tier: '平日', price: null }]);
+    setExtraRules([...extraRules, { id: newId(), rule_type: 'no_extra_room', rule_label: '不開房', tier: '平日', price: null }]);
   };
 
   const updateExtraRule = (id: string, field: string, value: any) => {
@@ -221,6 +243,21 @@ export default function BookingManagement() {
     queueDelete('booking_date_ranges', id);
   };
 
+  // ---------------- 促銷方案 ----------------
+  const addPromotion = () => {
+    setPromotions([...promotions, { id: newId(), name: '新促銷方案', discount_percent: 0 }]);
+  };
+
+  const updatePromotion = (id: string, field: string, value: any) => {
+    setPromotions(promotions.map((p) => (p.id === id ? { ...p, [field]: value } : p)));
+  };
+
+  const deletePromotion = (id: string) => {
+    setPromotions(promotions.filter((p) => p.id !== id));
+    if (quotePromotionId === id) setQuotePromotionId('');
+    queueDelete('promotions', id);
+  };
+
   // ---------------- 測試報價 ----------------
   const runTestQuote = () => {
     if (!quoteDate) {
@@ -228,8 +265,11 @@ export default function BookingManagement() {
       return;
     }
     const maxOccupancy = packages.length ? Math.max(...packages.map((p) => p.occupancy)) : 0;
-    const result = computeQuote({
-      date: new Date(`${quoteDate}T00:00:00`),
+    const selectedPromotion = promotions.find((p) => p.id === quotePromotionId) || null;
+    const consecutiveStayDiscountPerNight = quoteCleaningOption === 'cleaning' ? discountCleaning : discountNoCleaning;
+    const result = computeMultiNightQuote({
+      checkInDate: new Date(`${quoteDate}T00:00:00`),
+      nights: quoteNights,
       headcount: quoteHeadcount,
       dateRanges: dateRanges.map((d) => ({ range_type: d.range_type, start_date: d.start_date, end_date: d.end_date })),
       roomTypes,
@@ -239,6 +279,8 @@ export default function BookingManagement() {
       packagePricing: wholeHouseEnabled ? packagePricing : [],
       extraPersonRules: wholeHouseEnabled ? extraRules : [],
       maxOccupancy,
+      promotion: selectedPromotion,
+      consecutiveStayDiscountPerNight,
     });
     setQuoteResult(result);
   };
@@ -254,13 +296,16 @@ export default function BookingManagement() {
     const availableRooms = getAvailableIndividualRooms(tier, roomTypes, roomPricing, roomExtraPersonPricing);
     const individualOption = availableRooms.length ? computeIndividualOptions(headcount, availableRooms) : null;
     const wholeHouseOption = selectWholeHousePackage(headcount, packages, packagePricing, extraRules, tier, matrixMax);
+    const upgradeOption = selectWholeHouseUpgradeOption(headcount, packages, packagePricing, tier);
     const recommendation = compareOptions(individualOption, wholeHouseOption);
-    const total = wholeHouseOption
+    const baseTotal = wholeHouseOption
       ? wholeHouseOption.extraPersonOptions.length
         ? Math.min(...wholeHouseOption.extraPersonOptions.map((o) => o.grandTotal))
         : wholeHouseOption.basePrice
       : null;
-    return { total, recommendation };
+    // 只有升等後套用的級距跟「不開房」的基礎級距不同（代表人數卡在兩個級距中間），才視為獨立的第二個價格顯示
+    const showUpgrade = upgradeOption && wholeHouseOption && upgradeOption.package.id !== wholeHouseOption.package.id;
+    return { baseTotal, upgradePrice: showUpgrade ? (upgradeOption as NonNullable<typeof upgradeOption>).price : null, recommendation };
   };
 
   if (loading) return <div className="p-8 text-center text-gray-500">載入中...</div>;
@@ -271,7 +316,7 @@ export default function BookingManagement() {
         <div>
           <h2 className="text-2xl font-bold text-gray-800 flex items-center gap-2">
             <CalendarRange className="w-6 h-6 text-blue-600" />
-            訂房管理（Phase 1：資料設定）
+            訂房管理
           </h2>
           <p className="text-gray-500 mt-1">
             所有變更會先暫存在畫面上，按「儲存變更」才會真正寫入資料庫，避免不小心異動。
@@ -285,6 +330,23 @@ export default function BookingManagement() {
           <Save className="w-4 h-4" />
           {saving ? '儲存中...' : '儲存變更'}
         </button>
+      </div>
+
+      {/* LINE 訂房對話流程設定 */}
+      <div className="bg-white rounded-xl shadow-sm border overflow-hidden">
+        <div className="p-6">
+          <p className="text-sm font-medium text-gray-700 mb-1">LINE 訂房對話流程：觸發關鍵字</p>
+          <p className="text-xs text-gray-400 mb-3">
+            顧客訊息包含這些關鍵字（逗號分隔）就會開始追蹤訂房詢問狀態，接著自動從對話中擷取入住/退房日期、人數、是否包棟等欄位，
+            欄位齊全後用程式碼確定性計算晚數與金額（不會交給 AI 自由計算），回覆試算結果。
+          </p>
+          <input
+            value={bookingTriggerKeywords}
+            onChange={(e) => setBookingTriggerKeywords(e.target.value)}
+            className="w-full px-3 py-2 border rounded-lg"
+            placeholder="我要訂房,訂房"
+          />
+        </div>
       </div>
 
       {/* 房型與定價 */}
@@ -536,7 +598,7 @@ export default function BookingManagement() {
                           </select>
                         </td>
                         <td className="p-2">
-                          <input value={r.rule_label} onChange={(e) => updateExtraRule(r.id, 'rule_label', e.target.value)} className="w-32 px-2 py-1 border rounded" placeholder="不加床、不多開房" />
+                          <input value={r.rule_label} onChange={(e) => updateExtraRule(r.id, 'rule_label', e.target.value)} className="w-32 px-2 py-1 border rounded" placeholder="不加床、不開房" />
                         </td>
                         <td className="p-2">
                           <select value={r.tier} onChange={(e) => updateExtraRule(r.id, 'tier', e.target.value)} className="px-2 py-1 border rounded bg-white">
@@ -578,7 +640,10 @@ export default function BookingManagement() {
                   <Calculator className="w-4 h-4 text-orange-600" />
                   自動報價總表（唯讀，即時算好）
                 </p>
-                <p className="text-xs text-gray-400 mb-3">資料改了會自動重算，不用理解演算法，直接看數字對不對；「與個別租房比較」是自動算出來的省多少錢。</p>
+                <p className="text-xs text-gray-400 mb-3">
+                  資料改了會自動重算，不用理解演算法，直接看數字對不對；「與個別租房比較」是自動算出來的省多少錢。
+                  人數卡在兩個級距中間時（例如 11、13、15 人）會多顯示「開房」（直接跳去用更大級距的整組價格）跟「不開房」（維持較小級距、超額用加人規則計算）兩種價格。
+                </p>
                 <div className="overflow-x-auto">
                   <table className="w-full text-left text-sm">
                     <thead className="bg-gray-50 border-b">
@@ -594,19 +659,30 @@ export default function BookingManagement() {
                         <tr key={h}>
                           <td className="py-2 px-3 font-semibold">{h} 人</td>
                           {MATRIX_TIERS.map((tier) => {
-                            const { total, recommendation } = computeMatrixCell(h, tier);
+                            const { baseTotal, upgradePrice, recommendation } = computeMatrixCell(h, tier);
                             return (
                               <td key={tier} className="py-2 px-3">
-                                {total == null ? (
+                                {baseTotal == null && upgradePrice == null ? (
                                   <span className="text-gray-300">—</span>
                                 ) : (
-                                  <div>
-                                    <div>NT$ {total.toLocaleString()}</div>
-                                    {recommendation.recommended === 'wholeHouse' && recommendation.savings ? (
-                                      <span className="inline-block mt-0.5 text-xs bg-green-50 text-green-700 px-2 py-0.5 rounded">
-                                        包棟省 NT$ {recommendation.savings.toLocaleString()}
-                                      </span>
-                                    ) : null}
+                                  <div className="space-y-1">
+                                    {baseTotal != null && (
+                                      <div>
+                                        <span className="text-xs text-gray-400">不開房 </span>
+                                        NT$ {baseTotal.toLocaleString()}
+                                        {recommendation.recommended === 'wholeHouse' && recommendation.savings ? (
+                                          <span className="inline-block ml-1 text-xs bg-green-50 text-green-700 px-2 py-0.5 rounded">
+                                            省 NT$ {recommendation.savings.toLocaleString()}
+                                          </span>
+                                        ) : null}
+                                      </div>
+                                    )}
+                                    {upgradePrice != null && (
+                                      <div className="text-gray-600">
+                                        <span className="text-xs text-gray-400">開房 </span>
+                                        NT$ {upgradePrice.toLocaleString()}
+                                      </div>
+                                    )}
                                   </div>
                                 )}
                               </td>
@@ -714,6 +790,43 @@ export default function BookingManagement() {
           </h3>
           <p className="text-sm text-gray-500 mt-1">用畫面上目前（含未儲存）的資料試算，方便您調整完馬上驗證，不用先儲存。</p>
         </div>
+
+        <div className="p-6 border-b">
+          <div className="flex justify-between items-center mb-3">
+            <p className="text-sm font-medium text-gray-700">促銷方案（名稱 + 折扣%，只套用在第一晚）</p>
+            <button onClick={addPromotion} className="flex items-center gap-1 bg-gray-700 text-white px-3 py-1.5 rounded-lg text-sm hover:bg-gray-800">
+              <Plus className="w-4 h-4" /> 新增方案
+            </button>
+          </div>
+          <div className="space-y-2">
+            {promotions.map((p) => (
+              <div key={p.id} className="flex items-center gap-2">
+                <input value={p.name} onChange={(e) => updatePromotion(p.id, 'name', e.target.value)} className="flex-1 px-2 py-1 border rounded" placeholder="促銷方案名稱" />
+                <input type="number" value={p.discount_percent} onChange={(e) => updatePromotion(p.id, 'discount_percent', Number(e.target.value))} className="w-20 px-2 py-1 border rounded" />
+                <span className="text-xs text-gray-400">% 折扣</span>
+                <button onClick={() => deletePromotion(p.id)} className="p-1.5 text-red-500 hover:bg-red-50 rounded">
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              </div>
+            ))}
+            {promotions.length === 0 && <p className="text-sm text-gray-400">尚未設定促銷方案</p>}
+          </div>
+        </div>
+
+        <div className="p-6 border-b">
+          <p className="text-sm font-medium text-gray-700 mb-3">連住折扣（固定金額，第二晚（含）以後每晚折抵）</p>
+          <div className="flex flex-wrap gap-4">
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">需打掃，每晚折抵</label>
+              <input type="number" value={discountCleaning} onChange={(e) => setDiscountCleaning(Number(e.target.value))} className="w-32 px-3 py-2 border rounded-lg" />
+            </div>
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">無需打掃，每晚折抵</label>
+              <input type="number" value={discountNoCleaning} onChange={(e) => setDiscountNoCleaning(Number(e.target.value))} className="w-32 px-3 py-2 border rounded-lg" />
+            </div>
+          </div>
+        </div>
+
         <div className="p-6 flex flex-wrap gap-3 items-end border-b">
           <div>
             <label className="block text-xs text-gray-500 mb-1">入住日期</label>
@@ -721,7 +834,27 @@ export default function BookingManagement() {
           </div>
           <div>
             <label className="block text-xs text-gray-500 mb-1">人數</label>
-            <input type="number" min={1} value={quoteHeadcount} onChange={(e) => setQuoteHeadcount(Number(e.target.value))} className="w-24 px-3 py-2 border rounded-lg" />
+            <input type="number" min={1} value={quoteHeadcount} onChange={(e) => setQuoteHeadcount(Number(e.target.value))} className="w-20 px-3 py-2 border rounded-lg" />
+          </div>
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">晚數</label>
+            <input type="number" min={1} value={quoteNights} onChange={(e) => setQuoteNights(Math.max(1, Number(e.target.value)))} className="w-20 px-3 py-2 border rounded-lg" />
+          </div>
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">促銷方案</label>
+            <select value={quotePromotionId} onChange={(e) => setQuotePromotionId(e.target.value)} className="px-3 py-2 border rounded-lg bg-white">
+              <option value="">無</option>
+              {promotions.map((p) => (
+                <option key={p.id} value={p.id}>{p.name}（{p.discount_percent}%）</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">第二晚起（連住折扣）</label>
+            <select value={quoteCleaningOption} onChange={(e) => setQuoteCleaningOption(e.target.value as 'cleaning' | 'noCleaning')} className="px-3 py-2 border rounded-lg bg-white">
+              <option value="noCleaning">無需打掃</option>
+              <option value="cleaning">需打掃</option>
+            </select>
           </div>
           <button onClick={runTestQuote} className="flex items-center gap-1 bg-orange-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-orange-700">
             <Calculator className="w-4 h-4" /> 試算
@@ -730,102 +863,60 @@ export default function BookingManagement() {
 
         {quoteResult && (
           <div className="p-6 space-y-4">
-            <p className="text-sm text-gray-600">
-              判定 tier：<span className="font-bold text-gray-800">{quoteResult.tier}</span>
-              {quoteResult.recommendation.recommended && quoteResult.recommendation.savings ? (
-                <span className="ml-3 text-xs bg-green-50 text-green-700 px-2 py-0.5 rounded">
-                  推薦{quoteResult.recommendation.recommended === 'wholeHouse' ? '包棟' : '個別租房'}，可省 NT$ {quoteResult.recommendation.savings.toLocaleString()}
-                </span>
-              ) : null}
-            </p>
-
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="border rounded-lg p-4">
                 <h4 className="font-semibold text-gray-700 mb-2">個別租房</h4>
-                {!quoteResult.individualOption ? (
-                  <p className="text-sm text-gray-400">此 tier 不開放個別租房，只能包棟</p>
-                ) : (
-                  <div className="space-y-4">
-                    <div>
-                      <p className="text-xs font-medium text-gray-500 mb-1">方案一：加開房</p>
-                      {!quoteResult.individualOption.openRoomOption.success ? (
-                        <p className="text-sm text-red-500">目前房型總容量不足以容納 {quoteResult.headcount} 人</p>
-                      ) : (
-                        <div className="text-sm space-y-1">
-                          {quoteResult.individualOption.openRoomOption.rooms.map((r, i) => (
-                            <div key={i} className="flex justify-between">
-                              <span>{r.name}（{r.floor} / {r.capacity}人）</span>
-                              <span>NT$ {r.price}</span>
-                            </div>
-                          ))}
-                          <div className="flex justify-between font-bold border-t pt-1 mt-1">
-                            <span>總計</span>
-                            <span>NT$ {quoteResult.individualOption.openRoomOption.totalPrice}</span>
-                          </div>
-                        </div>
-                      )}
+                <div className="text-sm space-y-1">
+                  {quoteResult.individual.nights.map((n, i) => (
+                    <div key={i} className="flex justify-between">
+                      <span>
+                        {n.date.toLocaleDateString('zh-TW')}（{n.tier}）{i === 0 ? '　第一晚' : `　第${i + 1}晚`}
+                      </span>
+                      <span>{n.discountedPrice == null ? '不可用' : `NT$ ${n.discountedPrice.toLocaleString()}`}</span>
                     </div>
-
-                    {quoteResult.individualOption.extraPersonOption && (
-                      <div className="border-t pt-3">
-                        <p className="text-xs font-medium text-gray-500 mb-1">方案二：加人不加房</p>
-                        <div className="text-sm space-y-1">
-                          {quoteResult.individualOption.extraPersonOption.baseRooms.map((r, i) => (
-                            <div key={i} className="flex justify-between">
-                              <span>{r.name}（{r.floor} / {r.capacity}人）</span>
-                              <span>NT$ {r.price}</span>
-                            </div>
-                          ))}
-                          {quoteResult.individualOption.extraPersonOption.extraAssignments.map((a, i) => (
-                            <div key={i} className="flex justify-between text-gray-600">
-                              <span>　{a.room.name} 加 {a.extraCount} 人</span>
-                              <span>NT$ {a.extraPrice}</span>
-                            </div>
-                          ))}
-                          <div className="flex justify-between font-bold border-t pt-1 mt-1">
-                            <span>總計</span>
-                            <span>NT$ {quoteResult.individualOption.extraPersonOption.totalPrice}</span>
-                          </div>
-                        </div>
-                      </div>
-                    )}
+                  ))}
+                  <div className="flex justify-between font-bold border-t pt-1 mt-1">
+                    <span>總計</span>
+                    <span>{quoteResult.individual.total == null ? '無法報價' : `NT$ ${quoteResult.individual.total.toLocaleString()}`}</span>
                   </div>
-                )}
+                </div>
               </div>
 
               <div className="border rounded-lg p-4">
                 <h4 className="font-semibold text-gray-700 mb-2">包棟</h4>
                 {!wholeHouseEnabled ? (
                   <p className="text-sm text-gray-400">目前已關閉包棟方案</p>
-                ) : !quoteResult.wholeHouseOption ? (
-                  <p className="text-sm text-gray-400">沒有對應的包棟報價資料，或超過最大接待人數</p>
                 ) : (
                   <div className="text-sm space-y-1">
-                    <div className="flex justify-between">
-                      <span>方案基礎（{quoteResult.wholeHouseOption.package.occupancy}人：{packageRoomNames(quoteResult.wholeHouseOption.package.id)}）</span>
-                      <span>NT$ {quoteResult.wholeHouseOption.basePrice}</span>
-                    </div>
-                    {quoteResult.wholeHouseOption.extraPersons > 0 && (
-                      <>
-                        <p className="text-xs text-gray-500 pt-1">超額 {quoteResult.wholeHouseOption.extraPersons} 人，加人方案：</p>
-                        {quoteResult.wholeHouseOption.extraPersonOptions.map((o, i) => (
-                          <div key={i} className="flex justify-between">
-                            <span>　{o.rule_label || o.rule_type}</span>
-                            <span>NT$ {o.grandTotal}</span>
-                          </div>
-                        ))}
-                      </>
-                    )}
-                    {quoteResult.wholeHouseOption.extraPersons === 0 && (
-                      <div className="flex justify-between font-bold border-t pt-1 mt-1">
-                        <span>總計</span>
-                        <span>NT$ {quoteResult.wholeHouseOption.basePrice}</span>
+                    {quoteResult.wholeHouse.nights.map((n, i) => (
+                      <div key={i} className="flex justify-between">
+                        <span>
+                          {n.date.toLocaleDateString('zh-TW')}（{n.tier}）{i === 0 ? '　第一晚' : `　第${i + 1}晚`}
+                        </span>
+                        <span>{n.discountedPrice == null ? '不可用' : `NT$ ${n.discountedPrice.toLocaleString()}`}</span>
                       </div>
-                    )}
+                    ))}
+                    <div className="flex justify-between font-bold border-t pt-1 mt-1">
+                      <span>總計</span>
+                      <span>{quoteResult.wholeHouse.total == null ? '無法報價' : `NT$ ${quoteResult.wholeHouse.total.toLocaleString()}`}</span>
+                    </div>
                   </div>
                 )}
               </div>
             </div>
+            {quoteResult.individual.total != null && quoteResult.wholeHouse.total != null && (
+              <p className="text-sm">
+                {quoteResult.individual.total < quoteResult.wholeHouse.total ? (
+                  <span className="text-xs bg-green-50 text-green-700 px-2 py-0.5 rounded">
+                    個別租房較划算，省 NT$ {(quoteResult.wholeHouse.total - quoteResult.individual.total).toLocaleString()}
+                  </span>
+                ) : quoteResult.wholeHouse.total < quoteResult.individual.total ? (
+                  <span className="text-xs bg-green-50 text-green-700 px-2 py-0.5 rounded">
+                    包棟較划算，省 NT$ {(quoteResult.individual.total - quoteResult.wholeHouse.total).toLocaleString()}
+                  </span>
+                ) : null}
+              </p>
+            )}
           </div>
         )}
       </div>
