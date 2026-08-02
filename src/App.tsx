@@ -4,7 +4,9 @@ import { supabase } from './lib/supabase';
 import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
 import AgentService from './pages/AgentService';
+import BookingFlowSettings from './pages/BookingFlowSettings';
 import BookingManagement from './pages/BookingManagement';
+import CustomMessageSending from './pages/CustomMessageSending';
 import Layout from './components/Layout';
 
 function App() {
@@ -79,7 +81,9 @@ function App() {
         <Route element={session ? <Layout /> : <Navigate to="/login" />}>
           <Route path="/" element={<Dashboard />} />
           <Route path="/agent" element={<AgentService />} />
+          <Route path="/booking/flow" element={<BookingFlowSettings />} />
           <Route path="/booking" element={<BookingManagement />} />
+          <Route path="/booking/messages" element={<CustomMessageSending />} />
         </Route>
         <Route path="*" element={<Navigate to="/" />} />
       </Routes>

@@ -35,9 +35,63 @@ CREATE TABLE IF NOT EXISTS public.settings (
     -- 連住折扣（固定金額，全部 tier 統一，只套用在第二晚（含）以後）
     consecutive_stay_discount_cleaning NUMERIC DEFAULT 0, -- 需打掃，每晚折抵金額
     consecutive_stay_discount_no_cleaning NUMERIC DEFAULT 0, -- 無需打掃，每晚折抵金額
+    -- 連住折扣是民宿自訂政策、不是詢問顧客的選項，LINE 對話流程自動套用這個預設類型（'cleaning' 或 'no_cleaning'）
+    consecutive_stay_default_option TEXT DEFAULT 'no_cleaning',
+    -- 旺季期間的「平日」（日~四）要套用平日價還是旺季價：'peak'＝旺季價（預設，維持原本行為）、'weekday'＝平日價。
+    -- 旺季的小假日（五、六）不受影響，一律仍是旺季價。同時套用在個別租房與包棟的 tier 判斷。
+    peak_season_weekday_tier TEXT DEFAULT 'peak',
     -- 訂房對話流程（Phase 2）：訊息包含這些關鍵字就開始/重置訂房會話狀態
-    booking_trigger_keywords TEXT DEFAULT '我要訂房,訂房'
+    booking_trigger_keywords TEXT DEFAULT '我要訂房,訂房',
+    -- 訂房對話流程（Phase 3）：客人資料寫入的「報價」Google 試算表（需為服務帳號 Editor 權限，不是唯讀）
+    quote_sheet_id TEXT DEFAULT '',
+    quote_sheet_gid TEXT DEFAULT '0',
+    -- 三段可自訂罐頭訊息，[方括號] 是合併欄位，實際支援的欄位見「訂房設定 > 流程設定」頁面說明
+    booking_welcome_message TEXT DEFAULT '🏡 LINE AI 訂房
+若您想先詢問空房或報價，請直接回覆以下資訊，我們會協助您確認：
+
+姓名 :
+電話 :
+入住日期：
+退房日期：
+入住人數：
+大人小孩：O大O小/O幼(3歲以下)
+是否包棟：',
+    booking_quote_message TEXT DEFAULT '入住日期：[入住日期]
+退房日期：[退房日期]
+入住人數：[人數]
+是否包棟：[是否包棟]
+價格：[總金額]
+
+提醒您，實際空房與價格會依日期、人數與平台狀況為準，
+確定訂房請回覆『是』或『否』，或者轉『真人客服』替您服務謝謝 😊',
+    booking_confirm_message TEXT DEFAULT '親愛的 [姓名] 您好，感謝您預訂我們的民宿！為您保留的訂房資訊如下：
+
+🔸 入住日期： [入住日期] 15:00 後
+🔸 退房日期： [退房日期] 11:00 前
+🔸 房型與人數： [是否包棟] / [人數] 位 ([大人小孩])
+🔸 訂單總額： [總金額]
+🔸 本次需匯訂金： [訂金]
+
+💳 【匯款帳號資訊】
+銀行代碼： 808
+銀行名稱： 玉山銀行
+帳號： 0118979100691
+
+⚠️ 溫馨提醒：
+請於 [匯款日時間] 前完成匯款，以利為您保留房間。若逾期未匯款，系統將自動取消訂房，不另行通知喔。
+匯款完成後，請回傳「帳號後五碼」或「轉帳明細截圖」，我們查帳無誤後會立即傳送【訂房成功確認信】給您！'
 );
+
+-- 客製訊息發送（Phase 3）：後台自訂的可重複使用訊息範本，發送時從「報價」試算表帶入合併欄位
+CREATE TABLE IF NOT EXISTS public.custom_message_templates (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    title TEXT NOT NULL,
+    body TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+);
+ALTER TABLE public.custom_message_templates ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "Allow Auth Access Custom Message Templates" ON public.custom_message_templates;
+CREATE POLICY "Allow Auth Access Custom Message Templates" ON public.custom_message_templates FOR ALL USING (auth.role() = 'authenticated');
 
 -- 去重記錄表 (防止重試導致狀態回滾)
 CREATE TABLE IF NOT EXISTS public.processed_events (
@@ -225,9 +279,14 @@ ALTER TABLE public.room_types ADD COLUMN IF NOT EXISTS max_extra_persons INTEGER
 -- 連住折扣（固定金額，全部 tier 統一）：
 ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS consecutive_stay_discount_cleaning NUMERIC DEFAULT 0;
 ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS consecutive_stay_discount_no_cleaning NUMERIC DEFAULT 0;
+ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS consecutive_stay_default_option TEXT DEFAULT 'no_cleaning';
+ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS peak_season_weekday_tier TEXT DEFAULT 'peak';
 -- 訂房對話流程（Phase 2）：
 ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS booking_trigger_keywords TEXT DEFAULT '我要訂房,訂房';
 ALTER TABLE public.user_states ADD COLUMN IF NOT EXISTS booking_session TEXT;
+-- 目前生效中的促銷方案：後台選定後，LINE 訂房對話流程會自動套用同一個，跟後台「試算報價」選同一個方案時算出來的金額保持一致；
+-- 選「無」（NULL）就跟現在一樣不打折。放在這裡（promotions 表格之後）是因為要參照 promotions(id)，執行順序上表格要先存在。
+ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS active_promotion_id UUID REFERENCES public.promotions(id) ON DELETE SET NULL;
 
 CREATE TABLE IF NOT EXISTS public.promotions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -341,5 +400,58 @@ BEGIN
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'booking_date_ranges' AND policyname = 'Allow Auth Access Booking Date Ranges') THEN
         CREATE POLICY "Allow Auth Access Booking Date Ranges" ON public.booking_date_ranges FOR ALL USING (auth.role() = 'authenticated');
+    END IF;
+END $$;
+
+-- 8. 【既有專案升級用】支援「訂房設定 > 流程設定 / 客製訊息發送」（Phase 3）：
+-- 「報價」試算表設定 + 三段可自訂罐頭訊息（歡迎詢問、報價確認、付款確認）
+ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS quote_sheet_id TEXT DEFAULT '';
+ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS quote_sheet_gid TEXT DEFAULT '0';
+ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS booking_welcome_message TEXT DEFAULT '🏡 LINE AI 訂房
+若您想先詢問空房或報價，請直接回覆以下資訊，我們會協助您確認：
+
+姓名 :
+電話 :
+入住日期：
+退房日期：
+入住人數：
+大人小孩：O大O小/O幼(3歲以下)
+是否包棟：';
+ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS booking_quote_message TEXT DEFAULT '入住日期：[入住日期]
+退房日期：[退房日期]
+入住人數：[人數]
+是否包棟：[是否包棟]
+價格：[總金額]
+
+提醒您，實際空房與價格會依日期、人數與平台狀況為準，
+確定訂房請回覆『是』或『否』，或者轉『真人客服』替您服務謝謝 😊';
+ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS booking_confirm_message TEXT DEFAULT '親愛的 [姓名] 您好，感謝您預訂我們的民宿！為您保留的訂房資訊如下：
+
+🔸 入住日期： [入住日期] 15:00 後
+🔸 退房日期： [退房日期] 11:00 前
+🔸 房型與人數： [是否包棟] / [人數] 位 ([大人小孩])
+🔸 訂單總額： [總金額]
+🔸 本次需匯訂金： [訂金]
+
+💳 【匯款帳號資訊】
+銀行代碼： 808
+銀行名稱： 玉山銀行
+帳號： 0118979100691
+
+⚠️ 溫馨提醒：
+請於 [匯款日時間] 前完成匯款，以利為您保留房間。若逾期未匯款，系統將自動取消訂房，不另行通知喔。
+匯款完成後，請回傳「帳號後五碼」或「轉帳明細截圖」，我們查帳無誤後會立即傳送【訂房成功確認信】給您！';
+
+CREATE TABLE IF NOT EXISTS public.custom_message_templates (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    title TEXT NOT NULL,
+    body TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+);
+ALTER TABLE public.custom_message_templates ENABLE ROW LEVEL SECURITY;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'custom_message_templates' AND policyname = 'Allow Auth Access Custom Message Templates') THEN
+        CREATE POLICY "Allow Auth Access Custom Message Templates" ON public.custom_message_templates FOR ALL USING (auth.role() = 'authenticated');
     END IF;
 END $$;

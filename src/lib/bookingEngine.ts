@@ -66,20 +66,36 @@ function toDateStr(date: Date): string {
   return `${y}-${m}-${d}`;
 }
 
+export type PeakSeasonWeekdayTier = 'peak' | 'weekday';
+
 /**
  * 判斷某日期落在哪個定價 tier。
  * 優先順序：旺季 > 連假 > 依星期幾（五、六＝小假日，其餘＝平日）。
+ *
+ * peakSeasonWeekdayTier：旺季期間的「平日」（日~四）要算旺季價還是平日價。
+ * 預設 'peak'（維持原本行為，旺季期間不分平假日一律旺季價）；設為 'weekday' 時，
+ * 旺季期間的平日改算平日價，旺季的小假日（五、六）不受影響仍是旺季價。
+ * 這個設定同時套用在個別租房與包棟的 tier 判斷（兩者共用這個函式)。
  */
-export function resolvePricingTier(date: Date, dateRanges: DateRange[]): string {
+export function resolvePricingTier(
+  date: Date,
+  dateRanges: DateRange[],
+  peakSeasonWeekdayTier: PeakSeasonWeekdayTier = 'peak'
+): string {
   const dateStr = toDateStr(date);
   const inRange = (type: string) =>
     dateRanges.some((r) => r.range_type === type && dateStr >= r.start_date && dateStr <= r.end_date);
 
-  if (inRange(TIER_PEAK_SEASON)) return TIER_PEAK_SEASON;
+  const day = date.getDay(); // 0=Sun ... 6=Sat
+  const isWeekday = day !== 5 && day !== 6;
+
+  if (inRange(TIER_PEAK_SEASON)) {
+    if (peakSeasonWeekdayTier === 'weekday' && isWeekday) return TIER_WEEKDAY;
+    return TIER_PEAK_SEASON;
+  }
   if (inRange(TIER_CONSECUTIVE_HOLIDAY)) return TIER_CONSECUTIVE_HOLIDAY;
 
-  const day = date.getDay(); // 0=Sun ... 6=Sat
-  return day === 5 || day === 6 ? TIER_SEMI_HOLIDAY : TIER_WEEKDAY;
+  return isWeekday ? TIER_WEEKDAY : TIER_SEMI_HOLIDAY;
 }
 
 export type AvailableRoom = RoomType & { price: number; extraPersonPrice: number | null };
@@ -319,6 +335,7 @@ export interface QuoteInput {
   packagePricing: WholeHousePackagePricing[];
   extraPersonRules: ExtraPersonRule[];
   maxOccupancy: number;
+  peakSeasonWeekdayTier?: PeakSeasonWeekdayTier; // 預設 'peak'，見 resolvePricingTier() 說明
 }
 
 export interface Recommendation {
@@ -375,7 +392,7 @@ export interface QuoteResult {
  * 交給對話流程呈現給顧客選擇。
  */
 export function computeQuote(input: QuoteInput): QuoteResult {
-  const tier = resolvePricingTier(input.date, input.dateRanges);
+  const tier = resolvePricingTier(input.date, input.dateRanges, input.peakSeasonWeekdayTier);
   const availableRooms = getAvailableIndividualRooms(tier, input.roomTypes, input.roomPricing, input.roomExtraPersonPricing);
   const individualOption = availableRooms.length ? computeIndividualOptions(input.headcount, availableRooms) : null;
   const wholeHouseOption = selectWholeHousePackage(
@@ -409,6 +426,8 @@ export interface NightlyPrice {
   tier: string;
   rawPrice: number | null; // 該晚原始價格（尚未套用促銷/連住折扣），null＝當晚這個方案不可用
   discountedPrice: number | null;
+  roomsUsed?: AvailableRoom[]; // 個別租房：當晚最便宜選項實際用到的房型
+  packageUsed?: WholeHousePackage; // 包棟：當晚最便宜選項套用的方案級距
 }
 
 export interface MultiNightOption {
@@ -430,6 +449,7 @@ export interface MultiNightQuoteInput {
   maxOccupancy: number;
   promotion: Promotion | null; // 只套用在第一晚
   consecutiveStayDiscountPerNight: number; // 固定金額，需打掃/無需打掃對應的金額由呼叫端算好傳進來
+  peakSeasonWeekdayTier?: PeakSeasonWeekdayTier; // 預設 'peak'，見 resolvePricingTier() 說明
 }
 
 export interface MultiNightQuoteResult {
@@ -440,20 +460,31 @@ export interface MultiNightQuoteResult {
   wholeHouse: MultiNightOption;
 }
 
+interface IndividualNightResult {
+  price: number;
+  rooms: AvailableRoom[]; // 這個選項實際用到的房型
+}
+
 function cheapestIndividualNightPrice(
   tier: string,
   headcount: number,
   roomTypes: RoomType[],
   roomPricing: RoomPricing[],
   roomExtraPersonPricing: RoomExtraPersonPricing[]
-): number | null {
+): IndividualNightResult | null {
   const availableRooms = getAvailableIndividualRooms(tier, roomTypes, roomPricing, roomExtraPersonPricing);
   if (!availableRooms.length) return null;
   const options = computeIndividualOptions(headcount, availableRooms);
-  const candidates: number[] = [];
-  if (options.openRoomOption.success) candidates.push(options.openRoomOption.totalPrice);
-  if (options.extraPersonOption) candidates.push(options.extraPersonOption.totalPrice);
-  return candidates.length ? Math.min(...candidates) : null;
+  const candidates: IndividualNightResult[] = [];
+  if (options.openRoomOption.success) candidates.push({ price: options.openRoomOption.totalPrice, rooms: options.openRoomOption.rooms });
+  if (options.extraPersonOption) candidates.push({ price: options.extraPersonOption.totalPrice, rooms: options.extraPersonOption.baseRooms });
+  if (!candidates.length) return null;
+  return candidates.reduce((a, b) => (b.price < a.price ? b : a));
+}
+
+interface WholeHouseNightResult {
+  price: number;
+  package: WholeHousePackage; // 這個選項實際套用的方案級距
 }
 
 function cheapestWholeHouseNightPrice(
@@ -463,15 +494,17 @@ function cheapestWholeHouseNightPrice(
   packagePricing: WholeHousePackagePricing[],
   extraPersonRules: ExtraPersonRule[],
   maxOccupancy: number
-): number | null {
-  const candidates: number[] = [];
+): WholeHouseNightResult | null {
+  const candidates: WholeHouseNightResult[] = [];
   const base = selectWholeHousePackage(headcount, packages, packagePricing, extraPersonRules, tier, maxOccupancy);
   if (base) {
-    candidates.push(base.extraPersonOptions.length ? Math.min(...base.extraPersonOptions.map((o) => o.grandTotal)) : base.basePrice);
+    const price = base.extraPersonOptions.length ? Math.min(...base.extraPersonOptions.map((o) => o.grandTotal)) : base.basePrice;
+    candidates.push({ price, package: base.package });
   }
   const upgrade = selectWholeHouseUpgradeOption(headcount, packages, packagePricing, tier);
-  if (upgrade) candidates.push(upgrade.price);
-  return candidates.length ? Math.min(...candidates) : null;
+  if (upgrade) candidates.push({ price: upgrade.price, package: upgrade.package });
+  if (!candidates.length) return null;
+  return candidates.reduce((a, b) => (b.price < a.price ? b : a));
 }
 
 /**
@@ -486,7 +519,7 @@ export function computeMultiNightQuote(input: MultiNightQuoteInput): MultiNightQ
   for (let i = 0; i < input.nights; i++) {
     const date = new Date(input.checkInDate);
     date.setDate(date.getDate() + i);
-    const tier = resolvePricingTier(date, input.dateRanges);
+    const tier = resolvePricingTier(date, input.dateRanges, input.peakSeasonWeekdayTier);
     const isFirstNight = i === 0;
 
     const applyDiscounts = (raw: number | null): number | null => {
@@ -503,8 +536,20 @@ export function computeMultiNightQuote(input: MultiNightQuoteInput): MultiNightQ
     const individualRaw = cheapestIndividualNightPrice(tier, input.headcount, input.roomTypes, input.roomPricing, input.roomExtraPersonPricing);
     const wholeHouseRaw = cheapestWholeHouseNightPrice(tier, input.headcount, input.packages, input.packagePricing, input.extraPersonRules, input.maxOccupancy);
 
-    individualNights.push({ date, tier, rawPrice: individualRaw, discountedPrice: applyDiscounts(individualRaw) });
-    wholeHouseNights.push({ date, tier, rawPrice: wholeHouseRaw, discountedPrice: applyDiscounts(wholeHouseRaw) });
+    individualNights.push({
+      date,
+      tier,
+      rawPrice: individualRaw?.price ?? null,
+      discountedPrice: applyDiscounts(individualRaw?.price ?? null),
+      roomsUsed: individualRaw?.rooms,
+    });
+    wholeHouseNights.push({
+      date,
+      tier,
+      rawPrice: wholeHouseRaw?.price ?? null,
+      discountedPrice: applyDiscounts(wholeHouseRaw?.price ?? null),
+      packageUsed: wholeHouseRaw?.package,
+    });
   }
 
   const sumOrNull = (nights: NightlyPrice[]): number | null =>

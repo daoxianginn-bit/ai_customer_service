@@ -95,18 +95,23 @@ export const handler: Handler = async (event) => {
         await supabase.from('user_states').update({ is_human_mode: false }).eq('line_user_id', userId);
       }
 
-      // 4.5 訂房對話流程（Phase 2）：偵測「我要訂房」觸發詞、或延續進行中的訂房詢問。
+      // 4.5 訂房對話流程（Phase 3）：偵測「我要訂房」觸發詞、或延續進行中的訂房詢問。
       // 日期/晚數/金額一律由 computeMultiNightQuote() 確定性計算，AI 只負責從對話中擷取欄位與潤飾回覆文字，
       // 避免像一般問答那樣讓 AI 自己算晚數/金額，容易算錯（例如把 7/30 入住 7/31 退房誤算成兩晚）。
       if (settings.is_ai_enabled) {
         const bookingTriggerKeywords = parseCsvKeywords(settings.booking_trigger_keywords || '我要訂房,訂房');
         const isBookingTrigger = !!matchKeyword(userMessage, bookingTriggerKeywords);
         const existingBookingSession = loadBookingSession(userState);
-        const activeBookingSession = existingBookingSession || (isBookingTrigger ? { collected: { ...EMPTY_BOOKING_FIELDS }, updatedAt: Date.now() } : null);
+        // 重打觸發關鍵字一律視為「重新開始一次新的訂房詢問」，即使前一次還卡在等「是/否」確認也一樣蓋掉，
+        // 避免「我要訂房」這句話裡的「要」被 handleBookingConfirmation 誤判成確認前一筆報價。
+        const isFirstTurn = isBookingTrigger;
+        const activeBookingSession = isBookingTrigger
+          ? { phase: 'collecting' as const, collected: { ...EMPTY_BOOKING_FIELDS }, quote: null, updatedAt: Date.now() }
+          : existingBookingSession;
 
         if (activeBookingSession) {
           try {
-            await handleBookingFlow(lineClient, lineEvent, settings, userId, userMessage, activeBookingSession);
+            await handleBookingFlow(lineClient, lineEvent, settings, userId, userMessage, activeBookingSession, isFirstTurn);
           } catch (e: any) {
             console.error('[Booking] flow failed:', e.message);
           }
@@ -189,35 +194,55 @@ function matchKeyword(userMessage: string, keywords: string[]): string | undefin
 }
 
 // ========================================================================
-// 訂房對話流程（Phase 2）
+// 訂房對話流程（Phase 3）
 // 設計原則：日期判斷、晚數計算、金額計算全部交給 computeMultiNightQuote()（純程式碼），
-// AI 只負責①從對話中擷取結構化欄位、②把算好的報價結果包裝成口語化文字，
+// AI 只負責①從對話中擷取結構化欄位、②把算好的報價結果包裝成罐頭訊息，
 // 絕對不讓 AI 自己計算晚數或金額——這正是實測發現「7/30 入住 7/31 退房被算成兩晚」的root cause。
+//
+// 流程分兩個階段（session.phase）：
+// 'collecting'：還在收集姓名/電話/入住退房日期/人數/大人小孩/是否包棟，收齊後立刻算報價、
+//               寫一筆進「報價」試算表、回覆罐頭報價訊息，並轉入 'awaiting_confirmation'。
+// 'awaiting_confirmation'：等顧客回「是」或「否」。回「是」會重新讀一次試算表那一列
+//               （可能已經被填上訂金/訂單編號等後台欄位），套用付款確認罐頭訊息回覆。
 // ========================================================================
 
 const BOOKING_SESSION_TTL_MS = 30 * 60 * 1000; // 30 分鐘沒有新回覆，視為放棄這次詢問（與對話記憶 TTL 一致）
 
 interface BookingCollectedFields {
+  name: string | null;
+  phone: string | null;
   checkin_date: string | null; // YYYY-MM-DD
   checkout_date: string | null; // YYYY-MM-DD
-  headcount: number | null;
+  headcount: number | null; // 入住總人數
+  adults: number | null; // 大人
+  kids: number | null; // 小孩
+  infants: number | null; // 3 歲以下幼兒
   whole_house: boolean | null;
-  kids: boolean | null;
-  special_request: boolean | null;
+}
+
+interface BookingQuoteInfo {
+  orderNo: string;
+  total: number;
+  useWholeHouse: boolean;
 }
 
 interface BookingSession {
+  phase: 'collecting' | 'awaiting_confirmation';
   collected: BookingCollectedFields;
+  quote: BookingQuoteInfo | null;
   updatedAt: number;
 }
 
 const EMPTY_BOOKING_FIELDS: BookingCollectedFields = {
+  name: null,
+  phone: null,
   checkin_date: null,
   checkout_date: null,
   headcount: null,
-  whole_house: null,
+  adults: null,
   kids: null,
-  special_request: null,
+  infants: null,
+  whole_house: null,
 };
 
 const BOOKING_FIELD_LABELS: Record<string, string> = {
@@ -232,15 +257,20 @@ function loadBookingSession(userState: any): BookingSession | null {
   try {
     const parsed = JSON.parse(userState.booking_session);
     if (!parsed || Date.now() - parsed.updatedAt > BOOKING_SESSION_TTL_MS) return null;
-    return { collected: { ...EMPTY_BOOKING_FIELDS, ...parsed.collected }, updatedAt: parsed.updatedAt };
+    return {
+      phase: parsed.phase === 'awaiting_confirmation' ? 'awaiting_confirmation' : 'collecting',
+      collected: { ...EMPTY_BOOKING_FIELDS, ...parsed.collected },
+      quote: parsed.quote || null,
+      updatedAt: parsed.updatedAt,
+    };
   } catch {
     return null;
   }
 }
 
-async function saveBookingSession(userId: string, collected: BookingCollectedFields) {
+async function saveBookingSession(userId: string, session: Omit<BookingSession, 'updatedAt'>) {
   try {
-    await supabase.from('user_states').upsert({ line_user_id: userId, booking_session: JSON.stringify({ collected, updatedAt: Date.now() }) });
+    await supabase.from('user_states').upsert({ line_user_id: userId, booking_session: JSON.stringify({ ...session, updatedAt: Date.now() }) });
   } catch (e: any) {
     console.error('[Booking] save session failed:', e.message);
   }
@@ -254,21 +284,29 @@ async function clearBookingSession(userId: string) {
   }
 }
 
-// 只做欄位擷取，不作答、不計算，避免跟一般問答一樣被誤導去自由發揮
+// 只做欄位擷取，不作答、不計算，避免跟一般問答一樣被誤導去自由發揮。
+// 顧客回覆可能有兩種格式（都要能辨識）：(1) 有欄位名稱標記，例如「姓名 :小明」；
+// (2) 沒有欄位名稱，依「姓名/電話/入住日期/退房日期/入住人數/大人小孩/是否包棟」固定順序一行一個欄位。
 function buildBookingExtractionPrompt(todayIso: string, collected: BookingCollectedFields): string {
   return (
     `你是專門負責「訂房資訊擷取」的助手，這個步驟不需要回答問題、不需要計算晚數或金額，只需要從對話中擷取欄位。\n` +
     `今天的日期是 ${todayIso}。\n\n` +
+    `顧客的回覆可能有兩種格式，都要能辨識：\n` +
+    `(1) 有欄位名稱標記，例如：「姓名 :小明」「入住日期：8/10」\n` +
+    `(2) 沒有欄位名稱，純粹依照「姓名／電話／入住日期／退房日期／入住人數／大人小孩／是否包棟」這個固定順序，一行對應一個欄位。\n\n` +
     `需要擷取的欄位（JSON 格式）：\n` +
+    `- name：姓名，字串。\n` +
+    `- phone：電話，字串。\n` +
     `- checkin_date：入住日期，轉換成 YYYY-MM-DD。若使用者只寫月/日（如「7/30」），用今天日期推算最合理的年份：日期還沒過就用今年，已經過了就用明年。\n` +
     `- checkout_date：退房日期，格式同上。\n` +
-    `- headcount：入住人數，純數字。\n` +
-    `- whole_house：是否包棟，true/false。\n` +
-    `- kids：是否有小朋友同行，true/false。\n` +
-    `- special_request：是否有特殊需求，true/false。\n\n` +
+    `- headcount：入住總人數，純數字。\n` +
+    `- adults：大人人數，純數字，從「大人小孩」欄位解析（例如「10大2小」→ adults=10）。\n` +
+    `- kids：小孩人數，純數字，同上（例如「10大2小」→ kids=2）。\n` +
+    `- infants：3 歲以下幼兒人數，純數字，沒提到就是 0（例如「10大2小1幼」→ infants=1）。\n` +
+    `- whole_house：是否包棟，true/false，從「是」「否」或包棟／不包棟等文字判斷。\n\n` +
     `目前已經確認的欄位：${JSON.stringify(collected)}\n\n` +
     `規則：\n` +
-    `1. 只回傳一個 JSON 物件，包含以上 6 個欄位，不要加任何其他文字、不要用 markdown code block。\n` +
+    `1. 只回傳一個 JSON 物件，包含以上 9 個欄位，不要加任何其他文字、不要用 markdown code block。\n` +
     `2. 從對話中能確定的欄位才填值，不確定或沒提到的欄位維持已知欄位的值（已知也是 null 就填 null），絕對不要自己猜測。\n` +
     `3. 不要計算入住晚數或任何金額，那不是這個步驟的工作。`
   );
@@ -312,7 +350,7 @@ function buildAskMissingFieldsMessage(missing: string[]): string {
 }
 
 async function fetchBookingData() {
-  const [rt, rp, rep, wp, wpp, epr, dr] = await Promise.all([
+  const [rt, rp, rep, wp, wpp, epr, dr, promo] = await Promise.all([
     supabase.from('room_types').select('*'),
     supabase.from('room_pricing').select('*'),
     supabase.from('room_extra_person_pricing').select('*'),
@@ -320,6 +358,7 @@ async function fetchBookingData() {
     supabase.from('whole_house_package_pricing').select('*'),
     supabase.from('whole_house_extra_person_rules').select('*'),
     supabase.from('booking_date_ranges').select('*'),
+    supabase.from('promotions').select('*'),
   ]);
   return {
     roomTypes: rt.data || [],
@@ -329,34 +368,52 @@ async function fetchBookingData() {
     packagePricing: wpp.data || [],
     extraPersonRules: epr.data || [],
     dateRanges: (dr.data || []).map((d: any) => ({ range_type: d.range_type, start_date: d.start_date, end_date: d.end_date })),
+    promotions: promo.data || [],
   };
 }
 
-function buildBookingQuoteSummary(
-  collected: BookingCollectedFields,
-  nights: number,
-  option: { nights: { date: Date; tier: string; discountedPrice: number | null }[]; total: number | null },
-  useWholeHouse: boolean
-): string {
-  const lines: string[] = [];
-  lines.push(`入住日期：${collected.checkin_date}`);
-  lines.push(`退房日期：${collected.checkout_date}（共 ${nights} 晚）`);
-  lines.push(`入住人數：${collected.headcount} 人`);
-  lines.push(`方案類型：${useWholeHouse ? '包棟' : '個別租房'}`);
-  if (collected.kids) lines.push('顧客提及有小朋友同行');
-  if (collected.special_request) lines.push('顧客提及有特殊需求，需真人客服確認細節');
+// 「大人小孩」欄位的顯示格式，跟客人回覆時用的格式一致：10大2小、10大2小1幼
+function formatAdultsKids(adults: number | null, kids: number | null, infants: number | null): string {
+  const a = adults ?? 0;
+  const k = kids ?? 0;
+  const i = infants ?? 0;
+  return `${a}大${k}小${i > 0 ? `${i}幼` : ''}`;
+}
 
-  if (option.total == null) {
-    lines.push('很抱歉，這個日期／人數組合目前無法自動試算（可能是該時段未開放此方案，或超過可接待人數），需要真人客服協助確認。');
-  } else {
-    lines.push('每晚明細：');
-    for (const n of option.nights) {
-      lines.push(`　${n.date.toISOString().slice(0, 10)}（${n.tier}）：${n.discountedPrice == null ? '無法報價' : `NT$ ${n.discountedPrice.toLocaleString()}`}`);
-    }
-    lines.push(`預估總價：NT$ ${option.total.toLocaleString()}`);
+// 匯款截止時間：現在（台灣時間）18:00 前 → 今天 21:00；18:00（含）以後 → 明天 21:00。
+// 用 UTC+8 手動位移計算，不依賴伺服器時區設定（Netlify Functions 預設是 UTC）。
+function computePaymentDeadline(): string {
+  const taiwanMs = Date.now() + 8 * 60 * 60 * 1000;
+  const taiwanNow = new Date(taiwanMs);
+  const deadlineMs = taiwanNow.getUTCHours() >= 18 ? taiwanMs + 24 * 60 * 60 * 1000 : taiwanMs;
+  const deadline = new Date(deadlineMs);
+  const y = deadline.getUTCFullYear();
+  const m = String(deadline.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(deadline.getUTCDate()).padStart(2, '0');
+  return `${y}/${m}/${d} 21:00`;
+}
+
+// 罐頭訊息合併欄位：把範本裡的 [欄位名稱] 換成實際值
+function mergeTemplate(template: string, fields: Record<string, string>): string {
+  let result = template;
+  for (const [key, value] of Object.entries(fields)) {
+    result = result.split(`[${key}]`).join(value);
   }
-  lines.push('以上為初步試算，實際房況與價格仍需真人客服確認後才算完成訂房。');
-  return lines.join('\n');
+  return result;
+}
+
+// 內部計算一律用 YYYY-MM-DD（Date 建構子看得懂），但試算表欄位與客人看到的訊息用 yyyy/MM/dd 比較好讀。
+function toSlashDate(isoDate: string | null | undefined): string {
+  return (isoDate || '').replace(/-/g, '/');
+}
+
+function generateOrderNo(): string {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, '0');
+  const d = String(now.getDate()).padStart(2, '0');
+  const rand = String(Math.floor(1000 + Math.random() * 9000));
+  return `${y}${m}${d}-${rand}`;
 }
 
 async function handleBookingFlow(
@@ -365,8 +422,14 @@ async function handleBookingFlow(
   settings: any,
   userId: string,
   userMessage: string,
-  session: BookingSession
+  session: BookingSession,
+  isFirstTurn: boolean
 ) {
+  if (session.phase === 'awaiting_confirmation') {
+    await handleBookingConfirmation(lineClient, lineEvent, settings, userId, userMessage, session);
+    return;
+  }
+
   let collected = session.collected;
   try {
     collected = await extractBookingFields(settings, userMessage, collected);
@@ -376,8 +439,11 @@ async function handleBookingFlow(
 
   const missing = getMissingRequiredBookingFields(collected);
   if (missing.length > 0) {
-    await saveBookingSession(userId, collected);
-    await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: buildAskMissingFieldsMessage(missing) });
+    await saveBookingSession(userId, { phase: 'collecting', collected, quote: null });
+    // 第一次觸發（顧客剛打「我要訂房」，這則訊息本身通常還沒附資訊）就送出可自訂的歡迎詢問罐頭訊息；
+    // 後續回覆仍缺欄位的少見情況，才用「還需要補充」的提示，避免整段罐頭訊息重複洗版。
+    const replyText = isFirstTurn ? settings.booking_welcome_message || buildAskMissingFieldsMessage(missing) : buildAskMissingFieldsMessage(missing);
+    await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
     return;
   }
 
@@ -386,7 +452,7 @@ async function handleBookingFlow(
   const nights = Math.round((checkoutDate.getTime() - checkinDate.getTime()) / 86400000);
 
   if (!Number.isFinite(nights) || nights <= 0) {
-    await saveBookingSession(userId, { ...collected, checkin_date: null, checkout_date: null });
+    await saveBookingSession(userId, { phase: 'collecting', collected: { ...collected, checkin_date: null, checkout_date: null }, quote: null });
     await lineClient.replyMessage(lineEvent.replyToken, {
       type: 'text',
       text: '不好意思，入住日期與退房日期看起來有點對不上（退房日期需要晚於入住日期），麻煩您再提供一次正確的入住與退房日期喔。',
@@ -397,6 +463,17 @@ async function handleBookingFlow(
   try {
     const data = await fetchBookingData();
     const maxOccupancy = data.packages.length ? Math.max(...data.packages.map((p: any) => p.occupancy)) : 0;
+    // 連住折扣是民宿自訂政策、不是詢問顧客的選項，依後台設定的預設類型自動套用，
+    // 確保跟後台「試算報價」選同一種類型時算出來的金額一致。
+    const consecutiveStayDiscountPerNight =
+      settings.consecutive_stay_default_option === 'cleaning'
+        ? settings.consecutive_stay_discount_cleaning || 0
+        : settings.consecutive_stay_discount_no_cleaning || 0;
+    // 促銷方案同理：後台在「訂房設定」選定「目前生效的促銷方案」，LINE 對話流程自動套用同一個，
+    // 不用顧客自己提，也不用另外詢問，確保跟後台選同一個方案試算出來的金額一致。
+    const activePromotion = settings.active_promotion_id
+      ? data.promotions.find((p: any) => p.id === settings.active_promotion_id) || null
+      : null;
     const result = computeMultiNightQuote({
       checkInDate: checkinDate,
       nights,
@@ -409,25 +486,149 @@ async function handleBookingFlow(
       packagePricing: settings.booking_whole_house_enabled ? data.packagePricing : [],
       extraPersonRules: settings.booking_whole_house_enabled ? data.extraPersonRules : [],
       maxOccupancy,
-      promotion: null,
-      consecutiveStayDiscountPerNight: 0,
+      promotion: activePromotion,
+      consecutiveStayDiscountPerNight,
+      peakSeasonWeekdayTier: settings.peak_season_weekday_tier || 'peak',
     });
 
     const useWholeHouse = collected.whole_house === true;
     const chosenOption = useWholeHouse ? result.wholeHouse : result.individual;
-    const rawSummary = buildBookingQuoteSummary(collected, nights, chosenOption, useWholeHouse);
-    const polished = await answerWithPolish(settings, rawSummary);
 
-    await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: polished });
+    if (chosenOption.total == null) {
+      await lineClient.replyMessage(lineEvent.replyToken, {
+        type: 'text',
+        text: '不好意思，這個日期／人數組合目前無法自動試算（可能是該時段未開放此方案，或超過可接待人數），麻煩您點選「真人客服」，我們會盡快為您確認房況與價格。',
+      });
+      await clearBookingSession(userId);
+      return;
+    }
+
+    let name = collected.name;
+    if (!name) {
+      try {
+        const profile = await lineClient.getProfile(userId);
+        name = profile.displayName;
+      } catch {
+        name = '';
+      }
+    }
+
+    const total = chosenOption.total as number;
+    const orderNo = generateOrderNo();
+
+    // 客人送出資料、算完報價當下就寫入「報價」試算表（不管最後回「是」或「否」都會留紀錄，
+    // 方便之後用「客製訊息發送」追蹤/促銷還沒確認的客人）。欄位一律照試算表標題列的名稱比對寫入，
+    // 不寫死欄位順序，之後在試算表加減欄位、調順序都不會壞掉。
+    if (settings.quote_sheet_id) {
+      try {
+        await appendQuoteSheetRow(settings.quote_sheet_id, settings.quote_sheet_gid || '0', {
+          Line_seq_id: userId,
+          姓名: name || '',
+          入住日期: toSlashDate(collected.checkin_date),
+          退房日期: toSlashDate(collected.checkout_date),
+          入住天數: String(nights),
+          人數: String(collected.headcount),
+          大人小孩: formatAdultsKids(collected.adults, collected.kids, collected.infants),
+          是否包棟: useWholeHouse ? '是' : '否',
+          總金額: String(total),
+          訂單編號: orderNo,
+        });
+      } catch (e: any) {
+        console.error('[Booking] write quote sheet failed:', e.message);
+      }
+    }
+
+    const quoteMessage = mergeTemplate(settings.booking_quote_message || '', {
+      入住日期: toSlashDate(collected.checkin_date),
+      退房日期: toSlashDate(collected.checkout_date),
+      人數: String(collected.headcount),
+      是否包棟: useWholeHouse ? '是' : '否',
+      總金額: total.toLocaleString(),
+    });
+
+    await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: quoteMessage });
+    await saveBookingSession(userId, {
+      phase: 'awaiting_confirmation',
+      collected: { ...collected, name },
+      quote: { orderNo, total, useWholeHouse },
+    });
   } catch (e: any) {
     console.error('[Booking] quote failed:', e.message);
     await lineClient.replyMessage(lineEvent.replyToken, {
       type: 'text',
       text: '不好意思，剛剛試算報價時出了一點狀況，麻煩您點選「真人客服」按鈕，我們會盡快為您確認房況與價格。',
     });
-  } finally {
     await clearBookingSession(userId);
   }
+}
+
+// 等顧客回「是」/「否」確認訂房。回「是」會重新讀一次試算表那一列（訂金/訂單編號等後台欄位
+// 可能已經被填上或用公式算好），套用可自訂的付款確認罐頭訊息回覆；回「否」或看不懂就照對應方式處理。
+async function handleBookingConfirmation(
+  lineClient: Client,
+  lineEvent: any,
+  settings: any,
+  userId: string,
+  userMessage: string,
+  session: BookingSession
+) {
+  // 用「開頭比對」而不是「包含比對」，避免不相關句子裡剛好出現「要」「好」這類字被誤判成確認/取消
+  // （例如「我要訂房」如果用 includes('要') 會被誤判成 isYes）。
+  const trimmed = userMessage.trim();
+  const isNo = /^(否|不要|不需要|取消|no)/i.test(trimmed);
+  const isYes = !isNo && /^(是|對|確定|好|沒問題|ok|yes)/i.test(trimmed);
+
+  if (!isYes && !isNo) {
+    await lineClient.replyMessage(lineEvent.replyToken, {
+      type: 'text',
+      text: '不好意思，麻煩回覆「是」確認訂房，或「否」取消，謝謝！',
+    });
+    return; // 停留在 awaiting_confirmation，不清 session
+  }
+
+  if (isNo) {
+    await lineClient.replyMessage(lineEvent.replyToken, {
+      type: 'text',
+      text: '好的，這次先不訂房沒關係！之後想重新試算歡迎再輸入「我要訂房」，或直接點選「真人客服」讓我們協助您。',
+    });
+    await clearBookingSession(userId);
+    return;
+  }
+
+  const quote = session.quote;
+  if (!quote) {
+    await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: '不好意思，剛剛的報價資訊遺失了，麻煩您重新輸入「我要訂房」再試一次。' });
+    await clearBookingSession(userId);
+    return;
+  }
+
+  let sheetRow: Record<string, string> | null = null;
+  if (settings.quote_sheet_id) {
+    try {
+      sheetRow = await findQuoteSheetRowByOrderNo(settings.quote_sheet_id, settings.quote_sheet_gid || '0', quote.orderNo);
+    } catch (e: any) {
+      console.error('[Booking] re-read quote sheet failed:', e.message);
+    }
+  }
+
+  const depositRaw = sheetRow?.['訂金'] || '';
+  const depositNumber = depositRaw ? Number(depositRaw) : NaN;
+  const collected = session.collected;
+
+  const confirmMessage = mergeTemplate(settings.booking_confirm_message || '', {
+    姓名: collected.name || '',
+    入住日期: toSlashDate(collected.checkin_date),
+    退房日期: toSlashDate(collected.checkout_date),
+    是否包棟: quote.useWholeHouse ? '是' : '否',
+    人數: String(collected.headcount ?? ''),
+    大人小孩: formatAdultsKids(collected.adults, collected.kids, collected.infants),
+    總金額: quote.total.toLocaleString(),
+    訂金: Number.isFinite(depositNumber) ? depositNumber.toLocaleString() : '（請洽真人客服確認金額）',
+    匯款日時間: computePaymentDeadline(),
+  });
+
+  await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: confirmMessage });
+  await clearBookingSession(userId);
 }
 
 // ========================================================================
@@ -478,7 +679,10 @@ async function getGoogleAccessToken(): Promise<string> {
   const header = { alg: 'RS256', typ: 'JWT' };
   const claim = {
     iss: clientEmail,
-    scope: 'https://www.googleapis.com/auth/spreadsheets.readonly',
+    // 訂房設定（Phase 3）要把客人資料寫進「報價」試算表，改用可讀寫的完整範圍（原本只有唯讀）。
+    // 服務帳號本身的權限仍由試算表的「共用」設定決定：讀知識庫的試算表分享 Viewer 即可，
+    // 「報價」試算表要能被寫入，必須把服務帳號的信箱加到該試算表的共用權限並設為 Editor。
+    scope: 'https://www.googleapis.com/auth/spreadsheets',
     aud: 'https://oauth2.googleapis.com/token',
     iat: nowSec,
     exp: nowSec + 3600,
@@ -511,6 +715,62 @@ async function resolveSheetTitle(sheetId: string, gid: string, accessToken: stri
   const sheets = result.sheets || [];
   const target = sheets.find((s: any) => String(s.properties?.sheetId) === String(gid || '0'));
   return (target || sheets[0])?.properties?.title || '工作表1';
+}
+
+// ========================================================================
+// 「報價」試算表讀寫（Phase 3）：訂房設定 > 流程設定 / 客製訊息發送 共用。
+// 不寫死欄位順序——一律先讀第一列（標題列）建立「欄位名稱 → 第幾欄」對照表，
+// 之後在試算表加減欄位、調順序都不會壞掉。
+// ========================================================================
+
+async function getQuoteSheetHeaders(sheetId: string, gid: string, accessToken: string): Promise<{ title: string; headers: string[] }> {
+  const title = await resolveSheetTitle(sheetId, gid, accessToken);
+  const range = encodeURIComponent(`${title}!1:1`);
+  const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${range}`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  const result: any = await res.json();
+  if (!res.ok || result.error) throw new Error(result.error?.message || '讀取「報價」試算表標題列失敗');
+  const headers: string[] = (result.values?.[0] || []).map((h: string) => (h || '').trim());
+  return { title, headers };
+}
+
+async function appendQuoteSheetRow(sheetId: string, gid: string, rowData: Record<string, string>): Promise<void> {
+  const accessToken = await getGoogleAccessToken();
+  const { title, headers } = await getQuoteSheetHeaders(sheetId, gid, accessToken);
+  const row = headers.map((h) => rowData[h] ?? '');
+  const range = encodeURIComponent(`${title}!A:Z`);
+  const res = await fetch(
+    `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${range}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
+    {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ values: [row] }),
+    }
+  );
+  const result: any = await res.json();
+  if (!res.ok || result.error) throw new Error(result.error?.message || '寫入「報價」試算表失敗');
+}
+
+async function findQuoteSheetRowByOrderNo(sheetId: string, gid: string, orderNo: string): Promise<Record<string, string> | null> {
+  const accessToken = await getGoogleAccessToken();
+  const { title, headers } = await getQuoteSheetHeaders(sheetId, gid, accessToken);
+  const orderIdx = headers.indexOf('訂單編號');
+  if (orderIdx === -1) return null;
+  const range = encodeURIComponent(`${title}!A2:Z`);
+  const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${range}`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  const result: any = await res.json();
+  if (!res.ok || result.error) throw new Error(result.error?.message || '讀取「報價」試算表資料失敗');
+  const rows: string[][] = result.values || [];
+  const match = rows.find((r) => r[orderIdx] === orderNo);
+  if (!match) return null;
+  const obj: Record<string, string> = {};
+  headers.forEach((h, i) => {
+    obj[h] = match[i] ?? '';
+  });
+  return obj;
 }
 
 function parseSheetRows(values: string[][]): KnowledgeRow[] {
