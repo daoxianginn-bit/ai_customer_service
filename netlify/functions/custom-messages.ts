@@ -16,6 +16,10 @@ import crypto from 'crypto';
 
 const supabase = createClient(process.env.SUPABASE_URL || '', process.env.SUPABASE_SERVICE_ROLE_KEY || '');
 
+// 單次發送人數上限：同步逐一 push，人太多容易超過 Netlify function 執行時間上限被砍掉，
+// 前端跟後端都用這個常數擋，超過就請對方分批送。
+const MAX_BATCH_SEND = 50;
+
 export const handler: Handler = async (event) => {
   if (event.httpMethod !== 'POST') return { statusCode: 405, body: 'Method Not Allowed' };
 
@@ -52,6 +56,11 @@ export const handler: Handler = async (event) => {
       const template: string = body.template || '';
       if (!recipients.length) return { statusCode: 400, body: JSON.stringify({ error: '沒有選擇收件人' }) };
       if (!template.trim()) return { statusCode: 400, body: JSON.stringify({ error: '訊息內容是空的' }) };
+      // 同步逐一 push，人數太多容易超過 function 執行時間上限，中途被砍掉會不知道實際送到誰；
+      // 分批送，每批數量可控，失敗也只影響一小批，前端也會依這個上限擋住一次選太多人。
+      if (recipients.length > MAX_BATCH_SEND) {
+        return { statusCode: 400, body: JSON.stringify({ error: `一次最多發送 ${MAX_BATCH_SEND} 位，請分批發送（這次選了 ${recipients.length} 位）` }) };
+      }
 
       const lineClient = new Client({
         channelAccessToken: settings.line_channel_access_token,

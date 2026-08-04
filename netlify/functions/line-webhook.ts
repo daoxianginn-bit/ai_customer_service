@@ -104,9 +104,11 @@ export const handler: Handler = async (event) => {
         const existingBookingSession = loadBookingSession(userState);
         // 重打觸發關鍵字一律視為「重新開始一次新的訂房詢問」，即使前一次還卡在等「是/否」確認也一樣蓋掉，
         // 避免「我要訂房」這句話裡的「要」被 handleBookingConfirmation 誤判成確認前一筆報價。
+        // 但如果先前已經在「報價」試算表記錄過列號，沿用同一列，不要重新開一列造成重複紀錄
+        // （例如客人或 LINE App 網路重試把觸發詞送了兩次）。
         const isFirstTurn = isBookingTrigger;
         const activeBookingSession = isBookingTrigger
-          ? { phase: 'collecting' as const, collected: { ...EMPTY_BOOKING_FIELDS }, quote: null, sheetRowNumber: null, updatedAt: Date.now() }
+          ? { phase: 'collecting' as const, collected: { ...EMPTY_BOOKING_FIELDS }, quote: null, sheetRowNumber: existingBookingSession?.sheetRowNumber ?? null, updatedAt: Date.now() }
           : existingBookingSession;
 
         if (activeBookingSession) {
@@ -314,14 +316,46 @@ function buildBookingExtractionPrompt(todayIso: string, collected: BookingCollec
   );
 }
 
+const BOOKING_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+// AI 回傳的 JSON 型別不一定可靠（例如把人數寫成字串「15人」而不是數字 15），
+// 型別不對的欄位直接丟掉、維持原本已知值，不要讓髒資料流進報價計算——空值至少會被
+// 「缺欄位」擋下來繼續追問，型別錯的髒資料卻會默默算出錯誤金額，更難察覺。
+function coerceBookingFieldValue(key: keyof BookingCollectedFields, value: unknown): BookingCollectedFields[typeof key] | undefined {
+  switch (key) {
+    case 'checkin_date':
+    case 'checkout_date':
+      return typeof value === 'string' && BOOKING_DATE_RE.test(value) ? value : undefined;
+    case 'headcount':
+    case 'adults':
+    case 'kids':
+    case 'infants': {
+      const n = typeof value === 'number' ? value : Number(value);
+      return Number.isFinite(n) && n >= 0 ? Math.round(n) : undefined;
+    }
+    case 'whole_house':
+      if (typeof value === 'boolean') return value;
+      if (value === 'true') return true;
+      if (value === 'false') return false;
+      return undefined;
+    case 'name':
+    case 'phone':
+      return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+    default:
+      return undefined;
+  }
+}
+
 function parseBookingExtraction(raw: string, collected: BookingCollectedFields): BookingCollectedFields {
   try {
     const cleaned = raw.trim().replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '');
     const parsed = JSON.parse(cleaned);
     const merged: BookingCollectedFields = { ...collected };
     (Object.keys(EMPTY_BOOKING_FIELDS) as (keyof BookingCollectedFields)[]).forEach((key) => {
-      if (parsed[key] !== undefined && parsed[key] !== null) {
-        (merged as any)[key] = parsed[key];
+      if (parsed[key] === undefined || parsed[key] === null) return;
+      const coerced = coerceBookingFieldValue(key, parsed[key]);
+      if (coerced !== undefined) {
+        (merged as any)[key] = coerced;
       }
     });
     return merged;
@@ -419,6 +453,30 @@ function toSlashDate(isoDate: string | null | undefined): string {
   return (isoDate || '').replace(/-/g, '/');
 }
 
+// 剛觸發這次訂房詢問：先找這個 LINE_USER_ID 有沒有「還沒算出總金額」的既有列可以沿用
+// （降低併發或網路重試造成重複列的機會），真的找不到才新增一列，寫入 LINE_USER_ID／暱稱／狀態。
+async function createOrReuseContactRow(settings: any, userId: string, lineClient: Client): Promise<number | null> {
+  try {
+    const existing = await findOpenQuoteSheetRow(settings.quote_sheet_id, settings.quote_sheet_gid || '0', userId);
+    if (existing) return existing;
+    let nickname = '';
+    try {
+      const profile = await lineClient.getProfile(userId);
+      nickname = profile.displayName;
+    } catch {
+      // 抓不到暱稱不影響流程，留空即可
+    }
+    return await appendQuoteSheetRow(settings.quote_sheet_id, settings.quote_sheet_gid || '0', {
+      LINE_USER_ID: userId,
+      LINE_NAME: nickname,
+      狀態: '詢問中',
+    });
+  } catch (e: any) {
+    console.error('[Booking] create contact row failed:', e.message);
+    return null;
+  }
+}
+
 async function handleBookingFlow(
   lineClient: Client,
   lineEvent: any,
@@ -433,34 +491,21 @@ async function handleBookingFlow(
     return;
   }
 
-  let sheetRowNumber = session.sheetRowNumber ?? null;
-
-  // 剛觸發這次訂房詢問（顧客第一次傳「我要訂房」）：先把 LINE 使用者的 userId／暱稱寫進「報價」
-  // 試算表這一列，不用等到欄位收齊、算出報價才留下紀錄；之後這次詢問陸續補齊的欄位都更新回同一列。
-  if (isFirstTurn && settings.quote_sheet_id) {
-    try {
-      let nickname = '';
-      try {
-        const profile = await lineClient.getProfile(userId);
-        nickname = profile.displayName;
-      } catch {
-        // 抓不到暱稱不影響流程，留空即可
-      }
-      sheetRowNumber = await appendQuoteSheetRow(settings.quote_sheet_id, settings.quote_sheet_gid || '0', {
-        LINE_USER_ID: userId,
-        LINE_NAME: nickname,
-      });
-    } catch (e: any) {
-      console.error('[Booking] create contact row failed:', e.message);
-    }
-  }
-
-  let collected = session.collected;
-  try {
-    collected = await extractBookingFields(settings, userMessage, collected);
-  } catch (e: any) {
+  // 平行處理三件互不依賴的事：AI 擷取欄位、預先抓訂房計算會用到的資料、（第一次觸發時）建立/沿用
+  // 「報價」試算表的聯絡列。原本是依序一個一個 await（AI 呼叫 + 好幾次 Google Sheets 來回），
+  // 客人在 LINE 上會等比較久；平行跑可以省下不少等待時間。
+  const extractionPromise = extractBookingFields(settings, userMessage, session.collected).catch((e: any) => {
     console.error('[Booking] field extraction failed:', e.message);
-  }
+    return session.collected;
+  });
+  const bookingDataPromise = fetchBookingData();
+  const contactRowPromise: Promise<number | null> =
+    isFirstTurn && settings.quote_sheet_id && !session.sheetRowNumber
+      ? createOrReuseContactRow(settings, userId, lineClient)
+      : Promise.resolve(session.sheetRowNumber ?? null);
+
+  const [collected, contactRowResult] = await Promise.all([extractionPromise, contactRowPromise]);
+  let sheetRowNumber = contactRowResult;
 
   const missing = getMissingRequiredBookingFields(collected);
   if (missing.length > 0) {
@@ -486,7 +531,7 @@ async function handleBookingFlow(
   }
 
   try {
-    const data = await fetchBookingData();
+    const data = await bookingDataPromise; // 前面已經平行開始抓了，這裡通常立即就有結果
     const maxOccupancy = data.packages.length ? Math.max(...data.packages.map((p: any) => p.occupancy)) : 0;
     // 連住折扣是民宿自訂政策、不是詢問顧客的選項，依後台設定的預設類型自動套用，
     // 確保跟後台「試算報價」選同一種類型時算出來的金額一致。
@@ -556,11 +601,16 @@ async function handleBookingFlow(
           大人小孩: formatAdultsKids(collected.adults, collected.kids, collected.infants),
           是否包棟: useWholeHouse ? '是' : '否',
           總金額: String(total),
+          狀態: '待確認',
         };
+        if (!sheetRowNumber) {
+          // 第一階段沒能拿到列號（例如剛設定好權限那次、或併發時序問題），先找一次有沒有既有的
+          // 「還沒算出總金額」的列可以沿用，真的找不到才新增一列，避免重複列。
+          sheetRowNumber = await findOpenQuoteSheetRow(settings.quote_sheet_id, settings.quote_sheet_gid || '0', userId);
+        }
         if (sheetRowNumber) {
           await mergeUpdateQuoteSheetRow(settings.quote_sheet_id, settings.quote_sheet_gid || '0', sheetRowNumber, fields);
         } else {
-          // 第一階段的聯絡資訊沒寫成功（例如剛設定好權限那次），這裡退而求其次直接新增一列，至少不會漏掉這筆報價紀錄。
           sheetRowNumber = await appendQuoteSheetRow(settings.quote_sheet_id, settings.quote_sheet_gid || '0', fields);
         }
       } catch (e: any) {
@@ -619,6 +669,13 @@ async function handleBookingConfirmation(
   }
 
   if (isNo) {
+    if (settings.quote_sheet_id && session.sheetRowNumber) {
+      try {
+        await mergeUpdateQuoteSheetRow(settings.quote_sheet_id, settings.quote_sheet_gid || '0', session.sheetRowNumber, { 狀態: '已取消' });
+      } catch (e: any) {
+        console.error('[Booking] update cancel status failed:', e.message);
+      }
+    }
     await lineClient.replyMessage(lineEvent.replyToken, {
       type: 'text',
       text: '好的，這次先不訂房沒關係！之後想重新試算歡迎再輸入「我要訂房」，或直接點選「真人客服」讓我們協助您。',
@@ -641,6 +698,7 @@ async function handleBookingConfirmation(
     try {
       await mergeUpdateQuoteSheetRow(settings.quote_sheet_id, settings.quote_sheet_gid || '0', session.sheetRowNumber, {
         預定日期: todayTaiwanSlash(),
+        狀態: '已確認',
       });
       sheetRow = await getQuoteSheetRow(settings.quote_sheet_id, settings.quote_sheet_gid || '0', session.sheetRowNumber);
     } catch (e: any) {
@@ -697,6 +755,10 @@ interface KnowledgeRow {
 const SHEET_CACHE_TTL_MS = 5 * 60 * 1000; // 5 分鐘快取，避免每則訊息都重打 Google API
 
 let tokenCache: { token: string; expiresAt: number } | null = null;
+// 「報價」試算表的標題列很少變動，短暫快取可以省掉同一次對話裡好幾個步驟（建立聯絡列/更新報價/確認）
+// 各自重新讀一次標題列跟工作表名稱的來回，跟下面知識庫試算表快取（SHEET_CACHE_TTL_MS）同樣的做法。
+let quoteSheetHeaderCache: { key: string; title: string; headers: string[]; fetchedAt: number } | null = null;
+const QUOTE_SHEET_HEADER_CACHE_TTL_MS = 5 * 60 * 1000;
 let sheetCache: { key: string; rows: KnowledgeRow[]; fetchedAt: number } | null = null;
 
 function base64url(input: Buffer | string): string {
@@ -761,6 +823,11 @@ async function resolveSheetTitle(sheetId: string, gid: string, accessToken: stri
 // ========================================================================
 
 async function getQuoteSheetHeaders(sheetId: string, gid: string, accessToken: string): Promise<{ title: string; headers: string[] }> {
+  const cacheKey = `${sheetId}:${gid}`;
+  const now = Date.now();
+  if (quoteSheetHeaderCache && quoteSheetHeaderCache.key === cacheKey && now - quoteSheetHeaderCache.fetchedAt < QUOTE_SHEET_HEADER_CACHE_TTL_MS) {
+    return { title: quoteSheetHeaderCache.title, headers: quoteSheetHeaderCache.headers };
+  }
   const title = await resolveSheetTitle(sheetId, gid, accessToken);
   const range = encodeURIComponent(`${title}!1:1`);
   const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${range}`, {
@@ -769,7 +836,32 @@ async function getQuoteSheetHeaders(sheetId: string, gid: string, accessToken: s
   const result: any = await res.json();
   if (!res.ok || result.error) throw new Error(result.error?.message || '讀取「報價」試算表標題列失敗');
   const headers: string[] = (result.values?.[0] || []).map((h: string) => (h || '').trim());
+  quoteSheetHeaderCache = { key: cacheKey, title, headers, fetchedAt: now };
   return { title, headers };
+}
+
+// 找這個 LINE_USER_ID 目前「還沒算出總金額」的既有列（代表還在進行中的詢問），從最後面往前找
+// （最新的在最下面）。用來避免併發請求或客人/LINE App 網路重試把同一次詢問拆成兩列。
+async function findOpenQuoteSheetRow(sheetId: string, gid: string, userId: string): Promise<number | null> {
+  const accessToken = await getGoogleAccessToken();
+  const { title, headers } = await getQuoteSheetHeaders(sheetId, gid, accessToken);
+  const userIdx = headers.indexOf('LINE_USER_ID');
+  if (userIdx === -1) return null;
+  const totalIdx = headers.indexOf('總金額');
+  const range = encodeURIComponent(`${title}!A2:Z`);
+  const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${range}`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  const result: any = await res.json();
+  if (!res.ok || result.error) throw new Error(result.error?.message || '讀取「報價」試算表資料失敗');
+  const rows: string[][] = result.values || [];
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const r = rows[i];
+    if (r[userIdx] === userId && (totalIdx === -1 || !r[totalIdx])) {
+      return i + 2; // values 從 A2 開始（跳過標題列），index 0 對應試算表第 2 列
+    }
+  }
+  return null;
 }
 
 // 新增一列，回傳 Sheets API 告訴我們寫到第幾列（從 append 回應的 updatedRange 解析），

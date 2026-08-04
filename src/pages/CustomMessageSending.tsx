@@ -9,6 +9,9 @@ interface Template {
   body: string;
 }
 
+// 跟 custom-messages.ts 的 MAX_BATCH_SEND 對齊：同步逐一 push，人太多容易超過 function 執行時間上限。
+const MAX_BATCH_SEND = 50;
+
 interface QuotaInfo {
   limit: number | null; // null＝無上限（付費方案）
   used: number;
@@ -147,6 +150,10 @@ export default function CustomMessageSending() {
   const handleSendClick = () => {
     if (!selectedRows.length) {
       alert('請先勾選要發送的名單');
+      return;
+    }
+    if (selectedRows.length > MAX_BATCH_SEND) {
+      alert(`一次最多發送 ${MAX_BATCH_SEND} 位，請分批發送（目前勾選 ${selectedRows.length} 位）`);
       return;
     }
     if (!selectedTemplate) {
@@ -320,7 +327,8 @@ export default function CustomMessageSending() {
       {/* 步驟三：發送 */}
       <div className="bg-white rounded-xl shadow-sm border p-6 flex flex-wrap justify-between items-center gap-4">
         <p className="text-sm text-gray-600">
-          已勾選 <strong>{selectedRows.length}</strong> 位，已選範本：<strong>{selectedTemplate?.title || '（尚未選擇）'}</strong>
+          已勾選 <strong className={selectedRows.length > MAX_BATCH_SEND ? 'text-red-600' : ''}>{selectedRows.length}</strong> 位
+          （單次上限 {MAX_BATCH_SEND} 位），已選範本：<strong>{selectedTemplate?.title || '（尚未選擇）'}</strong>
         </p>
         <button
           onClick={handleSendClick}
