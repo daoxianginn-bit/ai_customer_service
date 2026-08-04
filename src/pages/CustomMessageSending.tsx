@@ -68,7 +68,8 @@ export default function CustomMessageSending() {
     }
   };
 
-  const rowKey = (row: Record<string, string>, index: number) => row['訂單編號'] || `row-${index}`;
+  const rowKey = (row: Record<string, string>, index: number) => row['LINE_USER_ID'] || `row-${index}`;
+  const displayName = (row: Record<string, string>) => row['訂房姓名'] || row['LINE_NAME'] || '（未知）';
 
   const runQuery = async () => {
     setQuerying(true);
@@ -161,8 +162,8 @@ export default function CustomMessageSending() {
     setSending(true);
     try {
       const recipients = selectedRows
-        .filter((r) => r['Line_seq_id'])
-        .map((r) => ({ lineUserId: r['Line_seq_id'], fields: r }));
+        .filter((r) => r['LINE_USER_ID'])
+        .map((r) => ({ lineUserId: r['LINE_USER_ID'], fields: r }));
       const result = await callCustomMessagesFunction('send', { recipients, template: selectedTemplate.body });
       const ok = (result.results || []).filter((r: any) => r.ok).length;
       const fail = (result.results || []).length - ok;
@@ -236,7 +237,7 @@ export default function CustomMessageSending() {
                 <th className="py-2 px-4">
                   <input type="checkbox" checked={rows.length > 0 && selectedKeys.size === rows.length} onChange={toggleSelectAll} disabled={!rows.length} />
                 </th>
-                <th className="py-2 px-4">訂單編號_姓名</th>
+                <th className="py-2 px-4">姓名</th>
                 <th className="py-2 px-4">入住日期</th>
                 <th className="py-2 px-4">退房日期</th>
                 <th className="py-2 px-4">總金額</th>
@@ -250,7 +251,7 @@ export default function CustomMessageSending() {
                     <td className="py-2 px-4">
                       <input type="checkbox" checked={selectedKeys.has(key)} onChange={() => toggleSelected(key)} />
                     </td>
-                    <td className="py-2 px-4">{`${r['訂單編號'] || ''}_${r['姓名'] || ''}`}</td>
+                    <td className="py-2 px-4">{displayName(r)}</td>
                     <td className="py-2 px-4">{r['入住日期']}</td>
                     <td className="py-2 px-4">{r['退房日期']}</td>
                     <td className="py-2 px-4">{r['總金額']}</td>
@@ -395,7 +396,7 @@ export default function CustomMessageSending() {
               </p>
               <div className="max-h-48 overflow-y-auto border rounded-lg p-3 text-sm text-gray-600 space-y-1">
                 {selectedRows.map((r, i) => (
-                  <div key={i}>・{`${r['訂單編號'] || ''}_${r['姓名'] || ''}`}</div>
+                  <div key={i}>・{displayName(r)}（入住 {r['入住日期']}）</div>
                 ))}
               </div>
               <p className="text-xs text-gray-400">範本：{selectedTemplate.title}</p>

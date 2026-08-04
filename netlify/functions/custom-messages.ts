@@ -163,7 +163,7 @@ async function resolveSheetTitle(sheetId: string, gid: string, accessToken: stri
 }
 
 // 查詢符合入住日期區間的客人清單，回傳每一列的完整欄位（key 是試算表標題列的欄位名稱），
-// 讓前端可以直接拿 Line_seq_id／訂單編號／姓名 顯示與勾選，也把整列資料留著給發送時當合併欄位用。
+// 讓前端可以直接拿 LINE_USER_ID／訂房姓名／LINE_NAME 顯示與勾選，也把整列資料留著給發送時當合併欄位用。
 async function listQuoteSheetRows(
   sheetId: string,
   gid: string,
