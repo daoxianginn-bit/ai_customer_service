@@ -31,6 +31,13 @@ function matchKeyword(userMessage: string, keywords: string[]): string | undefin
   return keywords.find((k) => (k.length === 1 ? userMessage === k : userMessage.includes(k)));
 }
 
+function dateToIso(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
 export const handler: Handler = async (event) => {
   if (event.httpMethod !== 'POST') return { statusCode: 405, body: 'Method Not Allowed' };
 
@@ -58,14 +65,13 @@ export const handler: Handler = async (event) => {
       if (!userMessage || !eventId) continue;
 
       // 1. 強制去重 (關鍵防禦)
-      // 嘗試寫入 event_id，如果重複，資料庫會報錯
       const { error: eventError } = await supabase
         .from('processed_events')
         .insert({ event_id: eventId });
 
       if (eventError) {
         console.log(`[Dedupe] Skipping already processed event: ${eventId}`);
-        continue; // 這是重複請求，直接跳過，不進行任何狀態更新
+        continue;
       }
 
       // 2. 獲取當前狀態
@@ -126,23 +132,25 @@ export const handler: Handler = async (event) => {
           .eq('status', 'open');
       }
 
-      // 4.5 訂房對話流程：偵測「我要訂房」觸發詞、或延續進行中的訂房詢問。
-      // 日期/晚數/金額一律由 computeMultiNightQuote() 確定性計算，AI 只負責從對話中擷取欄位與潤飾回覆文字。
+      // 4.5 動態訂房流程：管理員在「訂房流程設定」自訂的多步驟對話（最多 5 步，每步最多擷取 3 個答案）。
       if (settings.is_ai_enabled) {
-        const bookingTriggerKeywords = parseCsvKeywords(settings.booking_trigger_keywords || '我要訂房,訂房');
-        const isBookingTrigger = !!matchKeyword(userMessage, bookingTriggerKeywords);
-        const existingBookingSession = loadBookingSession(userState);
-        // 重打觸發關鍵字一律視為「重新開始一次新的訂房詢問」，但沿用先前已記錄的試算表列號（若有），不重新開一列。
-        const isFirstTurn = isBookingTrigger;
-        const activeBookingSession = isBookingTrigger
-          ? { phase: 'collecting' as const, collected: { ...EMPTY_BOOKING_FIELDS }, quote: null, sheetRowNumber: existingBookingSession?.sheetRowNumber ?? null, updatedAt: Date.now() }
-          : existingBookingSession;
+        const existingSession = loadBookingSession(userState);
+        const activeFlows = await fetchActiveFlows();
+        const matchedFlow = activeFlows.find((f) => matchKeyword(userMessage, parseCsvKeywords(f.triggerKeywords)));
 
-        if (activeBookingSession) {
+        if (matchedFlow) {
           try {
-            await handleBookingFlow(lineClient, lineEvent, settings, userId, nickname, userMessage, activeBookingSession, isFirstTurn);
+            await startBookingFlow(lineClient, lineEvent, settings, userId, nickname, matchedFlow, existingSession);
           } catch (e: any) {
-            console.error('[Booking] flow failed:', e.message);
+            console.error('[Booking] start flow failed:', e.message);
+          }
+          continue;
+        }
+        if (existingSession) {
+          try {
+            await continueBookingFlow(lineClient, lineEvent, settings, userId, nickname, userMessage, existingSession);
+          } catch (e: any) {
+            console.error('[Booking] continue flow failed:', e.message);
           }
           continue;
         }
@@ -172,73 +180,54 @@ export const handler: Handler = async (event) => {
 };
 
 // ========================================================================
-// 訂房對話流程
+// 動態訂房流程
 // 設計原則：日期判斷、晚數計算、金額計算全部交給 computeMultiNightQuote()（純程式碼），
-// AI 只負責①從對話中擷取結構化欄位、②把算好的報價結果包裝成罐頭訊息，絕對不讓 AI 自己計算晚數或金額。
-//
-// 流程分兩個階段（session.phase），全程只在「報價」試算表同一列上分批補欄位：
-// 'collecting'：收集姓名/電話/入住退房日期/人數/大人小孩/是否包棟，收齊後立刻算報價、回覆罐頭報價訊息，轉入 'awaiting_confirmation'。
-// 'awaiting_confirmation'：等顧客回「是」或「否」。回「是」寫回預定日期，套用付款確認罐頭訊息回覆。
+// AI 只負責①依每個步驟定義的欄位擷取顧客回答、②把算好的報價結果包裝成罐頭訊息，絕不讓 AI 自己算晚數或金額。
+// 訂房紀錄以 Supabase `bookings` 表為主要來源，Google「報價」試算表只是盡力鏡射的備份，寫入失敗不影響主流程。
 // ========================================================================
 
 const BOOKING_SESSION_TTL_MS = 30 * 60 * 1000; // 30 分鐘沒有新回覆，視為放棄這次詢問
+const BOOKING_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
-interface BookingCollectedFields {
-  name: string | null;
-  phone: string | null;
-  checkin_date: string | null; // YYYY-MM-DD
-  checkout_date: string | null; // YYYY-MM-DD
-  headcount: number | null;
-  adults: number | null;
-  kids: number | null;
-  infants: number | null;
-  whole_house: boolean | null;
+interface FlowFieldDef {
+  key: string;
+  label: string;
+  quote_field: 'checkin_date' | 'checkout_date' | 'headcount' | 'whole_house' | null;
+}
+interface FlowStepDef {
+  step_order: number;
+  message_template: string;
+  fields: FlowFieldDef[];
+}
+interface FlowDef {
+  id: string;
+  name: string;
+  triggerKeywords: string;
+  steps: FlowStepDef[];
 }
 
 interface BookingQuoteInfo {
   total: number;
   useWholeHouse: boolean;
+  roomNights: { date: string; roomTypeIds: string[] }[]; // 只有個別租房才會有內容，供確認訂房時的衝突檢查/寫入用
 }
 
 interface BookingSession {
-  phase: 'collecting' | 'awaiting_confirmation';
-  collected: BookingCollectedFields;
+  flowId: string;
+  stepIndex: number; // 目前等待回答的步驟（0-based）；awaiting_confirmation 階段不再使用
+  collected: Record<string, string>;
+  bookingId: string;
+  phase: 'in_flow' | 'awaiting_confirmation';
   quote: BookingQuoteInfo | null;
-  sheetRowNumber: number | null;
   updatedAt: number;
 }
-
-const EMPTY_BOOKING_FIELDS: BookingCollectedFields = {
-  name: null,
-  phone: null,
-  checkin_date: null,
-  checkout_date: null,
-  headcount: null,
-  adults: null,
-  kids: null,
-  infants: null,
-  whole_house: null,
-};
-
-const BOOKING_FIELD_LABELS: Record<string, string> = {
-  checkin_date: '入住日期',
-  checkout_date: '退房日期',
-  headcount: '入住人數',
-  whole_house: '是否包棟',
-};
 
 function loadBookingSession(userState: any): BookingSession | null {
   if (!userState?.booking_session) return null;
   try {
     const parsed = JSON.parse(userState.booking_session);
     if (!parsed || Date.now() - parsed.updatedAt > BOOKING_SESSION_TTL_MS) return null;
-    return {
-      phase: parsed.phase === 'awaiting_confirmation' ? 'awaiting_confirmation' : 'collecting',
-      collected: { ...EMPTY_BOOKING_FIELDS, ...parsed.collected },
-      quote: parsed.quote || null,
-      sheetRowNumber: parsed.sheetRowNumber || null,
-      updatedAt: parsed.updatedAt,
-    };
+    return parsed;
   } catch {
     return null;
   }
@@ -260,95 +249,102 @@ async function clearBookingSession(userId: string) {
   }
 }
 
-function buildBookingExtractionPrompt(todayIso: string, collected: BookingCollectedFields): string {
+async function fetchActiveFlows(): Promise<FlowDef[]> {
+  const { data: flows } = await supabase.from('booking_flows').select('*').eq('is_active', true).order('display_order');
+  if (!flows || !flows.length) return [];
+  const { data: steps } = await supabase.from('booking_flow_steps').select('*').in('flow_id', flows.map((f: any) => f.id)).order('step_order');
+  return flows.map((f: any) => ({
+    id: f.id,
+    name: f.name,
+    triggerKeywords: f.trigger_keywords,
+    steps: (steps || []).filter((s: any) => s.flow_id === f.id).map((s: any) => ({ step_order: s.step_order, message_template: s.message_template, fields: s.fields || [] })),
+  }));
+}
+
+async function fetchFlowById(flowId: string): Promise<FlowDef | null> {
+  const { data: flow } = await supabase.from('booking_flows').select('*').eq('id', flowId).single();
+  if (!flow) return null;
+  const { data: steps } = await supabase.from('booking_flow_steps').select('*').eq('flow_id', flowId).order('step_order');
+  return {
+    id: flow.id,
+    name: flow.name,
+    triggerKeywords: flow.trigger_keywords,
+    steps: (steps || []).map((s: any) => ({ step_order: s.step_order, message_template: s.message_template, fields: s.fields || [] })),
+  };
+}
+
+function buildStepExtractionPrompt(todayIso: string, fields: FlowFieldDef[]): string {
+  const fieldLines = fields
+    .map((f) => {
+      let hint = '字串，照顧客原話擷取，沒提到就是 null。';
+      if (f.quote_field === 'checkin_date' || f.quote_field === 'checkout_date') {
+        hint = '轉換成 YYYY-MM-DD。若使用者只寫月/日（如「7/30」），用今天日期推算最合理的年份：日期還沒過就用今年，已經過了就用明年。沒提到就是 null。';
+      } else if (f.quote_field === 'headcount') {
+        hint = '純數字，沒提到就是 null。';
+      } else if (f.quote_field === 'whole_house') {
+        hint = 'true/false，從「是」「否」或包棟／不包棟等文字判斷，沒提到就是 null。';
+      }
+      return `- ${f.key}（${f.label}）：${hint}`;
+    })
+    .join('\n');
   return (
     `你是專門負責「訂房資訊擷取」的助手，這個步驟不需要回答問題、不需要計算晚數或金額，只需要從對話中擷取欄位。\n` +
     `今天的日期是 ${todayIso}。\n\n` +
-    `顧客的回覆可能有兩種格式，都要能辨識：\n` +
-    `(1) 有欄位名稱標記，例如：「姓名 :小明」「入住日期：8/10」\n` +
-    `(2) 沒有欄位名稱，純粹依照「姓名／電話／入住日期／退房日期／入住人數／大人小孩／是否包棟」這個固定順序，一行對應一個欄位。\n\n` +
-    `需要擷取的欄位（JSON 格式）：\n` +
-    `- name：姓名，字串。\n` +
-    `- phone：電話，字串。\n` +
-    `- checkin_date：入住日期，轉換成 YYYY-MM-DD。若使用者只寫月/日（如「7/30」），用今天日期推算最合理的年份：日期還沒過就用今年，已經過了就用明年。\n` +
-    `- checkout_date：退房日期，格式同上。\n` +
-    `- headcount：入住總人數，純數字。\n` +
-    `- adults：大人人數，純數字，從「大人小孩」欄位解析（例如「10大2小」→ adults=10）。\n` +
-    `- kids：小孩人數，純數字，同上（例如「10大2小」→ kids=2）。\n` +
-    `- infants：3 歲以下幼兒人數，純數字，沒提到就是 0（例如「10大2小1幼」→ infants=1）。\n` +
-    `- whole_house：是否包棟，true/false，從「是」「否」或包棟／不包棟等文字判斷。\n\n` +
-    `目前已經確認的欄位：${JSON.stringify(collected)}\n\n` +
+    `需要擷取的欄位（JSON 格式，key 請完全照下面列出的英數代碼）：\n${fieldLines}\n\n` +
     `規則：\n` +
-    `1. 只回傳一個 JSON 物件，包含以上 9 個欄位，不要加任何其他文字、不要用 markdown code block。\n` +
-    `2. 從對話中能確定的欄位才填值，不確定或沒提到的欄位維持已知欄位的值（已知也是 null 就填 null），絕對不要自己猜測。\n` +
-    `3. 不要計算入住晚數或任何金額，那不是這個步驟的工作。`
+    `1. 只回傳一個 JSON 物件，包含以上欄位，不要加任何其他文字、不要用 markdown code block。\n` +
+    `2. 從對話中能確定的欄位才填值，不確定或沒提到的欄位填 null，絕對不要自己猜測。`
   );
 }
 
-const BOOKING_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-
-function coerceBookingFieldValue(key: keyof BookingCollectedFields, value: unknown): BookingCollectedFields[typeof key] | undefined {
-  switch (key) {
-    case 'checkin_date':
-    case 'checkout_date':
-      return typeof value === 'string' && BOOKING_DATE_RE.test(value) ? value : undefined;
-    case 'headcount':
-    case 'adults':
-    case 'kids':
-    case 'infants': {
-      const n = typeof value === 'number' ? value : Number(value);
-      return Number.isFinite(n) && n >= 0 ? Math.round(n) : undefined;
-    }
-    case 'whole_house':
-      if (typeof value === 'boolean') return value;
-      if (value === 'true') return true;
-      if (value === 'false') return false;
-      return undefined;
-    case 'name':
-    case 'phone':
-      return typeof value === 'string' && value.trim() ? value.trim() : undefined;
-    default:
-      return undefined;
+function coerceStepFieldValue(field: FlowFieldDef, value: unknown): string | undefined {
+  if (field.quote_field === 'checkin_date' || field.quote_field === 'checkout_date') {
+    return typeof value === 'string' && BOOKING_DATE_RE.test(value) ? value : undefined;
   }
+  if (field.quote_field === 'headcount') {
+    const n = typeof value === 'number' ? value : Number(value);
+    return Number.isFinite(n) && n >= 0 ? String(Math.round(n)) : undefined;
+  }
+  if (field.quote_field === 'whole_house') {
+    if (typeof value === 'boolean') return String(value);
+    if (value === 'true' || value === 'false') return value;
+    return undefined;
+  }
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
 
-function parseBookingExtraction(raw: string, collected: BookingCollectedFields): BookingCollectedFields {
+function parseStepExtraction(raw: string, fields: FlowFieldDef[]): Record<string, string> {
+  const result: Record<string, string> = {};
   try {
     const cleaned = raw.trim().replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '');
     const parsed = JSON.parse(cleaned);
-    const merged: BookingCollectedFields = { ...collected };
-    (Object.keys(EMPTY_BOOKING_FIELDS) as (keyof BookingCollectedFields)[]).forEach((key) => {
-      if (parsed[key] === undefined || parsed[key] === null) return;
-      const coerced = coerceBookingFieldValue(key, parsed[key]);
-      if (coerced !== undefined) {
-        (merged as any)[key] = coerced;
-      }
-    });
-    return merged;
+    for (const f of fields) {
+      const v = parsed[f.key];
+      if (v === undefined || v === null) continue;
+      const coerced = coerceStepFieldValue(f, v);
+      if (coerced !== undefined) result[f.key] = coerced;
+    }
   } catch {
-    return collected;
+    // 解析失敗就不更新任何欄位，維持原本已知值
   }
+  return result;
 }
 
-async function extractBookingFields(settings: any, userMessage: string, collected: BookingCollectedFields): Promise<BookingCollectedFields> {
+async function extractStepFields(settings: any, userMessage: string, fields: FlowFieldDef[]): Promise<Record<string, string>> {
   const todayIso = new Date().toISOString().slice(0, 10);
-  const prompt = buildBookingExtractionPrompt(todayIso, collected);
+  const prompt = buildStepExtractionPrompt(todayIso, fields);
   let raw = '';
   if (settings.active_ai === 'gpt') {
     raw = (await callGPT(settings, userMessage, [], prompt)).text;
   } else {
     raw = await callGemini(settings, userMessage, [], prompt);
   }
-  return parseBookingExtraction(raw, collected);
+  return parseStepExtraction(raw, fields);
 }
 
-function getMissingRequiredBookingFields(collected: BookingCollectedFields): string[] {
-  const required: (keyof BookingCollectedFields)[] = ['checkin_date', 'checkout_date', 'headcount', 'whole_house'];
-  return required.filter((k) => collected[k] === null || collected[k] === undefined).map((k) => BOOKING_FIELD_LABELS[k]);
-}
-
-function buildAskMissingFieldsMessage(missing: string[]): string {
-  return `謝謝您提供的資訊！還需要麻煩您補充以下資訊，我們才能幫您試算：\n${missing.map((m) => `・${m}`).join('\n')}`;
+function pickByLabelHeuristic(collected: Record<string, string>, allFields: FlowFieldDef[], keywords: string[]): string | null {
+  const field = allFields.find((f) => keywords.some((k) => f.label.includes(k)));
+  return field ? collected[field.key] ?? null : null;
 }
 
 async function fetchBookingData() {
@@ -393,9 +389,9 @@ function computePaymentDeadline(): string {
   return `${y}/${m}/${d} 21:00`;
 }
 
-function todayTaiwanSlash(): string {
-  const taiwanMs = Date.now() + 8 * 60 * 60 * 1000;
-  const d = new Date(taiwanMs);
+function toTaiwanSlashFromIso(iso: string | null): string {
+  if (!iso) return '';
+  const d = new Date(new Date(iso).getTime() + 8 * 60 * 60 * 1000);
   const y = d.getUTCFullYear();
   const m = String(d.getUTCMonth() + 1).padStart(2, '0');
   const day = String(d.getUTCDate()).padStart(2, '0');
@@ -414,91 +410,256 @@ function toSlashDate(isoDate: string | null | undefined): string {
   return (isoDate || '').replace(/-/g, '/');
 }
 
-async function createOrReuseContactRow(settings: any, userId: string, lineClient: Client): Promise<number | null> {
-  try {
-    const existing = await findOpenQuoteSheetRow(settings.quote_sheet_id, settings.quote_sheet_gid || '0', userId);
-    if (existing) return existing;
-    let nickname = '';
-    try {
-      const profile = await lineClient.getProfile(userId);
-      nickname = profile.displayName;
-    } catch {
-      // 抓不到暱稱不影響流程，留空即可
-    }
-    return await appendQuoteSheetRow(settings.quote_sheet_id, settings.quote_sheet_gid || '0', {
-      LINE_USER_ID: userId,
-      LINE_NAME: nickname,
-      狀態: '詢問中',
-    });
-  } catch (e: any) {
-    console.error('[Booking] create contact row failed:', e.message);
-    return null;
+function bookingStatusLabel(status: string): string {
+  switch (status) {
+    case 'inquiring': return '詢問中';
+    case 'pending_confirmation': return '待確認';
+    case 'confirmed': return '已確認';
+    case 'cancelled': return '已取消';
+    case 'pending_manual_conflict': return '待人工確認（檔期衝突）';
+    default: return status;
   }
 }
 
-async function handleBookingFlow(
+// 鏡射寫入 Google「報價」試算表（盡力而為，失敗不影響資料庫端的訂房流程）
+async function mirrorBookingToSheet(settings: any, booking: any) {
+  if (!settings.quote_sheet_id) return;
+  try {
+    const fields: Record<string, string> = {
+      LINE_USER_ID: booking.line_user_id,
+      LINE_NAME: booking.nickname || '',
+      訂房姓名: booking.name || '',
+      入住日期: toSlashDate(booking.checkin_date),
+      退房日期: toSlashDate(booking.checkout_date),
+      入住天數: booking.nights != null ? String(booking.nights) : '',
+      人數: booking.headcount != null ? String(booking.headcount) : '',
+      大人小孩: formatAdultsKids(booking.adults, booking.kids, booking.infants),
+      是否包棟: booking.whole_house == null ? '' : booking.whole_house ? '是' : '否',
+      總金額: booking.total_amount != null ? String(booking.total_amount) : '',
+      預定日期: toTaiwanSlashFromIso(booking.reserved_at),
+      狀態: bookingStatusLabel(booking.status),
+    };
+    let rowNumber: number | null = booking.sheet_row_number ?? null;
+    if (!rowNumber) rowNumber = await findOpenQuoteSheetRow(settings.quote_sheet_id, settings.quote_sheet_gid || '0', booking.line_user_id);
+    if (rowNumber) {
+      await mergeUpdateQuoteSheetRow(settings.quote_sheet_id, settings.quote_sheet_gid || '0', rowNumber, fields);
+    } else {
+      rowNumber = await appendQuoteSheetRow(settings.quote_sheet_id, settings.quote_sheet_gid || '0', fields);
+    }
+    if (rowNumber && rowNumber !== booking.sheet_row_number) {
+      await supabase.from('bookings').update({ sheet_row_number: rowNumber }).eq('id', booking.id);
+    }
+  } catch (e: any) {
+    console.error('[Booking] mirror to sheet failed:', e.message);
+  }
+}
+
+// 不同顧客訂到同一天/同房型（或跟包棟）衝突檢查，只比對狀態＝已確認的訂單。
+async function checkBookingConflict(
+  target: { checkin_date: string; checkout_date: string; whole_house: boolean; roomTypeIdsByNight: Map<string, string[]> },
+  excludeBookingId: string
+): Promise<boolean> {
+  const { data: overlapping } = await supabase
+    .from('bookings')
+    .select('id, whole_house')
+    .eq('status', 'confirmed')
+    .neq('id', excludeBookingId)
+    .lt('checkin_date', target.checkout_date)
+    .gt('checkout_date', target.checkin_date);
+
+  if (!overlapping || !overlapping.length) return false;
+
+  if (target.whole_house) return true; // 新訂單是包棟：跟任何一筆日期重疊的已確認訂單都算衝突
+  if (overlapping.some((b: any) => b.whole_house)) return true; // 已有包棟訂單佔用同一時段
+
+  const individualIds = overlapping.filter((b: any) => !b.whole_house).map((b: any) => b.id);
+  if (!individualIds.length) return false;
+
+  const { data: existingRoomNights } = await supabase
+    .from('booking_room_nights')
+    .select('night_date, room_type_id')
+    .in('booking_id', individualIds);
+
+  for (const [night, roomTypeIds] of target.roomTypeIdsByNight) {
+    for (const roomTypeId of roomTypeIds) {
+      if ((existingRoomNights || []).some((r: any) => r.night_date === night && r.room_type_id === roomTypeId)) return true;
+    }
+  }
+  return false;
+}
+
+async function startBookingFlow(
+  lineClient: Client,
+  lineEvent: any,
+  settings: any,
+  userId: string,
+  nickname: string | null,
+  flow: FlowDef,
+  existingSession: BookingSession | null
+) {
+  let bookingId: string | null = null;
+  if (existingSession?.bookingId) {
+    const { data: existingBooking } = await supabase.from('bookings').select('id, status').eq('id', existingSession.bookingId).maybeSingle();
+    if (existingBooking && existingBooking.status === 'inquiring') bookingId = existingBooking.id;
+  }
+
+  let resolvedNickname = nickname;
+  if (!bookingId) {
+    try {
+      const p = await lineClient.getProfile(userId);
+      resolvedNickname = p.displayName;
+    } catch {}
+    const { data, error } = await supabase
+      .from('bookings')
+      .insert({ line_user_id: userId, nickname: resolvedNickname, flow_id: flow.id, status: 'inquiring', collected_answers: {} })
+      .select()
+      .single();
+    if (error) throw error;
+    bookingId = data.id;
+    mirrorBookingToSheet(settings, data).catch(() => {});
+  } else {
+    await supabase.from('bookings').update({ flow_id: flow.id }).eq('id', bookingId);
+  }
+
+  const firstStep = flow.steps.find((s) => s.step_order === 1);
+  if (!firstStep) return; // 流程沒有設定任何步驟，視為設定異常，不處理
+
+  await saveBookingSession(userId, { flowId: flow.id, stepIndex: 0, collected: {}, bookingId: bookingId as string, phase: 'in_flow', quote: null });
+  await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: firstStep.message_template });
+  await logConversation(userId, resolvedNickname, 'outbound', firstStep.message_template, 'system');
+}
+
+async function continueBookingFlow(
   lineClient: Client,
   lineEvent: any,
   settings: any,
   userId: string,
   nickname: string | null,
   userMessage: string,
-  session: BookingSession,
-  isFirstTurn: boolean
+  session: BookingSession
 ) {
   if (session.phase === 'awaiting_confirmation') {
     await handleBookingConfirmation(lineClient, lineEvent, settings, userId, nickname, userMessage, session);
     return;
   }
 
-  const extractionPromise = extractBookingFields(settings, userMessage, session.collected).catch((e: any) => {
-    console.error('[Booking] field extraction failed:', e.message);
-    return session.collected;
+  const flow = await fetchFlowById(session.flowId);
+  if (!flow) {
+    await clearBookingSession(userId);
+    return;
+  }
+  const currentStep = flow.steps.find((s) => s.step_order === session.stepIndex + 1);
+  if (!currentStep) {
+    await clearBookingSession(userId);
+    return;
+  }
+
+  const extracted = await extractStepFields(settings, userMessage, currentStep.fields).catch((e: any) => {
+    console.error('[Booking] step extraction failed:', e.message);
+    return {};
   });
-  const bookingDataPromise = fetchBookingData();
-  const contactRowPromise: Promise<number | null> =
-    isFirstTurn && settings.quote_sheet_id && !session.sheetRowNumber
-      ? createOrReuseContactRow(settings, userId, lineClient)
-      : Promise.resolve(session.sheetRowNumber ?? null);
+  const collected = { ...session.collected, ...extracted };
 
-  const [collected, contactRowResult] = await Promise.all([extractionPromise, contactRowPromise]);
-  let sheetRowNumber = contactRowResult;
-
-  const missing = getMissingRequiredBookingFields(collected);
-  if (missing.length > 0) {
-    await saveBookingSession(userId, { phase: 'collecting', collected, quote: null, sheetRowNumber });
-    const replyText = isFirstTurn ? settings.booking_welcome_message || buildAskMissingFieldsMessage(missing) : buildAskMissingFieldsMessage(missing);
+  const missingFields = currentStep.fields.filter((f) => !collected[f.key]);
+  if (missingFields.length > 0) {
+    await saveBookingSession(userId, { ...session, collected });
+    const replyText = `還需要麻煩您補充：${missingFields.map((f) => f.label).join('、')}`;
     await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
     await logConversation(userId, nickname, 'outbound', replyText, 'system');
     return;
   }
 
-  const checkinDate = new Date(`${collected.checkin_date}T00:00:00`);
-  const checkoutDate = new Date(`${collected.checkout_date}T00:00:00`);
-  const nights = Math.round((checkoutDate.getTime() - checkinDate.getTime()) / 86400000);
+  await supabase.from('bookings').update({ collected_answers: collected, updated_at: new Date().toISOString() }).eq('id', session.bookingId);
 
-  if (!Number.isFinite(nights) || nights <= 0) {
-    await saveBookingSession(userId, { phase: 'collecting', collected: { ...collected, checkin_date: null, checkout_date: null }, quote: null, sheetRowNumber });
-    const replyText = '不好意思，入住日期與退房日期看起來有點對不上（退房日期需要晚於入住日期），麻煩您再提供一次正確的入住與退房日期喔。';
+  const nextStepOrder = session.stepIndex + 2;
+  const nextStep = flow.steps.find((s) => s.step_order === nextStepOrder);
+  if (nextStep) {
+    await saveBookingSession(userId, { ...session, stepIndex: session.stepIndex + 1, collected });
+    await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: nextStep.message_template });
+    await logConversation(userId, nickname, 'outbound', nextStep.message_template, 'system');
+    return;
+  }
+
+  await finishBookingFlow(lineClient, lineEvent, settings, userId, nickname, flow, collected, session.bookingId);
+}
+
+async function finishBookingFlow(
+  lineClient: Client,
+  lineEvent: any,
+  settings: any,
+  userId: string,
+  nickname: string | null,
+  flow: FlowDef,
+  collected: Record<string, string>,
+  bookingId: string
+) {
+  const allFields = flow.steps.flatMap((s) => s.fields);
+  const quoteValues: Record<string, string> = {};
+  for (const f of allFields) {
+    if (f.quote_field && collected[f.key] !== undefined) quoteValues[f.quote_field] = collected[f.key];
+  }
+
+  const hasAllQuoteFields = ['checkin_date', 'checkout_date', 'headcount', 'whole_house'].every((k) => quoteValues[k] !== undefined);
+
+  if (!hasAllQuoteFields) {
+    const name = pickByLabelHeuristic(collected, allFields, ['姓名', '名字']) || nickname;
+    const phone = pickByLabelHeuristic(collected, allFields, ['電話', '手機', '聯絡']);
+    const { data: booking } = await supabase
+      .from('bookings')
+      .update({ collected_answers: collected, name, phone, updated_at: new Date().toISOString() })
+      .eq('id', bookingId)
+      .select()
+      .single();
+    if (booking) mirrorBookingToSheet(settings, booking).catch(() => {});
+
+    const replyText = '感謝您提供的資訊！我們已經收到，將由客服人員盡快為您確認詳細報價，謝謝您的耐心等候 🙏';
     await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
     await logConversation(userId, nickname, 'outbound', replyText, 'system');
+
+    const agentIds = parseCsvKeywords(settings.agent_user_ids);
+    for (const id of agentIds) {
+      try {
+        await lineClient.pushMessage(id, {
+          type: 'text',
+          text: `🔔 訂房詢問（資料不齊全，需人工報價）：【${nickname || '匿名用戶'}】\n${Object.entries(collected).map(([k, v]) => `${k}: ${v}`).join('\n')}`,
+        });
+      } catch {}
+    }
+    await clearBookingSession(userId);
+    return;
+  }
+
+  const checkinIso = quoteValues.checkin_date;
+  const checkoutIso = quoteValues.checkout_date;
+  const headcount = Number(quoteValues.headcount);
+  const useWholeHouse = quoteValues.whole_house === 'true';
+
+  const checkinDate = new Date(`${checkinIso}T00:00:00`);
+  const checkoutDate = new Date(`${checkoutIso}T00:00:00`);
+  const nights = Math.round((checkoutDate.getTime() - checkinDate.getTime()) / 86400000);
+
+  if (!Number.isFinite(nights) || nights <= 0 || !Number.isFinite(headcount) || headcount <= 0) {
+    await supabase.from('bookings').update({ collected_answers: collected, updated_at: new Date().toISOString() }).eq('id', bookingId);
+    const replyText = '不好意思，入住日期、退房日期或人數看起來有點對不上，麻煩您點選「真人客服」，我們會盡快為您確認。';
+    await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
+    await logConversation(userId, nickname, 'outbound', replyText, 'system');
+    await clearBookingSession(userId);
     return;
   }
 
   try {
-    const data = await bookingDataPromise;
+    const data = await fetchBookingData();
     const maxOccupancy = data.packages.length ? Math.max(...data.packages.map((p: any) => p.occupancy)) : 0;
     const consecutiveStayDiscountPerNight =
       settings.consecutive_stay_default_option === 'cleaning'
         ? settings.consecutive_stay_discount_cleaning || 0
         : settings.consecutive_stay_discount_no_cleaning || 0;
-    const activePromotion = settings.active_promotion_id
-      ? data.promotions.find((p: any) => p.id === settings.active_promotion_id) || null
-      : null;
+    const activePromotion = settings.active_promotion_id ? data.promotions.find((p: any) => p.id === settings.active_promotion_id) || null : null;
+
     const result = computeMultiNightQuote({
       checkInDate: checkinDate,
       nights,
-      headcount: collected.headcount as number,
+      headcount,
       dateRanges: data.dateRanges,
       roomTypes: data.roomTypes,
       roomPricing: data.roomPricing,
@@ -512,10 +673,13 @@ async function handleBookingFlow(
       peakSeasonWeekdayTier: settings.peak_season_weekday_tier || 'peak',
     });
 
-    const useWholeHouse = collected.whole_house === true;
     const chosenOption = useWholeHouse ? result.wholeHouse : result.individual;
 
     if (chosenOption.total == null) {
+      await supabase
+        .from('bookings')
+        .update({ collected_answers: collected, checkin_date: checkinIso, checkout_date: checkoutIso, nights, headcount, whole_house: useWholeHouse, updated_at: new Date().toISOString() })
+        .eq('id', bookingId);
       const replyText = '不好意思，這個日期／人數組合目前無法自動試算（可能是該時段未開放此方案，或超過可接待人數），麻煩您點選「真人客服」，我們會盡快為您確認房況與價格。';
       await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
       await logConversation(userId, nickname, 'outbound', replyText, 'system');
@@ -523,60 +687,54 @@ async function handleBookingFlow(
       return;
     }
 
-    let name = collected.name;
-    if (!name) {
-      try {
-        const profile = await lineClient.getProfile(userId);
-        name = profile.displayName;
-      } catch {
-        name = '';
-      }
-    }
-
     const total = chosenOption.total as number;
+    const roomNights = !useWholeHouse
+      ? result.individual.nights.map((n) => ({ date: dateToIso(n.date), roomTypeIds: (n.roomsUsed || []).map((r) => r.id) }))
+      : [];
 
-    if (settings.quote_sheet_id) {
-      try {
-        const fields = {
-          LINE_USER_ID: userId,
-          訂房姓名: name || '',
-          入住日期: toSlashDate(collected.checkin_date),
-          退房日期: toSlashDate(collected.checkout_date),
-          入住天數: String(nights),
-          人數: String(collected.headcount),
-          大人小孩: formatAdultsKids(collected.adults, collected.kids, collected.infants),
-          是否包棟: useWholeHouse ? '是' : '否',
-          總金額: String(total),
-          狀態: '待確認',
-        };
-        if (!sheetRowNumber) {
-          sheetRowNumber = await findOpenQuoteSheetRow(settings.quote_sheet_id, settings.quote_sheet_gid || '0', userId);
-        }
-        if (sheetRowNumber) {
-          await mergeUpdateQuoteSheetRow(settings.quote_sheet_id, settings.quote_sheet_gid || '0', sheetRowNumber, fields);
-        } else {
-          sheetRowNumber = await appendQuoteSheetRow(settings.quote_sheet_id, settings.quote_sheet_gid || '0', fields);
-        }
-      } catch (e: any) {
-        console.error('[Booking] write quote sheet failed:', e.message);
-      }
-    }
+    const name = pickByLabelHeuristic(collected, allFields, ['姓名', '名字']) || nickname;
+    const phone = pickByLabelHeuristic(collected, allFields, ['電話', '手機', '聯絡']);
+
+    const { data: updatedBooking, error: updateError } = await supabase
+      .from('bookings')
+      .update({
+        name,
+        phone,
+        checkin_date: checkinIso,
+        checkout_date: checkoutIso,
+        nights,
+        headcount,
+        whole_house: useWholeHouse,
+        total_amount: total,
+        status: 'pending_confirmation',
+        collected_answers: collected,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', bookingId)
+      .select()
+      .single();
+    if (updateError) throw updateError;
+
+    mirrorBookingToSheet(settings, updatedBooking).catch(() => {});
 
     const quoteMessage = mergeTemplate(settings.booking_quote_message || '', {
-      入住日期: toSlashDate(collected.checkin_date),
-      退房日期: toSlashDate(collected.checkout_date),
-      人數: String(collected.headcount),
+      入住日期: toSlashDate(checkinIso),
+      退房日期: toSlashDate(checkoutIso),
+      人數: String(headcount),
       是否包棟: useWholeHouse ? '是' : '否',
       總金額: total.toLocaleString(),
     });
 
     await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: quoteMessage });
     await logConversation(userId, nickname, 'outbound', quoteMessage, 'system');
+
     await saveBookingSession(userId, {
+      flowId: flow.id,
+      stepIndex: -1,
+      collected,
+      bookingId,
       phase: 'awaiting_confirmation',
-      collected: { ...collected, name },
-      quote: { total, useWholeHouse },
-      sheetRowNumber,
+      quote: { total, useWholeHouse, roomNights },
     });
   } catch (e: any) {
     console.error('[Booking] quote failed:', e.message);
@@ -608,14 +766,9 @@ async function handleBookingConfirmation(
   }
 
   if (isNo) {
-    if (settings.quote_sheet_id && session.sheetRowNumber) {
-      try {
-        await mergeUpdateQuoteSheetRow(settings.quote_sheet_id, settings.quote_sheet_gid || '0', session.sheetRowNumber, { 狀態: '已取消' });
-      } catch (e: any) {
-        console.error('[Booking] update cancel status failed:', e.message);
-      }
-    }
-    const replyText = '好的，這次先不訂房沒關係！之後想重新試算歡迎再輸入「我要訂房」，或直接點選「真人客服」讓我們協助您。';
+    const { data: booking } = await supabase.from('bookings').update({ status: 'cancelled', updated_at: new Date().toISOString() }).eq('id', session.bookingId).select().single();
+    if (booking) mirrorBookingToSheet(settings, booking).catch(() => {});
+    const replyText = '好的，這次先不訂房沒關係！之後想重新試算歡迎再輸入訂房關鍵字，或直接點選「真人客服」讓我們協助您。';
     await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
     await logConversation(userId, nickname, 'outbound', replyText, 'system');
     await clearBookingSession(userId);
@@ -623,81 +776,81 @@ async function handleBookingConfirmation(
   }
 
   const quote = session.quote;
-  if (!quote) {
-    const replyText = '不好意思，剛剛的報價資訊遺失了，麻煩您重新輸入「我要訂房」再試一次。';
+  const { data: booking } = await supabase.from('bookings').select('*').eq('id', session.bookingId).single();
+  if (!quote || !booking) {
+    const replyText = '不好意思，剛剛的報價資訊遺失了，麻煩您重新輸入訂房關鍵字再試一次。';
     await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
     await logConversation(userId, nickname, 'outbound', replyText, 'system');
     await clearBookingSession(userId);
     return;
   }
 
-  // 檔期防呆（簡化版）：只擋「包棟衝突」——新訂單是包棟、或跟某筆已確認的包棟訂單日期重疊。
+  const roomTypeIdsByNight = new Map<string, string[]>();
+  for (const rn of quote.roomNights || []) roomTypeIdsByNight.set(rn.date, rn.roomTypeIds);
+
   let hasConflict = false;
-  if (settings.quote_sheet_id && session.sheetRowNumber) {
-    try {
-      hasConflict = await checkWholeHouseConflict(
-        settings.quote_sheet_id,
-        settings.quote_sheet_gid || '0',
-        session.sheetRowNumber,
-        toSlashDate(session.collected.checkin_date),
-        toSlashDate(session.collected.checkout_date),
-        quote.useWholeHouse
-      );
-    } catch (e: any) {
-      console.error('[Booking] conflict check failed:', e.message);
-    }
+  try {
+    hasConflict = await checkBookingConflict(
+      { checkin_date: booking.checkin_date, checkout_date: booking.checkout_date, whole_house: quote.useWholeHouse, roomTypeIdsByNight },
+      booking.id
+    );
+  } catch (e: any) {
+    console.error('[Booking] conflict check failed:', e.message);
   }
 
   if (hasConflict) {
-    if (settings.quote_sheet_id && session.sheetRowNumber) {
-      try {
-        await mergeUpdateQuoteSheetRow(settings.quote_sheet_id, settings.quote_sheet_gid || '0', session.sheetRowNumber, { 狀態: '待人工確認（檔期衝突）' });
-      } catch (e: any) {
-        console.error('[Booking] update conflict status failed:', e.message);
-      }
-    }
-    const replyText = '非常抱歉，這個日期範圍目前可能已經有其他包棟訂單，需要請真人客服為您確認實際空房狀況，我們會盡快與您聯繫，謝謝您的耐心等候 🙏';
+    const { data: updated } = await supabase.from('bookings').update({ status: 'pending_manual_conflict', updated_at: new Date().toISOString() }).eq('id', booking.id).select().single();
+    if (updated) mirrorBookingToSheet(settings, updated).catch(() => {});
+    const replyText = '非常抱歉，這個日期範圍目前可能已經有其他訂單衝突，需要請真人客服為您確認實際空房狀況，我們會盡快與您聯繫，謝謝您的耐心等候 🙏';
     await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
     await logConversation(userId, nickname, 'outbound', replyText, 'system');
-    const agentIds = (settings.agent_user_ids || '').split(',').map((id: string) => id.trim()).filter(Boolean);
+    const agentIds = parseCsvKeywords(settings.agent_user_ids);
     for (const id of agentIds) {
       try {
         await lineClient.pushMessage(id, {
           type: 'text',
-          text: `⚠️ 檔期衝突通知：【${session.collected.name || ''}】想確認 ${toSlashDate(session.collected.checkin_date)}~${toSlashDate(session.collected.checkout_date)} 包棟訂房，但「報價」試算表已有其他「已確認」訂單日期重疊，請人工核實實際空房狀況並跟客人聯繫。`,
+          text: `⚠️ 檔期衝突通知：【${booking.name || ''}】想確認 ${toSlashDate(booking.checkin_date)}~${toSlashDate(booking.checkout_date)} 訂房，但已有其他「已確認」訂單日期/房型重疊，請人工核實實際空房狀況並跟客人聯繫。`,
         });
-      } catch {
-        // 通知失敗不影響流程
-      }
+      } catch {}
     }
     await clearBookingSession(userId);
     return;
   }
 
-  let sheetRow: Record<string, string> | null = null;
-  if (settings.quote_sheet_id && session.sheetRowNumber) {
-    try {
-      await mergeUpdateQuoteSheetRow(settings.quote_sheet_id, settings.quote_sheet_gid || '0', session.sheetRowNumber, {
-        預定日期: todayTaiwanSlash(),
-        狀態: '已確認',
-      });
-      sheetRow = await getQuoteSheetRow(settings.quote_sheet_id, settings.quote_sheet_gid || '0', session.sheetRowNumber);
-    } catch (e: any) {
-      console.error('[Booking] update confirm date failed:', e.message);
+  const nowIso = new Date().toISOString();
+  const { data: confirmed } = await supabase.from('bookings').update({ status: 'confirmed', reserved_at: nowIso, updated_at: nowIso }).eq('id', booking.id).select().single();
+
+  if (!quote.useWholeHouse && quote.roomNights?.length) {
+    const rows = quote.roomNights.flatMap((rn) => rn.roomTypeIds.map((roomTypeId) => ({ booking_id: booking.id, night_date: rn.date, room_type_id: roomTypeId })));
+    if (rows.length) {
+      const { error: roomNightsError } = await supabase.from('booking_room_nights').insert(rows);
+      if (roomNightsError) console.error('[Booking] insert room nights failed:', roomNightsError.message);
     }
   }
 
-  const depositRaw = sheetRow?.['訂金'] || '';
-  const depositNumber = depositRaw ? Number(depositRaw) : NaN;
-  const collected = session.collected;
+  let depositNumber = NaN;
+  if (confirmed) {
+    mirrorBookingToSheet(settings, confirmed).catch(() => {});
+    // 訂金目前只能透過鏡射的 Google 試算表手動填寫（或用公式算），這裡重新讀一次把訂金抓回來。
+    if (settings.quote_sheet_id && confirmed.sheet_row_number) {
+      try {
+        const sheetRow = await getQuoteSheetRow(settings.quote_sheet_id, settings.quote_sheet_gid || '0', confirmed.sheet_row_number);
+        const raw = sheetRow?.['訂金'] || '';
+        depositNumber = raw ? Number(raw) : NaN;
+        if (Number.isFinite(depositNumber)) await supabase.from('bookings').update({ deposit: depositNumber }).eq('id', booking.id);
+      } catch (e: any) {
+        console.error('[Booking] read deposit from sheet failed:', e.message);
+      }
+    }
+  }
 
   const confirmMessage = mergeTemplate(settings.booking_confirm_message || '', {
-    姓名: collected.name || '',
-    入住日期: toSlashDate(collected.checkin_date),
-    退房日期: toSlashDate(collected.checkout_date),
+    姓名: booking.name || '',
+    入住日期: toSlashDate(booking.checkin_date),
+    退房日期: toSlashDate(booking.checkout_date),
     是否包棟: quote.useWholeHouse ? '是' : '否',
-    人數: String(collected.headcount ?? ''),
-    大人小孩: formatAdultsKids(collected.adults, collected.kids, collected.infants),
+    人數: String(booking.headcount ?? ''),
+    大人小孩: formatAdultsKids(booking.adults, booking.kids, booking.infants),
     總金額: quote.total.toLocaleString(),
     訂金: Number.isFinite(depositNumber) ? depositNumber.toLocaleString() : '（請洽真人客服確認金額）',
     匯款日時間: computePaymentDeadline(),
@@ -709,7 +862,7 @@ async function handleBookingConfirmation(
 }
 
 // ========================================================================
-// 「報價」試算表讀寫（Google Sheets，服務帳號需為 Editor 權限）
+// 「報價」試算表讀寫（Google Sheets，鏡射備份用，服務帳號需為 Editor 權限）
 // 不寫死欄位順序——一律先讀第一列（標題列）建立「欄位名稱 → 第幾欄」對照表。
 // ========================================================================
 
@@ -734,8 +887,6 @@ async function getGoogleAccessToken(): Promise<string> {
   const header = { alg: 'RS256', typ: 'JWT' };
   const claim = {
     iss: clientEmail,
-    // 要把客人資料寫進「報價」試算表，需要可讀寫的完整範圍（不是唯讀）。
-    // 服務帳號本身的權限由試算表的「共用」設定決定：「報價」試算表要能被寫入，必須設為 Editor。
     scope: 'https://www.googleapis.com/auth/spreadsheets',
     aud: 'https://oauth2.googleapis.com/token',
     iat: nowSec,
@@ -809,46 +960,6 @@ async function findOpenQuoteSheetRow(sheetId: string, gid: string, userId: strin
     }
   }
   return null;
-}
-
-function datesOverlap(startA: string, endA: string, startB: string, endB: string): boolean {
-  return startA < endB && startB < endA;
-}
-
-async function checkWholeHouseConflict(
-  sheetId: string,
-  gid: string,
-  currentRowNumber: number,
-  checkinDate: string,
-  checkoutDate: string,
-  isWholeHouse: boolean
-): Promise<boolean> {
-  const accessToken = await getGoogleAccessToken();
-  const { title, headers } = await getQuoteSheetHeaders(sheetId, gid, accessToken);
-  const checkinIdx = headers.indexOf('入住日期');
-  const checkoutIdx = headers.indexOf('退房日期');
-  const wholeHouseIdx = headers.indexOf('是否包棟');
-  const statusIdx = headers.indexOf('狀態');
-  if (checkinIdx === -1 || checkoutIdx === -1 || statusIdx === -1) return false;
-  const range = encodeURIComponent(`${title}!A2:Z`);
-  const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${range}`, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
-  const result: any = await res.json();
-  if (!res.ok || result.error) throw new Error(result.error?.message || '讀取「報價」試算表資料失敗');
-  const rows: string[][] = result.values || [];
-  for (let i = 0; i < rows.length; i++) {
-    if (i + 2 === currentRowNumber) continue;
-    const r = rows[i];
-    if ((r[statusIdx] || '') !== '已確認') continue;
-    const otherCheckin = r[checkinIdx];
-    const otherCheckout = r[checkoutIdx];
-    if (!otherCheckin || !otherCheckout) continue;
-    const otherIsWholeHouse = wholeHouseIdx !== -1 && r[wholeHouseIdx] === '是';
-    if (!isWholeHouse && !otherIsWholeHouse) continue;
-    if (datesOverlap(checkinDate, checkoutDate, otherCheckin, otherCheckout)) return true;
-  }
-  return false;
 }
 
 async function appendQuoteSheetRow(sheetId: string, gid: string, rowData: Record<string, string>): Promise<number> {

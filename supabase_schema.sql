@@ -228,6 +228,66 @@ CREATE TABLE IF NOT EXISTS public.custom_message_templates (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
 );
 
+-- 8.5 動態訂房流程（可新增多組流程，各自有觸發關鍵字與最多 5 個步驟）
+-- 每個步驟送出 message_template 給顧客，等顧客回覆後依 fields 定義擷取 1~3 個答案；
+-- fields 是 JSON 陣列，每筆 { key, label, quote_field }，quote_field 為
+-- 'checkin_date' / 'checkout_date' / 'headcount' / 'whole_house' / null（null＝純收集資訊，不影響算價）。
+CREATE TABLE IF NOT EXISTS public.booking_flows (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL,
+    trigger_keywords TEXT NOT NULL DEFAULT '',
+    is_active BOOLEAN DEFAULT true,
+    display_order INTEGER DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS public.booking_flow_steps (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    flow_id UUID NOT NULL REFERENCES public.booking_flows(id) ON DELETE CASCADE,
+    step_order INTEGER NOT NULL,
+    message_template TEXT NOT NULL DEFAULT '',
+    fields JSONB NOT NULL DEFAULT '[]',
+    UNIQUE (flow_id, step_order)
+);
+
+-- 8.6 訂房紀錄（取代 Google「報價」試算表為主要資料來源；仍會盡力鏡射寫入試算表，寫入失敗不影響主流程）
+CREATE TABLE IF NOT EXISTS public.bookings (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    line_user_id TEXT NOT NULL,
+    flow_id UUID REFERENCES public.booking_flows(id) ON DELETE SET NULL,
+    nickname TEXT,
+    name TEXT,
+    phone TEXT,
+    checkin_date DATE,
+    checkout_date DATE,
+    nights INTEGER,
+    headcount INTEGER,
+    adults INTEGER,
+    kids INTEGER,
+    infants INTEGER,
+    whole_house BOOLEAN,
+    total_amount NUMERIC,
+    deposit NUMERIC,
+    status TEXT NOT NULL DEFAULT 'inquiring' CHECK (status IN ('inquiring', 'pending_confirmation', 'confirmed', 'cancelled', 'pending_manual_conflict')),
+    collected_answers JSONB DEFAULT '{}',
+    sheet_row_number INTEGER,
+    reserved_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_bookings_user ON public.bookings(line_user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_bookings_confirmed_dates ON public.bookings(checkin_date, checkout_date) WHERE status = 'confirmed';
+
+-- 8.7 個別房型每晚實際使用紀錄（顧客確認訂房當下才寫入），供「不同顧客訂到同一天/同房型」衝突檢查用。
+CREATE TABLE IF NOT EXISTS public.booking_room_nights (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    booking_id UUID NOT NULL REFERENCES public.bookings(id) ON DELETE CASCADE,
+    night_date DATE NOT NULL,
+    room_type_id UUID NOT NULL REFERENCES public.room_types(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_booking_room_nights_lookup ON public.booking_room_nights(night_date, room_type_id);
+
 -- 9. 啟用 RLS（僅限已登入使用者存取，用 DROP + CREATE 讓整份腳本可重複執行）
 ALTER TABLE public.settings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.user_states ENABLE ROW LEVEL SECURITY;
@@ -245,6 +305,10 @@ ALTER TABLE public.whole_house_extra_person_rules ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.promotions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.booking_date_ranges ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.custom_message_templates ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.booking_flows ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.booking_flow_steps ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.bookings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.booking_room_nights ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS "Allow Auth Access" ON public.settings;
 CREATE POLICY "Allow Auth Access" ON public.settings FOR ALL USING (auth.role() = 'authenticated');
@@ -278,6 +342,14 @@ DROP POLICY IF EXISTS "Allow Auth Access Booking Date Ranges" ON public.booking_
 CREATE POLICY "Allow Auth Access Booking Date Ranges" ON public.booking_date_ranges FOR ALL USING (auth.role() = 'authenticated');
 DROP POLICY IF EXISTS "Allow Auth Access Custom Message Templates" ON public.custom_message_templates;
 CREATE POLICY "Allow Auth Access Custom Message Templates" ON public.custom_message_templates FOR ALL USING (auth.role() = 'authenticated');
+DROP POLICY IF EXISTS "Allow Auth Access Booking Flows" ON public.booking_flows;
+CREATE POLICY "Allow Auth Access Booking Flows" ON public.booking_flows FOR ALL USING (auth.role() = 'authenticated');
+DROP POLICY IF EXISTS "Allow Auth Access Booking Flow Steps" ON public.booking_flow_steps;
+CREATE POLICY "Allow Auth Access Booking Flow Steps" ON public.booking_flow_steps FOR ALL USING (auth.role() = 'authenticated');
+DROP POLICY IF EXISTS "Allow Auth Access Bookings" ON public.bookings;
+CREATE POLICY "Allow Auth Access Bookings" ON public.bookings FOR ALL USING (auth.role() = 'authenticated');
+DROP POLICY IF EXISTS "Allow Auth Access Booking Room Nights" ON public.booking_room_nights;
+CREATE POLICY "Allow Auth Access Booking Room Nights" ON public.booking_room_nights FOR ALL USING (auth.role() = 'authenticated');
 
 -- 10. 初始資料
 INSERT INTO public.settings (id) SELECT gen_random_uuid() WHERE NOT EXISTS (SELECT 1 FROM public.settings);

@@ -1,55 +1,106 @@
 import { useState, useEffect } from 'react';
 import { supabase } from '../lib/supabase';
-import { Save, Workflow, FileSpreadsheet, MessageSquareText } from 'lucide-react';
+import { Save, FileSpreadsheet, MessageSquareText, Workflow, Plus, Trash2, Pencil, X, GripVertical } from 'lucide-react';
 import CollapsibleSection from '../components/CollapsibleSection';
 import MessageTemplateEditor from '../components/MessageTemplateEditor';
 
 const QUOTE_MESSAGE_PLACEHOLDERS = ['入住日期', '退房日期', '人數', '是否包棟', '總金額'];
 const CONFIRM_MESSAGE_PLACEHOLDERS = ['姓名', '入住日期', '退房日期', '是否包棟', '人數', '大人小孩', '總金額', '訂金', '匯款日時間'];
 
+const QUOTE_FIELD_OPTIONS = [
+  { value: '', label: '無（純收集資訊，不影響算價）' },
+  { value: 'checkin_date', label: '入住日期' },
+  { value: 'checkout_date', label: '退房日期' },
+  { value: 'headcount', label: '入住人數' },
+  { value: 'whole_house', label: '是否包棟' },
+];
+
+const MAX_STEPS = 5;
+const MAX_FIELDS_PER_STEP = 3;
+
+function newId(): string {
+  return crypto.randomUUID();
+}
+
+type FlowField = { key: string; label: string; quote_field: string };
+type FlowStep = { id?: string; step_order: number; message_template: string; fields: FlowField[] };
+type Flow = {
+  id: string;
+  name: string;
+  trigger_keywords: string;
+  is_active: boolean;
+  display_order: number;
+  steps: FlowStep[];
+};
+
+const emptyFlow = (): Flow => ({
+  id: '',
+  name: '',
+  trigger_keywords: '',
+  is_active: true,
+  display_order: 0,
+  steps: [{ step_order: 1, message_template: '', fields: [{ key: newId(), label: '', quote_field: '' }] }],
+});
+
 export default function BookingFlowSettings() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [settingsId, setSettingsId] = useState<string | null>(null);
 
-  const [bookingTriggerKeywords, setBookingTriggerKeywords] = useState('');
   const [quoteSheetId, setQuoteSheetId] = useState('');
   const [quoteSheetGid, setQuoteSheetGid] = useState('0');
-  const [welcomeMessage, setWelcomeMessage] = useState('');
   const [quoteMessage, setQuoteMessage] = useState('');
   const [confirmMessage, setConfirmMessage] = useState('');
 
+  const [flows, setFlows] = useState<Flow[]>([]);
+  const [showFlowForm, setShowFlowForm] = useState(false);
+  const [flowForm, setFlowForm] = useState<Flow>(emptyFlow());
+  const [savingFlow, setSavingFlow] = useState(false);
+
   useEffect(() => {
     fetchSettings();
+    fetchFlows();
   }, []);
 
   const fetchSettings = async () => {
     setLoading(true);
     const { data } = await supabase
       .from('settings')
-      .select('id, booking_trigger_keywords, quote_sheet_id, quote_sheet_gid, booking_welcome_message, booking_quote_message, booking_confirm_message')
+      .select('id, quote_sheet_id, quote_sheet_gid, booking_quote_message, booking_confirm_message')
       .single();
     setSettingsId(data?.id || null);
-    setBookingTriggerKeywords(data?.booking_trigger_keywords ?? '我要訂房,訂房');
     setQuoteSheetId(data?.quote_sheet_id ?? '');
     setQuoteSheetGid(data?.quote_sheet_gid ?? '0');
-    setWelcomeMessage(data?.booking_welcome_message ?? '');
     setQuoteMessage(data?.booking_quote_message ?? '');
     setConfirmMessage(data?.booking_confirm_message ?? '');
     setLoading(false);
   };
 
-  const handleSave = async () => {
+  const fetchFlows = async () => {
+    const { data: flowRows } = await supabase.from('booking_flows').select('*').order('display_order');
+    const { data: stepRows } = await supabase.from('booking_flow_steps').select('*').order('step_order');
+    const flowsList: Flow[] = (flowRows || []).map((f: any) => ({
+      id: f.id,
+      name: f.name,
+      trigger_keywords: f.trigger_keywords,
+      is_active: f.is_active,
+      display_order: f.display_order,
+      steps: (stepRows || [])
+        .filter((s: any) => s.flow_id === f.id)
+        .map((s: any) => ({ id: s.id, step_order: s.step_order, message_template: s.message_template, fields: s.fields || [] })),
+    }));
+    setFlows(flowsList);
+  };
+
+  const handleSaveSettings = async () => {
     if (!settingsId) return;
     setSaving(true);
     try {
       await supabase
         .from('settings')
         .update({
-          booking_trigger_keywords: bookingTriggerKeywords,
           quote_sheet_id: quoteSheetId,
           quote_sheet_gid: quoteSheetGid,
-          booking_welcome_message: welcomeMessage,
           booking_quote_message: quoteMessage,
           booking_confirm_message: confirmMessage,
         })
@@ -62,6 +113,134 @@ export default function BookingFlowSettings() {
     }
   };
 
+  const openNewFlow = () => {
+    setFlowForm({ ...emptyFlow(), display_order: flows.length });
+    setShowFlowForm(true);
+  };
+
+  const openEditFlow = (flow: Flow) => {
+    setFlowForm(JSON.parse(JSON.stringify(flow)));
+    setShowFlowForm(true);
+  };
+
+  const addStep = () => {
+    if (flowForm.steps.length >= MAX_STEPS) return;
+    setFlowForm({
+      ...flowForm,
+      steps: [...flowForm.steps, { step_order: flowForm.steps.length + 1, message_template: '', fields: [{ key: newId(), label: '', quote_field: '' }] }],
+    });
+  };
+
+  const removeStep = (index: number) => {
+    const steps = flowForm.steps.filter((_, i) => i !== index).map((s, i) => ({ ...s, step_order: i + 1 }));
+    setFlowForm({ ...flowForm, steps });
+  };
+
+  const updateStepMessage = (index: number, value: string) => {
+    const steps = [...flowForm.steps];
+    steps[index] = { ...steps[index], message_template: value };
+    setFlowForm({ ...flowForm, steps });
+  };
+
+  const addField = (stepIndex: number) => {
+    const steps = [...flowForm.steps];
+    if (steps[stepIndex].fields.length >= MAX_FIELDS_PER_STEP) return;
+    steps[stepIndex] = { ...steps[stepIndex], fields: [...steps[stepIndex].fields, { key: newId(), label: '', quote_field: '' }] };
+    setFlowForm({ ...flowForm, steps });
+  };
+
+  const removeField = (stepIndex: number, fieldIndex: number) => {
+    const steps = [...flowForm.steps];
+    steps[stepIndex] = { ...steps[stepIndex], fields: steps[stepIndex].fields.filter((_, i) => i !== fieldIndex) };
+    setFlowForm({ ...flowForm, steps });
+  };
+
+  const updateField = (stepIndex: number, fieldIndex: number, patch: Partial<FlowField>) => {
+    const steps = [...flowForm.steps];
+    const fields = [...steps[stepIndex].fields];
+    fields[fieldIndex] = { ...fields[fieldIndex], ...patch };
+    steps[stepIndex] = { ...steps[stepIndex], fields };
+    setFlowForm({ ...flowForm, steps });
+  };
+
+  const handleSaveFlow = async () => {
+    if (!flowForm.name.trim()) {
+      alert('請輸入流程名稱');
+      return;
+    }
+    if (!flowForm.trigger_keywords.trim()) {
+      alert('請輸入至少一個觸發關鍵字');
+      return;
+    }
+    for (const step of flowForm.steps) {
+      if (!step.message_template.trim()) {
+        alert(`第 ${step.step_order} 步驟的訊息內容不能是空的`);
+        return;
+      }
+      if (step.fields.some((f) => !f.label.trim())) {
+        alert(`第 ${step.step_order} 步驟有欄位沒有填標籤`);
+        return;
+      }
+    }
+
+    setSavingFlow(true);
+    try {
+      let flowId = flowForm.id;
+      const flowPayload = {
+        name: flowForm.name,
+        trigger_keywords: flowForm.trigger_keywords,
+        is_active: flowForm.is_active,
+        display_order: flowForm.display_order,
+        updated_at: new Date().toISOString(),
+      };
+
+      if (flowId) {
+        const { error } = await supabase.from('booking_flows').update(flowPayload).eq('id', flowId);
+        if (error) throw error;
+        await supabase.from('booking_flow_steps').delete().eq('flow_id', flowId);
+      } else {
+        const { data, error } = await supabase.from('booking_flows').insert(flowPayload).select('id').single();
+        if (error) throw error;
+        flowId = data.id;
+      }
+
+      const stepRows = flowForm.steps.map((s) => ({
+        flow_id: flowId,
+        step_order: s.step_order,
+        message_template: s.message_template,
+        fields: s.fields.map((f) => ({ key: f.key, label: f.label, quote_field: f.quote_field || null })),
+      }));
+      const { error: stepsError } = await supabase.from('booking_flow_steps').insert(stepRows);
+      if (stepsError) throw stepsError;
+
+      setShowFlowForm(false);
+      fetchFlows();
+    } catch (err: any) {
+      alert(`儲存失敗：${err.message}`);
+    } finally {
+      setSavingFlow(false);
+    }
+  };
+
+  const handleDeleteFlow = async (flow: Flow) => {
+    if (!confirm(`確定要刪除流程「${flow.name}」嗎？`)) return;
+    const { error } = await supabase.from('booking_flows').delete().eq('id', flow.id);
+    if (error) {
+      alert(`刪除失敗：${error.message}`);
+      return;
+    }
+    fetchFlows();
+  };
+
+  const toggleFlowActive = async (flow: Flow) => {
+    const { error } = await supabase.from('booking_flows').update({ is_active: !flow.is_active }).eq('id', flow.id);
+    if (error) {
+      alert(`更新失敗：${error.message}`);
+      return;
+    }
+    fetchFlows();
+  };
+
   if (loading) return <div className="p-8 text-center text-gray-500">載入中...</div>;
 
   return (
@@ -70,99 +249,201 @@ export default function BookingFlowSettings() {
         <div>
           <h2 className="text-2xl font-bold text-gray-800 flex items-center gap-2">
             <Workflow className="w-6 h-6 text-blue-600" />
-            流程設定
+            訂房流程設定
           </h2>
-          <p className="text-gray-500 mt-1">控制 LINE 訂房對話流程的觸發條件、資料寫入的試算表，以及三段可自訂罐頭訊息。</p>
+          <p className="text-gray-500 mt-1">管理 LINE 訂房對話的分步驟流程，以及報價確認／付款確認罐頭訊息。</p>
         </div>
-        <button
-          onClick={handleSave}
-          disabled={saving}
-          className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 disabled:opacity-50 whitespace-nowrap"
-        >
-          <Save className="w-4 h-4" />
-          {saving ? '儲存中...' : '儲存變更'}
-        </button>
       </div>
 
+      {/* 動態流程管理 */}
       <div className="bg-white rounded-xl shadow-sm border overflow-hidden">
-        <div className="p-6">
-          <p className="text-sm font-medium text-gray-700 mb-1">觸發關鍵字</p>
-          <p className="text-xs text-gray-400 mb-3">
-            顧客訊息包含這些關鍵字（逗號分隔）就會開始追蹤訂房詢問狀態，接著送出下方「歡迎詢問」罐頭訊息，
-            等顧客填完資料後用程式碼確定性計算晚數與金額（不會交給 AI 自由計算）。
-          </p>
-          <input
-            value={bookingTriggerKeywords}
-            onChange={(e) => setBookingTriggerKeywords(e.target.value)}
-            className="w-full px-3 py-2 border rounded-lg"
-            placeholder="我要訂房,訂房"
-          />
+        <div className="p-6 border-b flex justify-between items-start gap-4">
+          <div>
+            <h3 className="text-lg font-bold text-gray-800">流程管理</h3>
+            <p className="text-sm text-gray-500 mt-1">
+              每組流程有自己的觸發關鍵字，最多 {MAX_STEPS} 個步驟。每個步驟送出一段自訂訊息給顧客，等顧客回覆後擷取最多 {MAX_FIELDS_PER_STEP} 個答案，
+              全部步驟做完後，若已收集齊「入住日期／退房日期／入住人數／是否包棟」，就會自動算價並進入確認流程；沒收集齊則轉真人客服處理。
+            </p>
+          </div>
+          <button onClick={openNewFlow} className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-blue-700 whitespace-nowrap">
+            <Plus className="w-4 h-4" /> 新增流程
+          </button>
         </div>
+
+        <div className="divide-y divide-gray-100">
+          {flows.length === 0 ? (
+            <p className="p-10 text-center text-gray-400">尚未設定任何流程，點右上角「新增流程」開始</p>
+          ) : (
+            flows.map((flow) => (
+              <div key={flow.id} className="p-6 flex items-center justify-between gap-4">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <p className="font-medium text-gray-800">{flow.name}</p>
+                    <span className="text-xs text-gray-400">{flow.steps.length} 個步驟</span>
+                  </div>
+                  <p className="text-xs text-gray-400 mt-1">觸發關鍵字：{flow.trigger_keywords}</p>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    onClick={() => toggleFlowActive(flow)}
+                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${flow.is_active ? 'bg-green-500' : 'bg-gray-300'}`}
+                    title={flow.is_active ? '啟用中' : '已停用'}
+                  >
+                    <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${flow.is_active ? 'translate-x-6' : 'translate-x-1'}`} />
+                  </button>
+                  <button onClick={() => openEditFlow(flow)} className="p-2 hover:bg-gray-100 rounded-lg" title="編輯"><Pencil className="w-4 h-4 text-gray-500" /></button>
+                  <button onClick={() => handleDeleteFlow(flow)} className="p-2 hover:bg-red-50 rounded-lg" title="刪除"><Trash2 className="w-4 h-4 text-red-500" /></button>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+
+      {showFlowForm && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-3xl max-h-[90vh] overflow-y-auto">
+            <div className="flex justify-between items-center p-6 border-b sticky top-0 bg-white">
+              <h3 className="text-lg font-bold text-gray-800">{flowForm.id ? '編輯流程' : '新增流程'}</h3>
+              <button onClick={() => setShowFlowForm(false)} className="p-1 text-gray-400 hover:text-gray-600"><X className="w-5 h-5" /></button>
+            </div>
+
+            <div className="p-6 space-y-6">
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs text-gray-500 mb-1">流程名稱</label>
+                  <input value={flowForm.name} onChange={(e) => setFlowForm({ ...flowForm, name: e.target.value })} className="w-full px-3 py-2 border rounded-lg" placeholder="例如：一般訂房詢問" />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-500 mb-1">觸發關鍵字（逗號分隔）</label>
+                  <input value={flowForm.trigger_keywords} onChange={(e) => setFlowForm({ ...flowForm, trigger_keywords: e.target.value })} className="w-full px-3 py-2 border rounded-lg" placeholder="我要訂房,訂房" />
+                </div>
+              </div>
+
+              <div className="space-y-4">
+                {flowForm.steps.map((step, stepIndex) => (
+                  <div key={stepIndex} className="border rounded-lg overflow-hidden">
+                    <div className="flex items-center justify-between gap-2 bg-gray-50 px-4 py-2 border-b">
+                      <span className="flex items-center gap-2 text-sm font-semibold text-gray-700">
+                        <GripVertical className="w-4 h-4 text-gray-300" />
+                        步驟 {step.step_order}
+                      </span>
+                      {flowForm.steps.length > 1 && (
+                        <button onClick={() => removeStep(stepIndex)} className="p-1 text-red-500 hover:bg-red-50 rounded" title="刪除此步驟">
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      )}
+                    </div>
+                    <div className="p-4 space-y-3">
+                      <div>
+                        <label className="block text-xs text-gray-500 mb-1">送給顧客的訊息（AI 回答樣版）</label>
+                        <MessageTemplateEditor value={step.message_template} onChange={(v) => updateStepMessage(stepIndex, v)} placeholders={[]} rows={3} placeholder="例如：請問您預計入住與退房日期？" />
+                      </div>
+                      <div>
+                        <div className="flex justify-between items-center mb-2">
+                          <label className="text-xs text-gray-500">預期顧客回答的欄位（最多 {MAX_FIELDS_PER_STEP} 個）</label>
+                          <button onClick={() => addField(stepIndex)} disabled={step.fields.length >= MAX_FIELDS_PER_STEP} className="text-xs flex items-center gap-1 text-blue-600 hover:text-blue-700 disabled:opacity-40 disabled:cursor-not-allowed">
+                            <Plus className="w-3.5 h-3.5" /> 新增欄位
+                          </button>
+                        </div>
+                        <div className="space-y-2">
+                          {step.fields.map((field, fieldIndex) => (
+                            <div key={field.key} className="flex items-center gap-2">
+                              <input
+                                value={field.label}
+                                onChange={(e) => updateField(stepIndex, fieldIndex, { label: e.target.value })}
+                                className="flex-1 px-2 py-1.5 border rounded text-sm"
+                                placeholder="欄位名稱，例如：入住日期"
+                              />
+                              <select
+                                value={field.quote_field}
+                                onChange={(e) => updateField(stepIndex, fieldIndex, { quote_field: e.target.value })}
+                                className="w-56 px-2 py-1.5 border rounded text-sm bg-white"
+                              >
+                                {QUOTE_FIELD_OPTIONS.map((o) => (
+                                  <option key={o.value} value={o.value}>{o.label}</option>
+                                ))}
+                              </select>
+                              {step.fields.length > 1 && (
+                                <button onClick={() => removeField(stepIndex, fieldIndex)} className="p-1.5 text-red-500 hover:bg-red-50 rounded">
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <button
+                onClick={addStep}
+                disabled={flowForm.steps.length >= MAX_STEPS}
+                className="w-full flex items-center justify-center gap-2 border-2 border-dashed rounded-lg py-3 text-sm text-gray-500 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                <Plus className="w-4 h-4" /> 新增步驟（{flowForm.steps.length}/{MAX_STEPS}）
+              </button>
+            </div>
+
+            <div className="flex justify-end gap-2 p-6 border-t sticky bottom-0 bg-white">
+              <button onClick={() => setShowFlowForm(false)} className="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg">取消</button>
+              <button onClick={handleSaveFlow} disabled={savingFlow} className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50">
+                {savingFlow ? '儲存中...' : '儲存流程'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 報價試算表 + 罐頭訊息（走完流程、算完價之後才會用到） */}
+      <div className="bg-white p-6 rounded-xl shadow-sm border flex justify-end">
+        <button onClick={handleSaveSettings} disabled={saving} className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 disabled:opacity-50 whitespace-nowrap">
+          <Save className="w-4 h-4" />
+          {saving ? '儲存中...' : '儲存下方設定'}
+        </button>
       </div>
 
       <div className="bg-white rounded-xl shadow-sm border overflow-hidden">
         <div className="p-6">
           <h3 className="text-lg font-bold text-gray-800 flex items-center gap-2 mb-1">
             <FileSpreadsheet className="w-5 h-5 text-green-600" />
-            「報價」試算表
+            「報價」試算表（鏡射備份用）
           </h3>
           <p className="text-xs text-gray-400 mb-3">
-            分三個階段自動寫入、更新<strong>同一列</strong>（不會拆成好幾筆）：① 顧客一開始傳觸發關鍵字，先記錄 LINE_USER_ID、LINE_NAME（LINE 暱稱），狀態＝「詢問中」；
-            ② 顧客填完資料、算完報價，補上訂房姓名、入住/退房日期、入住天數、人數、大人小孩、是否包棟、總金額，狀態＝「待確認」；
-            ③ 顧客回「是」確認，補上預定日期（今天），狀態＝「已確認」；回「否」則狀態＝「已取消」。
-            （「狀態」欄位要自己在試算表加上這個名稱的欄位，系統才會寫）<br />
-            <strong>檔期防呆（簡化版）：</strong>顧客回「是」確認前，系統會檢查「這次是包棟、或跟某筆狀態＝已確認的包棟訂單日期重疊」，
-            有的話就不自動確認，改回覆客人「需要真人核實空房」，同時推播通知「真人客服」設定的帳號盡快處理，該筆狀態會標成「待人工確認（檔期衝突）」。
-            這層只擋包棟衝突，個別租房彼此的房型/人數分配還沒有防呆。
-            欄位一律照試算表第一列（標題列）的名稱比對寫入，之後想加減欄位、調順序都不會壞掉；<strong>訂金欄位由您自己填寫或用公式從總金額算出</strong>，
-            系統不會自動填，顧客回「是」的當下會重新讀一次那一列把訂金帶進付款確認訊息。<br />
-            <strong>注意：</strong>這份試算表要分享給服務帳號（跟知識庫共用同一組），且權限要設為「編輯者」而不是「檢視者」，否則系統無法寫入。
+            訂房紀錄以資料庫為主要來源，這裡設定的試算表只是同步鏡射一份備份，寫入失敗不影響訂房流程本身。
+            <strong>注意：</strong>這份試算表要分享給服務帳號（跟知識庫共用同一組），且權限要設為「編輯者」而不是「檢視者」。
           </p>
           <div className="flex flex-wrap gap-3">
             <div>
               <label className="block text-xs text-gray-500 mb-1">試算表 ID</label>
-              <input
-                value={quoteSheetId}
-                onChange={(e) => setQuoteSheetId(e.target.value)}
-                className="w-80 px-3 py-2 border rounded-lg"
-                placeholder="Google 試算表網址中 /d/ 後面那一段"
-              />
+              <input value={quoteSheetId} onChange={(e) => setQuoteSheetId(e.target.value)} className="w-80 px-3 py-2 border rounded-lg" placeholder="Google 試算表網址中 /d/ 後面那一段" />
             </div>
             <div>
               <label className="block text-xs text-gray-500 mb-1">工作表 GID</label>
-              <input
-                value={quoteSheetGid}
-                onChange={(e) => setQuoteSheetGid(e.target.value)}
-                className="w-28 px-3 py-2 border rounded-lg"
-                placeholder="0"
-              />
+              <input value={quoteSheetGid} onChange={(e) => setQuoteSheetGid(e.target.value)} className="w-28 px-3 py-2 border rounded-lg" placeholder="0" />
             </div>
           </div>
         </div>
       </div>
 
       <CollapsibleSection
-        title="罐頭訊息設定"
+        title="報價確認／付款確認罐頭訊息"
         icon={<MessageSquareText className="w-5 h-5 text-orange-600" />}
-        description="三段訊息都可以自訂文字，方括號 [欄位名稱] 是合併欄位，可以點下方按鈕快速插入，也可以直接在文字裡手打。"
+        description="流程走完、成功算出價格後才會用到這兩段訊息，方括號 [欄位名稱] 是合併欄位。"
         defaultOpen={true}
       >
         <div className="p-6 border-b">
-          <p className="text-sm font-medium text-gray-700 mb-1">① 歡迎詢問（觸發關鍵字後第一句回覆）</p>
-          <p className="text-xs text-gray-400 mb-2">這段沒有合併欄位，顧客還沒提供任何資料，純粹是請他們照格式回覆。</p>
-          <MessageTemplateEditor value={welcomeMessage} onChange={setWelcomeMessage} placeholders={[]} rows={10} />
-        </div>
-
-        <div className="p-6 border-b">
-          <p className="text-sm font-medium text-gray-700 mb-1">② 報價確認（顧客填完資料、算完金額後）</p>
+          <p className="text-sm font-medium text-gray-700 mb-1">① 報價確認（算完金額後送出）</p>
           <p className="text-xs text-gray-400 mb-2">送出後會等顧客回覆「是」或「否」。</p>
           <MessageTemplateEditor value={quoteMessage} onChange={setQuoteMessage} placeholders={QUOTE_MESSAGE_PLACEHOLDERS} rows={10} />
         </div>
 
         <div className="p-6">
-          <p className="text-sm font-medium text-gray-700 mb-1">③ 付款確認（顧客回「是」之後）</p>
+          <p className="text-sm font-medium text-gray-700 mb-1">② 付款確認（顧客回「是」之後）</p>
           <p className="text-xs text-gray-400 mb-2">
-            [訂金] 讀自「報價」試算表那一列（顧客回「是」的當下重新讀一次，讓您有時間先在表格裡填好或用公式算好）；
+            [訂金] 讀自訂房紀錄（顧客回「是」的當下重新讀一次，讓您有時間先填好或用其他方式算好）；
             [匯款日時間] 由系統自動算：目前時間 18:00 前帶入今天 21:00，18:00（含）以後帶入明天 21:00。
           </p>
           <MessageTemplateEditor value={confirmMessage} onChange={setConfirmMessage} placeholders={CONFIRM_MESSAGE_PLACEHOLDERS} rows={14} />
