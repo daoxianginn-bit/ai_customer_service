@@ -10,6 +10,9 @@ import HandoverRules from './pages/HandoverRules';
 import AgentService from './pages/AgentService';
 import Conversations from './pages/Conversations';
 import AdminAccounts from './pages/AdminAccounts';
+import BookingManagement from './pages/BookingManagement';
+import BookingFlowSettings from './pages/BookingFlowSettings';
+import CustomMessageSending from './pages/CustomMessageSending';
 import Layout from './components/Layout';
 
 function App() {
@@ -90,6 +93,9 @@ function App() {
           <Route path="/agent" element={<AgentService />} />
           <Route path="/conversations" element={<Conversations />} />
           <Route path="/accounts" element={<AdminAccounts />} />
+          <Route path="/booking" element={<BookingManagement />} />
+          <Route path="/booking-flow" element={<BookingFlowSettings />} />
+          <Route path="/broadcast" element={<CustomMessageSending />} />
         </Route>
         <Route path="*" element={<Navigate to="/" />} />
       </Routes>
