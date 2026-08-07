@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase';
-import { Users, Search, X, MessageSquare, ClipboardList, BadgeInfo, Copy } from 'lucide-react';
+import { Users, Search, MessageSquare, ClipboardList, BadgeInfo, Copy } from 'lucide-react';
+import { PageHeader, Button, Modal, StatusBadge, EmptyState } from '../components/ui';
 
 const STATUS_LABEL: Record<string, string> = {
   inquiring: '待報價',
@@ -156,16 +157,10 @@ export default function CustomerDirectory() {
 
   return (
     <div className="max-w-5xl mx-auto space-y-6">
-      <div className="bg-white p-6 rounded-xl shadow-sm border">
-        <h2 className="text-2xl font-bold text-gray-800 flex items-center gap-2">
-          <Users className="w-6 h-6 text-blue-600" />
-          客戶資料
-        </h2>
-        <p className="text-gray-500 mt-1">所有跟 LINE 官方帳號互動過的聯絡人，點列查看訂單與對話紀錄。</p>
-      </div>
+      <PageHeader icon={<Users className="w-6 h-6 text-green-600" />} title="客戶資料" description="所有跟 LINE 官方帳號互動過的聯絡人，點列查看訂單與對話紀錄。" />
 
       <div className="bg-white p-6 rounded-xl shadow-sm border space-y-3">
-        <h3 className="font-bold text-gray-800 flex items-center gap-2"><BadgeInfo className="w-5 h-5 text-blue-500" />LINE 資訊查詢</h3>
+        <h3 className="font-bold text-gray-800 flex items-center gap-2"><BadgeInfo className="w-5 h-5 text-green-600" />LINE 資訊查詢</h3>
         <p className="text-xs text-gray-400">
           LINE 官方 API 不支援用名字搜尋任何用戶，只能查已經聊過天、加過官方帳號好友的聯絡人。從下面選一位聯絡人，再選要查的資訊類型。
         </p>
@@ -187,9 +182,7 @@ export default function CustomerDirectory() {
               {LOOKUP_TYPE_OPTIONS.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
             </select>
           </div>
-          <button onClick={runLookup} disabled={lookupLoading} className="flex items-center gap-1 bg-blue-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50">
-            <Search className="w-4 h-4" /> {lookupLoading ? '查詢中...' : '查詢'}
-          </button>
+          <Button onClick={runLookup} loading={lookupLoading} icon={<Search className="w-4 h-4" />}>查詢</Button>
         </div>
 
         {lookupError && <p className="text-sm text-red-600">{lookupError}</p>}
@@ -260,9 +253,7 @@ export default function CustomerDirectory() {
           placeholder="搜尋 LINE 暱稱"
           className="flex-1 px-4 py-2 border rounded-lg"
         />
-        <button onClick={runQuery} className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700">
-          <Search className="w-4 h-4" /> 搜尋
-        </button>
+        <Button onClick={runQuery} icon={<Search className="w-4 h-4" />}>搜尋</Button>
       </div>
 
       <div className="bg-white rounded-xl shadow-sm border overflow-hidden">
@@ -281,14 +272,14 @@ export default function CustomerDirectory() {
               {loading ? (
                 <tr><td colSpan={5} className="py-10 text-center text-gray-400">載入中...</td></tr>
               ) : contacts.length === 0 ? (
-                <tr><td colSpan={5} className="py-16 text-center text-gray-400">查無聯絡人</td></tr>
+                <tr><td colSpan={5}><EmptyState icon={<Users className="w-12 h-12 text-gray-200" />} message="查無聯絡人" /></td></tr>
               ) : (
                 contacts.map((c) => (
-                  <tr key={c.line_user_id} onClick={() => openDetail(c)} className="hover:bg-blue-50 transition-colors cursor-pointer">
+                  <tr key={c.line_user_id} onClick={() => openDetail(c)} className="hover:bg-green-50 transition-colors cursor-pointer">
                     <td className="py-3 px-4 font-medium text-gray-800">{c.nickname || '未取得'}</td>
                     <td className="py-3 px-4 text-gray-500">{c.last_message_at ? new Date(c.last_message_at).toLocaleString('zh-TW') : '-'}</td>
                     <td className="py-3 px-4">{c.bookingCount}</td>
-                    <td className="py-3 px-4">{c.latestStatus ? STATUS_LABEL[c.latestStatus] || c.latestStatus : '-'}</td>
+                    <td className="py-3 px-4">{c.latestStatus ? <StatusBadge status={c.latestStatus} /> : <span className="text-gray-400">-</span>}</td>
                     <td className="py-3 px-4 whitespace-nowrap">{c.totalSpend > 0 ? `NT$ ${c.totalSpend.toLocaleString()}` : '-'}</td>
                   </tr>
                 ))
@@ -298,67 +289,64 @@ export default function CustomerDirectory() {
         </div>
       </div>
 
-      {selected && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
-            <div className="flex justify-between items-center p-6 border-b">
-              <div>
-                <h3 className="text-lg font-bold text-gray-800">{selected.nickname || '未取得'}</h3>
-                <p className="text-xs text-gray-400 font-mono">{selected.line_user_id}</p>
-              </div>
-              <button onClick={closeDetail} className="p-1 text-gray-400 hover:text-gray-600"><X className="w-5 h-5" /></button>
+      <Modal
+        open={!!selected}
+        title={selected?.nickname || '未取得'}
+        onClose={closeDetail}
+        maxWidth="max-w-2xl"
+      >
+        {selected && (
+          <>
+            <p className="text-xs text-gray-400 font-mono -mt-4">{selected.line_user_id}</p>
+
+            <div>
+              <h4 className="font-bold text-gray-700 flex items-center gap-2 mb-2"><ClipboardList className="w-4 h-4" /> 訂單紀錄</h4>
+              {detailLoading ? (
+                <p className="text-sm text-gray-400">載入中...</p>
+              ) : selectedBookings.length === 0 ? (
+                <p className="text-sm text-gray-400">尚無訂單紀錄</p>
+              ) : (
+                <div className="space-y-2">
+                  {selectedBookings.map((b) => (
+                    <div key={b.id} className="border rounded-lg p-3 text-sm flex justify-between items-center">
+                      <div>
+                        <p className="font-medium text-gray-800">{b.order_number || '（尚無編號）'}</p>
+                        <p className="text-xs text-gray-500">{b.checkin_date ? String(b.checkin_date).replace(/-/g, '/') : '-'} ~ {b.checkout_date ? String(b.checkout_date).replace(/-/g, '/') : '-'}　{b.room_type_label || (b.whole_house ? '包棟' : '')}</p>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-gray-700 mb-1">{b.total_amount != null ? `NT$ ${Number(b.total_amount).toLocaleString()}` : '-'}</p>
+                        <StatusBadge status={b.status} />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
-            <div className="p-6 space-y-6">
-              <div>
-                <h4 className="font-bold text-gray-700 flex items-center gap-2 mb-2"><ClipboardList className="w-4 h-4" /> 訂單紀錄</h4>
-                {detailLoading ? (
-                  <p className="text-sm text-gray-400">載入中...</p>
-                ) : selectedBookings.length === 0 ? (
-                  <p className="text-sm text-gray-400">尚無訂單紀錄</p>
-                ) : (
-                  <div className="space-y-2">
-                    {selectedBookings.map((b) => (
-                      <div key={b.id} className="border rounded-lg p-3 text-sm flex justify-between items-center">
-                        <div>
-                          <p className="font-medium text-gray-800">{b.order_number || '（尚無編號）'}</p>
-                          <p className="text-xs text-gray-500">{b.checkin_date ? String(b.checkin_date).replace(/-/g, '/') : '-'} ~ {b.checkout_date ? String(b.checkout_date).replace(/-/g, '/') : '-'}　{b.room_type_label || (b.whole_house ? '包棟' : '')}</p>
-                        </div>
-                        <div className="text-right">
-                          <p className="text-gray-700">{b.total_amount != null ? `NT$ ${Number(b.total_amount).toLocaleString()}` : '-'}</p>
-                          <p className="text-xs text-gray-400">{STATUS_LABEL[b.status] || b.status}</p>
-                        </div>
+            <div>
+              <h4 className="font-bold text-gray-700 flex items-center gap-2 mb-2"><MessageSquare className="w-4 h-4" /> 最近對話紀錄</h4>
+              <p className="text-xs text-gray-400 mb-2">依系統保留天數設定自動清除，可能查不到較久之前的對話。</p>
+              {detailLoading ? (
+                <p className="text-sm text-gray-400">載入中...</p>
+              ) : selectedConversations.length === 0 ? (
+                <p className="text-sm text-gray-400">查無對話紀錄</p>
+              ) : (
+                <div className="space-y-2 max-h-64 overflow-y-auto">
+                  {selectedConversations.map((row) => (
+                    <div key={row.id} className={`text-sm p-2 rounded-lg ${row.direction === 'inbound' ? 'bg-blue-50' : 'bg-gray-50'}`}>
+                      <div className="flex justify-between text-xs text-gray-400 mb-0.5">
+                        <span>{row.direction === 'inbound' ? '收到' : '回覆'}</span>
+                        <span>{new Date(row.created_at).toLocaleString('zh-TW')}</span>
                       </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              <div>
-                <h4 className="font-bold text-gray-700 flex items-center gap-2 mb-2"><MessageSquare className="w-4 h-4" /> 最近對話紀錄</h4>
-                <p className="text-xs text-gray-400 mb-2">依系統保留天數設定自動清除，可能查不到較久之前的對話。</p>
-                {detailLoading ? (
-                  <p className="text-sm text-gray-400">載入中...</p>
-                ) : selectedConversations.length === 0 ? (
-                  <p className="text-sm text-gray-400">查無對話紀錄</p>
-                ) : (
-                  <div className="space-y-2 max-h-64 overflow-y-auto">
-                    {selectedConversations.map((row) => (
-                      <div key={row.id} className={`text-sm p-2 rounded-lg ${row.direction === 'inbound' ? 'bg-blue-50' : 'bg-gray-50'}`}>
-                        <div className="flex justify-between text-xs text-gray-400 mb-0.5">
-                          <span>{row.direction === 'inbound' ? '收到' : '回覆'}</span>
-                          <span>{new Date(row.created_at).toLocaleString('zh-TW')}</span>
-                        </div>
-                        <p className="text-gray-700 whitespace-pre-wrap break-words">{row.content}</p>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
+                      <p className="text-gray-700 whitespace-pre-wrap break-words">{row.content}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
-          </div>
-        </div>
-      )}
+          </>
+        )}
+      </Modal>
     </div>
   );
 }

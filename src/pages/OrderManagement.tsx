@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase';
-import { ClipboardList, Search, RotateCcw, X, Save } from 'lucide-react';
+import { ClipboardList, Search, RotateCcw, Save } from 'lucide-react';
+import { PageHeader, Button, Modal, StatusBadge, EmptyState } from '../components/ui';
 
 const PAGE_SIZE = 15;
 
@@ -14,21 +15,6 @@ const STATUS_OPTIONS = [
 ];
 
 const EDITABLE_STATUS_OPTIONS = STATUS_OPTIONS.filter((s) => s.value);
-
-function statusBadgeClass(status: string): string {
-  switch (status) {
-    case 'inquiring': return 'bg-gray-100 text-gray-600';
-    case 'pending_confirmation': return 'bg-yellow-100 text-yellow-700';
-    case 'confirmed': return 'bg-green-100 text-green-700';
-    case 'cancelled': return 'bg-red-100 text-red-600';
-    case 'pending_manual_conflict': return 'bg-orange-100 text-orange-700';
-    default: return 'bg-gray-100 text-gray-600';
-  }
-}
-
-function statusLabel(status: string): string {
-  return STATUS_OPTIONS.find((s) => s.value === status)?.label || status;
-}
 
 export default function OrderManagement() {
   const [keyword, setKeyword] = useState('');
@@ -127,13 +113,7 @@ export default function OrderManagement() {
 
   return (
     <div className="max-w-6xl mx-auto space-y-6">
-      <div className="bg-white p-6 rounded-xl shadow-sm border">
-        <h2 className="text-2xl font-bold text-gray-800 flex items-center gap-2">
-          <ClipboardList className="w-6 h-6 text-blue-600" />
-          訂單管理
-        </h2>
-        <p className="text-gray-500 mt-1">查詢、檢視與編輯所有訂房紀錄的狀態、訂金與備註。</p>
-      </div>
+      <PageHeader icon={<ClipboardList className="w-6 h-6 text-green-600" />} title="訂單管理" description="查詢、檢視與編輯所有訂房紀錄的狀態、訂金與備註。" />
 
       <div className="bg-white p-4 rounded-xl shadow-sm border space-y-3">
         <div className="flex flex-wrap gap-3 items-end">
@@ -163,12 +143,8 @@ export default function OrderManagement() {
               {roomTypeOptions.map((r) => (<option key={r} value={r}>{r}</option>))}
             </select>
           </div>
-          <button onClick={() => runQuery(0)} disabled={loading} className="flex items-center gap-1 bg-blue-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50">
-            <Search className="w-4 h-4" /> 查詢
-          </button>
-          <button onClick={clearFilters} className="flex items-center gap-1 px-4 py-2 border rounded-lg text-sm text-gray-600 hover:bg-gray-50">
-            <RotateCcw className="w-4 h-4" /> 清除條件
-          </button>
+          <Button onClick={() => runQuery(0)} loading={loading} icon={<Search className="w-4 h-4" />}>查詢</Button>
+          <Button variant="secondary" onClick={clearFilters} icon={<RotateCcw className="w-4 h-4" />}>清除條件</Button>
         </div>
       </div>
 
@@ -192,10 +168,10 @@ export default function OrderManagement() {
               {loading ? (
                 <tr><td colSpan={9} className="py-10 text-center text-gray-400">載入中...</td></tr>
               ) : rows.length === 0 ? (
-                <tr><td colSpan={9} className="py-16 text-center text-gray-400">查無符合條件的訂單</td></tr>
+                <tr><td colSpan={9}><EmptyState icon={<ClipboardList className="w-12 h-12 text-gray-200" />} message="查無符合條件的訂單" /></td></tr>
               ) : (
                 rows.map((row) => (
-                  <tr key={row.id} onClick={() => openDetail(row)} className="hover:bg-blue-50 transition-colors cursor-pointer">
+                  <tr key={row.id} onClick={() => openDetail(row)} className="hover:bg-green-50 transition-colors cursor-pointer">
                     <td className="py-3 px-4 font-mono text-xs text-gray-500">{row.order_number || '-'}</td>
                     <td className="py-3 px-4 font-medium text-gray-800">{row.name || row.nickname || '未取得'}</td>
                     <td className="py-3 px-4 whitespace-nowrap">{row.checkin_date ? String(row.checkin_date).replace(/-/g, '/') : '-'}</td>
@@ -204,9 +180,7 @@ export default function OrderManagement() {
                     <td className="py-3 px-4">{row.room_type_label || (row.whole_house ? '包棟' : '-')}</td>
                     <td className="py-3 px-4 whitespace-nowrap">{row.total_amount != null ? `NT$ ${Number(row.total_amount).toLocaleString()}` : '-'}</td>
                     <td className="py-3 px-4 whitespace-nowrap">{balanceDue(row) != null ? `NT$ ${Number(balanceDue(row)).toLocaleString()}` : '-'}</td>
-                    <td className="py-3 px-4">
-                      <span className={`px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap ${statusBadgeClass(row.status)}`}>{statusLabel(row.status)}</span>
-                    </td>
+                    <td className="py-3 px-4"><StatusBadge status={row.status} /></td>
                   </tr>
                 ))
               )}
@@ -220,51 +194,49 @@ export default function OrderManagement() {
         </div>
       </div>
 
-      {selected && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
-            <div className="flex justify-between items-center p-6 border-b">
-              <h3 className="text-lg font-bold text-gray-800">訂單詳情 {selected.order_number ? `（${selected.order_number}）` : ''}</h3>
-              <button onClick={closeDetail} className="p-1 text-gray-400 hover:text-gray-600"><X className="w-5 h-5" /></button>
+      <Modal
+        open={!!selected}
+        title={`訂單詳情 ${selected?.order_number ? `（${selected.order_number}）` : ''}`}
+        onClose={closeDetail}
+        maxWidth="max-w-lg"
+        footer={
+          <>
+            <Button variant="secondary" onClick={closeDetail}>取消</Button>
+            <Button onClick={saveDetail} loading={saving} icon={<Save className="w-4 h-4" />}>{saving ? '儲存中...' : '儲存變更'}</Button>
+          </>
+        }
+      >
+        {selected && (
+          <>
+            <div className="grid grid-cols-2 gap-3 text-sm text-gray-600">
+              <div><span className="text-gray-400">客戶姓名／暱稱：</span>{selected.name || selected.nickname || '未取得'}</div>
+              <div><span className="text-gray-400">電話：</span>{selected.phone || '-'}</div>
+              <div><span className="text-gray-400">入住日期：</span>{selected.checkin_date ? String(selected.checkin_date).replace(/-/g, '/') : '-'}</div>
+              <div><span className="text-gray-400">退房日期：</span>{selected.checkout_date ? String(selected.checkout_date).replace(/-/g, '/') : '-'}</div>
+              <div><span className="text-gray-400">人數：</span>{selected.headcount ?? '-'}</div>
+              <div><span className="text-gray-400">房型：</span>{selected.room_type_label || (selected.whole_house ? '包棟' : '-')}</div>
+              <div><span className="text-gray-400">總報價：</span>{selected.total_amount != null ? `NT$ ${Number(selected.total_amount).toLocaleString()}` : '-'}</div>
+              <div><span className="text-gray-400">尾款：</span>{balanceDue(selected) != null ? `NT$ ${Number(balanceDue(selected)).toLocaleString()}` : '-'}</div>
+              <div className="col-span-2 font-mono text-xs text-gray-400 break-all">LINE ID：{selected.line_user_id}</div>
             </div>
-            <div className="p-6 space-y-4 text-sm">
-              <div className="grid grid-cols-2 gap-3 text-gray-600">
-                <div><span className="text-gray-400">客戶姓名／暱稱：</span>{selected.name || selected.nickname || '未取得'}</div>
-                <div><span className="text-gray-400">電話：</span>{selected.phone || '-'}</div>
-                <div><span className="text-gray-400">入住日期：</span>{selected.checkin_date ? String(selected.checkin_date).replace(/-/g, '/') : '-'}</div>
-                <div><span className="text-gray-400">退房日期：</span>{selected.checkout_date ? String(selected.checkout_date).replace(/-/g, '/') : '-'}</div>
-                <div><span className="text-gray-400">人數：</span>{selected.headcount ?? '-'}</div>
-                <div><span className="text-gray-400">房型：</span>{selected.room_type_label || (selected.whole_house ? '包棟' : '-')}</div>
-                <div><span className="text-gray-400">總報價：</span>{selected.total_amount != null ? `NT$ ${Number(selected.total_amount).toLocaleString()}` : '-'}</div>
-                <div><span className="text-gray-400">尾款：</span>{balanceDue(selected) != null ? `NT$ ${Number(balanceDue(selected)).toLocaleString()}` : '-'}</div>
-                <div className="col-span-2 font-mono text-xs text-gray-400 break-all">LINE ID：{selected.line_user_id}</div>
-              </div>
 
-              <div>
-                <label className="block text-xs text-gray-500 mb-1">訂單狀態</label>
-                <select value={editStatus} onChange={(e) => setEditStatus(e.target.value)} className="w-full px-3 py-2 border rounded-lg bg-white">
-                  {EDITABLE_STATUS_OPTIONS.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
-                </select>
-              </div>
-              <div>
-                <label className="block text-xs text-gray-500 mb-1">訂金</label>
-                <input type="number" value={editDeposit} onChange={(e) => setEditDeposit(e.target.value)} className="w-full px-3 py-2 border rounded-lg" placeholder="尚未填寫" />
-              </div>
-              <div>
-                <label className="block text-xs text-gray-500 mb-1">備註</label>
-                <textarea value={editNotes} onChange={(e) => setEditNotes(e.target.value)} rows={4} className="w-full px-3 py-2 border rounded-lg" placeholder="內部備註，客戶不會看到" />
-              </div>
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">訂單狀態</label>
+              <select value={editStatus} onChange={(e) => setEditStatus(e.target.value)} className="w-full px-3 py-2 border rounded-lg bg-white">
+                {EDITABLE_STATUS_OPTIONS.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
+              </select>
             </div>
-            <div className="flex justify-end gap-2 p-6 border-t">
-              <button onClick={closeDetail} className="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg">取消</button>
-              <button onClick={saveDetail} disabled={saving} className="flex items-center gap-1 px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50">
-                <Save className="w-4 h-4" />
-                {saving ? '儲存中...' : '儲存變更'}
-              </button>
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">訂金</label>
+              <input type="number" value={editDeposit} onChange={(e) => setEditDeposit(e.target.value)} className="w-full px-3 py-2 border rounded-lg" placeholder="尚未填寫" />
             </div>
-          </div>
-        </div>
-      )}
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">備註</label>
+              <textarea value={editNotes} onChange={(e) => setEditNotes(e.target.value)} rows={4} className="w-full px-3 py-2 border rounded-lg" placeholder="內部備註，客戶不會看到" />
+            </div>
+          </>
+        )}
+      </Modal>
     </div>
   );
 }

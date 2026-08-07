@@ -153,6 +153,7 @@ async function listOrders(settings: any, filters: OrderFilters): Promise<{ heade
       入住人數: b.headcount != null ? String(b.headcount) : '',
       房型: b.room_type_label || (b.whole_house ? '包棟' : ''),
       訂單狀態: bookingStatusLabel(b.status),
+      狀態代碼: b.status,
       總報價: b.total_amount != null ? String(b.total_amount) : '',
       訂金: b.deposit != null ? String(b.deposit) : '',
       尾款: balanceDue != null ? String(balanceDue) : '',

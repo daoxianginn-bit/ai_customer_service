@@ -1,7 +1,8 @@
 import { useState, useEffect, useMemo } from 'react';
 import { supabase } from '../lib/supabase';
-import { Search, Send, Plus, Trash2, Pencil, X, Gauge, RotateCcw, Save, Eye, Eraser, User } from 'lucide-react';
+import { Search, Send, Plus, Trash2, Pencil, Gauge, RotateCcw, Save, Eye, Eraser, User } from 'lucide-react';
 import MessageTemplateEditor from '../components/MessageTemplateEditor';
+import { PageHeader, Button, Modal, ConfirmDialog, StatusBadge } from '../components/ui';
 
 interface Template {
   id: string;
@@ -57,7 +58,6 @@ export default function CustomMessageSending() {
   const [roomTypeOptions, setRoomTypeOptions] = useState<string[]>([]);
 
   const [querying, setQuerying] = useState(false);
-  const [headers, setHeaders] = useState<string[]>([]);
   const [rows, setRows] = useState<Record<string, string>[]>([]);
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   const [page, setPage] = useState(0);
@@ -67,6 +67,7 @@ export default function CustomMessageSending() {
   const [showTemplateModal, setShowTemplateModal] = useState(false);
   const [editingTemplate, setEditingTemplate] = useState<{ id?: string; title: string; body: string } | null>(null);
   const [savingTemplate, setSavingTemplate] = useState(false);
+  const [deleteTemplateTarget, setDeleteTemplateTarget] = useState<Template | null>(null);
 
   const [showConfirm, setShowConfirm] = useState(false);
   const [sending, setSending] = useState(false);
@@ -113,7 +114,6 @@ export default function CustomMessageSending() {
         status: overrideStatus !== undefined ? overrideStatus : status,
         roomType,
       });
-      setHeaders(result.headers || []);
       setRows(result.rows || []);
     } catch (e: any) {
       alert(`查詢失敗：${e.message}`);
@@ -206,13 +206,14 @@ export default function CustomMessageSending() {
     }
   };
 
-  const deleteTemplate = async (id: string) => {
-    if (!confirm('確定要刪除這個範本嗎？')) return;
-    await supabase.from('custom_message_templates').delete().eq('id', id);
-    if (selectedTemplateId === id) {
+  const confirmDeleteTemplate = async () => {
+    if (!deleteTemplateTarget) return;
+    await supabase.from('custom_message_templates').delete().eq('id', deleteTemplateTarget.id);
+    if (selectedTemplateId === deleteTemplateTarget.id) {
       setSelectedTemplateId('');
       setDraftBody('');
     }
+    setDeleteTemplateTarget(null);
     await fetchTemplates();
   };
 
@@ -269,28 +270,26 @@ export default function CustomMessageSending() {
 
   return (
     <div className="space-y-6">
-      <div className="bg-white p-6 rounded-xl shadow-sm border flex flex-wrap justify-between items-start gap-4">
-        <div>
-          <h2 className="text-2xl font-bold text-gray-800 flex items-center gap-2">
-            <Send className="w-6 h-6 text-blue-600" />
-            客製訊息發送
-          </h2>
-          <p className="text-gray-500 mt-1">查詢客戶名單、套用訊息範本、帶入報價欄位並批次發送 LINE 訊息。</p>
-        </div>
-        <div className="flex items-center gap-2 bg-gray-50 border rounded-lg px-4 py-2 text-sm text-gray-700">
-          <Gauge className="w-4 h-4 text-gray-400" />
-          {quota == null ? (
-            <span className="text-gray-400">額度查詢中...</span>
-          ) : quota.limit == null ? (
-            <span>本月已用 {quota.used.toLocaleString()} 則（無上限方案）</span>
-          ) : (
-            <span>
-              本月剩餘 <strong className={quota.remaining !== null && quota.remaining < 50 ? 'text-red-600' : 'text-gray-800'}>{quota.remaining?.toLocaleString()}</strong>
-              {' '}/ {quota.limit.toLocaleString()} 則
-            </span>
-          )}
-        </div>
-      </div>
+      <PageHeader
+        icon={<Send className="w-6 h-6 text-green-600" />}
+        title="客製訊息發送"
+        description="查詢客戶名單、套用訊息範本、帶入報價欄位並批次發送 LINE 訊息。"
+        action={
+          <div className="flex items-center gap-2 bg-gray-50 border rounded-lg px-4 py-2 text-sm text-gray-700">
+            <Gauge className="w-4 h-4 text-gray-400" />
+            {quota == null ? (
+              <span className="text-gray-400">額度查詢中...</span>
+            ) : quota.limit == null ? (
+              <span>本月已用 {quota.used.toLocaleString()} 則（無上限方案）</span>
+            ) : (
+              <span>
+                本月剩餘 <strong className={quota.remaining !== null && quota.remaining < 50 ? 'text-red-600' : 'text-gray-800'}>{quota.remaining?.toLocaleString()}</strong>
+                {' '}/ {quota.limit.toLocaleString()} 則
+              </span>
+            )}
+          </div>
+        }
+      />
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
         {/* 第一欄：查詢客戶名單 */}
@@ -334,13 +333,10 @@ export default function CustomMessageSending() {
                 </div>
               </div>
               <div className="flex gap-2">
-                <button onClick={() => runQuery()} disabled={querying} className="flex-1 flex items-center justify-center gap-1 bg-blue-600 text-white px-3 py-2 rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50">
-                  <Search className="w-4 h-4" />
+                <Button onClick={() => runQuery()} loading={querying} icon={<Search className="w-4 h-4" />} className="flex-1">
                   {querying ? '查詢中...' : '查詢'}
-                </button>
-                <button onClick={clearFilters} className="flex items-center justify-center gap-1 px-3 py-2 border rounded-lg text-sm text-gray-600 hover:bg-gray-50">
-                  <RotateCcw className="w-4 h-4" /> 清除條件
-                </button>
+                </Button>
+                <Button variant="secondary" onClick={clearFilters} icon={<RotateCcw className="w-4 h-4" />}>清除條件</Button>
               </div>
               <div className="flex flex-wrap gap-2 pt-1">
                 <span className="text-xs text-gray-400 self-center">快速篩選：</span>
@@ -348,7 +344,7 @@ export default function CustomMessageSending() {
                   <button
                     key={c.value}
                     onClick={() => toggleQuickFilter(c.value)}
-                    className={`px-3 py-1 text-xs rounded-full border transition-colors ${status === c.value ? 'bg-blue-600 text-white border-blue-600' : 'bg-gray-50 text-gray-600 border-gray-200 hover:bg-gray-100'}`}
+                    className={`px-3 py-1 text-xs rounded-full border transition-colors ${status === c.value ? 'bg-green-600 text-white border-green-600' : 'bg-gray-50 text-gray-600 border-gray-200 hover:bg-gray-100'}`}
                   >
                     {c.label}
                   </button>
@@ -375,7 +371,7 @@ export default function CustomMessageSending() {
                   {pagedRows.map((r, i) => {
                     const key = rowKey(r, page * PAGE_SIZE + i);
                     return (
-                      <tr key={key} className={selectedKeys.has(key) ? 'bg-blue-50' : ''}>
+                      <tr key={key} className={selectedKeys.has(key) ? 'bg-green-50' : ''}>
                         <td className="py-2 px-3">
                           <input type="checkbox" checked={selectedKeys.has(key)} onChange={() => toggleSelected(key)} />
                         </td>
@@ -384,7 +380,7 @@ export default function CustomMessageSending() {
                         <td className="py-2 px-3">{r['入住人數']}</td>
                         <td className="py-2 px-3">{r['房型']}</td>
                         <td className="py-2 px-3">
-                          <span className="px-2 py-0.5 rounded-full text-xs bg-gray-100 text-gray-600 whitespace-nowrap">{r['訂單狀態']}</span>
+                          {r['狀態代碼'] ? <StatusBadge status={r['狀態代碼']} /> : <span className="text-gray-400">-</span>}
                         </td>
                         <td className="py-2 px-3 whitespace-nowrap">{r['總報價'] ? `NT$ ${Number(r['總報價']).toLocaleString()}` : ''}</td>
                       </tr>
@@ -426,7 +422,7 @@ export default function CustomMessageSending() {
               {selectedTemplate && (
                 <>
                   <button onClick={() => openEditTemplate(selectedTemplate)} className="p-2 border rounded-lg hover:bg-gray-50" title="編輯範本"><Pencil className="w-4 h-4 text-gray-500" /></button>
-                  <button onClick={() => deleteTemplate(selectedTemplate.id)} className="p-2 border rounded-lg hover:bg-red-50" title="刪除範本"><Trash2 className="w-4 h-4 text-red-500" /></button>
+                  <button onClick={() => setDeleteTemplateTarget(selectedTemplate)} className="p-2 border rounded-lg hover:bg-red-50" title="刪除範本"><Trash2 className="w-4 h-4 text-red-500" /></button>
                 </>
               )}
             </div>
@@ -471,7 +467,7 @@ export default function CustomMessageSending() {
                 <User className="w-4 h-4 text-gray-500" />
               </div>
               <div className="flex-1 min-w-0">
-                <div className="bg-blue-50 rounded-2xl rounded-tl-sm px-3 py-2 text-xs text-gray-800 whitespace-pre-wrap break-words">
+                <div className="bg-green-50 rounded-2xl rounded-tl-sm px-3 py-2 text-xs text-gray-800 whitespace-pre-wrap break-words">
                   {previewMessage || '（訊息內容預覽）'}
                 </div>
                 <p className="text-[10px] text-gray-400 mt-1">{new Date().toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' })}</p>
@@ -481,12 +477,7 @@ export default function CustomMessageSending() {
             <p className="text-xs text-gray-500 pt-2 border-t">
               已勾選 <strong className={selectedRows.length > MAX_BATCH_SEND ? 'text-red-600' : ''}>{selectedRows.length}</strong> 位（單次上限 {MAX_BATCH_SEND} 位）
             </p>
-            <button
-              onClick={handleSendClick}
-              className="w-full flex items-center justify-center gap-1 bg-orange-600 text-white px-5 py-2.5 rounded-lg text-sm hover:bg-orange-700"
-            >
-              <Send className="w-4 h-4" /> 發送給已勾選顧客
-            </button>
+            <Button onClick={handleSendClick} icon={<Send className="w-4 h-4" />} fullWidth>發送給已勾選顧客</Button>
 
             {sendResult && (
               <div className="text-xs bg-gray-50 border rounded-lg p-3">
@@ -498,86 +489,75 @@ export default function CustomMessageSending() {
       </div>
 
       {/* 新增/編輯範本 Modal */}
-      {showTemplateModal && editingTemplate && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
-            <div className="flex justify-between items-center p-6 border-b">
-              <h3 className="text-lg font-bold text-gray-800">{editingTemplate.id ? '編輯範本' : '新增範本'}</h3>
-              <button onClick={() => setShowTemplateModal(false)} className="p-1 text-gray-400 hover:text-gray-600">
-                <X className="w-5 h-5" />
-              </button>
+      <Modal
+        open={showTemplateModal && !!editingTemplate}
+        title={editingTemplate?.id ? '編輯範本' : '新增範本'}
+        onClose={() => setShowTemplateModal(false)}
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setShowTemplateModal(false)}>取消</Button>
+            <Button onClick={saveTemplate} loading={savingTemplate}>{savingTemplate ? '儲存中...' : '確認'}</Button>
+          </>
+        }
+      >
+        {editingTemplate && (
+          <>
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">範本標題</label>
+              <input
+                value={editingTemplate.title}
+                onChange={(e) => setEditingTemplate({ ...editingTemplate, title: e.target.value })}
+                className="w-full px-3 py-2 border rounded-lg"
+                placeholder="例如：包棟報價通知"
+              />
             </div>
-            <div className="p-6 space-y-4">
-              <div>
-                <label className="block text-xs text-gray-500 mb-1">範本標題</label>
-                <input
-                  value={editingTemplate.title}
-                  onChange={(e) => setEditingTemplate({ ...editingTemplate, title: e.target.value })}
-                  className="w-full px-3 py-2 border rounded-lg"
-                  placeholder="例如：包棟報價通知"
-                />
-              </div>
-              <div>
-                <label className="block text-xs text-gray-500 mb-1">訊息內容</label>
-                <MessageTemplateEditor
-                  value={editingTemplate.body}
-                  onChange={(v) => setEditingTemplate({ ...editingTemplate, body: v })}
-                  placeholders={QUICK_INSERT_FIELDS}
-                  rows={10}
-                />
-              </div>
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">訊息內容</label>
+              <MessageTemplateEditor
+                value={editingTemplate.body}
+                onChange={(v) => setEditingTemplate({ ...editingTemplate, body: v })}
+                placeholders={QUICK_INSERT_FIELDS}
+                rows={10}
+              />
             </div>
-            <div className="flex justify-end gap-2 p-6 border-t">
-              <button onClick={() => setShowTemplateModal(false)} className="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg">
-                取消
-              </button>
-              <button
-                onClick={saveTemplate}
-                disabled={savingTemplate}
-                className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
-              >
-                {savingTemplate ? '儲存中...' : '確認'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+          </>
+        )}
+      </Modal>
+
+      <ConfirmDialog
+        open={!!deleteTemplateTarget}
+        title="刪除範本"
+        message={`確定要刪除「${deleteTemplateTarget?.title}」這個範本嗎？`}
+        confirmLabel="刪除"
+        danger
+        onConfirm={confirmDeleteTemplate}
+        onCancel={() => setDeleteTemplateTarget(null)}
+      />
 
       {/* 發送確認 Modal */}
-      {showConfirm && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
-            <div className="p-6 border-b">
-              <h3 className="text-lg font-bold text-gray-800">確認發送訊息</h3>
+      <ConfirmDialog
+        open={showConfirm}
+        title="確認發送訊息"
+        confirmLabel={sending ? '發送中...' : '確認發送'}
+        loading={sending}
+        onConfirm={confirmSend}
+        onCancel={() => setShowConfirm(false)}
+        message={
+          <div className="space-y-3">
+            <p>即將發送給 <strong>{selectedRows.length}</strong> 位顧客，訊息內容會依各顧客的報價資訊自動帶入。是否確認發送？</p>
+            <div className="space-y-1.5">
+              <p>✅ 已套用範本：{selectedTemplate?.title || '（自訂內容）'}</p>
+              <p>✅ 發送對象：{selectedRows.length} 位顧客</p>
+              <p>✅ 發送方式：LINE 訊息</p>
             </div>
-            <div className="p-6 space-y-3">
-              <p className="text-sm text-gray-700">即將發送給 <strong>{selectedRows.length}</strong> 位顧客，訊息內容會依各顧客的報價資訊自動帶入。是否確認發送？</p>
-              <div className="space-y-1.5 text-sm text-gray-600">
-                <p>✅ 已套用範本：{selectedTemplate?.title || '（自訂內容）'}</p>
-                <p>✅ 發送對象：{selectedRows.length} 位顧客</p>
-                <p>✅ 發送方式：LINE 訊息</p>
-              </div>
-              <div className="max-h-40 overflow-y-auto border rounded-lg p-3 text-sm text-gray-600 space-y-1">
-                {selectedRows.map((r, i) => (
-                  <div key={i}>・{displayName(r)}{r['入住日期'] ? `（入住 ${r['入住日期']}）` : ''}</div>
-                ))}
-              </div>
-            </div>
-            <div className="flex justify-end gap-2 p-6 border-t">
-              <button onClick={() => setShowConfirm(false)} className="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg">
-                取消
-              </button>
-              <button
-                onClick={confirmSend}
-                disabled={sending}
-                className="px-4 py-2 text-sm bg-orange-600 text-white rounded-lg hover:bg-orange-700 disabled:opacity-50"
-              >
-                {sending ? '發送中...' : '確認發送'}
-              </button>
+            <div className="max-h-40 overflow-y-auto border rounded-lg p-3 space-y-1">
+              {selectedRows.map((r, i) => (
+                <div key={i}>・{displayName(r)}{r['入住日期'] ? `（入住 ${r['入住日期']}）` : ''}</div>
+              ))}
             </div>
           </div>
-        </div>
-      )}
+        }
+      />
     </div>
   );
 }

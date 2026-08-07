@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import { Plus, Trash2, Pencil, FileText, File as FileIcon, X, ClipboardList } from 'lucide-react';
+import { PageHeader, Button, EmptyState, Switch, ConfirmDialog } from '../components/ui';
 
 type KbItem = {
   id: string;
@@ -21,6 +22,8 @@ export default function KnowledgeBase() {
   const [saving, setSaving] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState(emptyForm);
+  const [deleteTarget, setDeleteTarget] = useState<KbItem | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     fetchItems();
@@ -111,14 +114,19 @@ export default function KnowledgeBase() {
     }
   };
 
-  const handleDelete = async (id: string) => {
-    if (!confirm('確定要刪除這筆知識庫資料嗎？')) return;
-    const { error } = await supabase.from('knowledge_base_items').delete().eq('id', id);
-    if (error) {
-      alert(`刪除失敗：${error.message}`);
-      return;
+  const confirmDelete = async () => {
+    if (!deleteTarget) return;
+    setDeleting(true);
+    try {
+      const { error } = await supabase.from('knowledge_base_items').delete().eq('id', deleteTarget.id);
+      if (error) throw error;
+      setDeleteTarget(null);
+      fetchItems();
+    } catch (err: any) {
+      alert(`刪除失敗：${err.message}`);
+    } finally {
+      setDeleting(false);
     }
-    fetchItems();
   };
 
   const toggleActive = async (item: KbItem) => {
@@ -132,19 +140,12 @@ export default function KnowledgeBase() {
 
   return (
     <div className="max-w-5xl mx-auto space-y-6 pb-20">
-      <div className="flex justify-between items-center bg-white p-6 rounded-xl shadow-sm border">
-        <div>
-          <h2 className="text-2xl font-bold text-gray-800 flex items-center gap-2">
-            <ClipboardList className="w-6 h-6 text-blue-600" />
-            AI知識庫
-          </h2>
-          <p className="text-gray-500">可新增多筆文字或檔案資料，AI 回覆時會參考已啟用的項目</p>
-        </div>
-        <button onClick={openNewForm} className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700">
-          <Plus className="w-4 h-4" />
-          新增資料
-        </button>
-      </div>
+      <PageHeader
+        icon={<ClipboardList className="w-6 h-6 text-green-600" />}
+        title="AI知識庫"
+        description="可新增多筆文字或檔案資料，AI 回覆時會參考已啟用的項目"
+        action={<Button onClick={openNewForm} icon={<Plus className="w-4 h-4" />}>新增資料</Button>}
+      />
 
       {showForm && (
         <div className="bg-white p-6 rounded-xl shadow-sm border space-y-4">
@@ -154,10 +155,10 @@ export default function KnowledgeBase() {
           </div>
 
           <div className="flex gap-3">
-            <button onClick={() => setForm({ ...form, type: 'text' })} disabled={!!form.id} className={`flex-1 p-3 rounded-lg border-2 flex items-center justify-center gap-2 disabled:opacity-50 ${form.type === 'text' ? 'border-blue-500 bg-blue-50' : 'border-gray-200'}`}>
+            <button onClick={() => setForm({ ...form, type: 'text' })} disabled={!!form.id} className={`flex-1 p-3 rounded-lg border-2 flex items-center justify-center gap-2 disabled:opacity-50 ${form.type === 'text' ? 'border-green-500 bg-green-50' : 'border-gray-200'}`}>
               <FileText className="w-4 h-4" /> 文字內容
             </button>
-            <button onClick={() => setForm({ ...form, type: 'file' })} disabled={!!form.id} className={`flex-1 p-3 rounded-lg border-2 flex items-center justify-center gap-2 disabled:opacity-50 ${form.type === 'file' ? 'border-blue-500 bg-blue-50' : 'border-gray-200'}`}>
+            <button onClick={() => setForm({ ...form, type: 'file' })} disabled={!!form.id} className={`flex-1 p-3 rounded-lg border-2 flex items-center justify-center gap-2 disabled:opacity-50 ${form.type === 'file' ? 'border-green-500 bg-green-50' : 'border-gray-200'}`}>
               <FileIcon className="w-4 h-4" /> 檔案 (PDF/TXT)
             </button>
           </div>
@@ -175,7 +176,7 @@ export default function KnowledgeBase() {
           ) : (
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">上傳檔案</label>
-              <div className="relative border-2 border-dashed border-gray-300 rounded-lg p-6 flex flex-col items-center justify-center text-gray-500 hover:border-blue-400 hover:bg-blue-50">
+              <div className="relative border-2 border-dashed border-gray-300 rounded-lg p-6 flex flex-col items-center justify-center text-gray-500 hover:border-green-400 hover:bg-green-50">
                 <input type="file" accept=".pdf,.txt" onChange={handleFileUpload} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
                 <FileIcon className="w-8 h-8 mb-2" />
                 <p>{form.file_name ? `已選擇：${form.file_name}` : '點擊或拖曳上傳'}</p>
@@ -184,10 +185,8 @@ export default function KnowledgeBase() {
           )}
 
           <div className="flex justify-end gap-2 pt-2">
-            <button onClick={() => setShowForm(false)} className="px-4 py-2 rounded-lg border text-gray-600 hover:bg-gray-50">取消</button>
-            <button onClick={handleSubmit} disabled={saving} className="px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50">
-              {saving ? '儲存中...' : '儲存'}
-            </button>
+            <Button variant="secondary" onClick={() => setShowForm(false)}>取消</Button>
+            <Button onClick={handleSubmit} loading={saving}>{saving ? '儲存中...' : '儲存'}</Button>
           </div>
         </div>
       )}
@@ -208,32 +207,20 @@ export default function KnowledgeBase() {
               {loading ? (
                 <tr><td colSpan={5} className="py-10 text-center text-gray-400">載入中...</td></tr>
               ) : items.length === 0 ? (
-                <tr>
-                  <td colSpan={5} className="py-20 text-center text-gray-400">
-                    <div className="flex flex-col items-center gap-2">
-                      <ClipboardList className="w-12 h-12 text-gray-200" />
-                      <p>尚未新增任何知識庫資料</p>
-                    </div>
-                  </td>
-                </tr>
+                <tr><td colSpan={5}><EmptyState icon={<ClipboardList className="w-12 h-12 text-gray-200" />} message="尚未新增任何知識庫資料" /></td></tr>
               ) : (
                 items.map((item) => (
-                  <tr key={item.id} className="hover:bg-blue-50 transition-colors">
+                  <tr key={item.id} className="hover:bg-green-50 transition-colors">
                     <td className="py-4 px-6 font-medium text-gray-800">{item.title}</td>
                     <td className="py-4 px-6 text-sm text-gray-500">{item.type === 'text' ? '文字' : `檔案 (${item.file_name})`}</td>
                     <td className="py-4 px-6">
-                      <button
-                        onClick={() => toggleActive(item)}
-                        className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${item.is_active ? 'bg-green-500' : 'bg-gray-300'}`}
-                      >
-                        <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${item.is_active ? 'translate-x-6' : 'translate-x-1'}`} />
-                      </button>
+                      <Switch checked={item.is_active} onChange={() => toggleActive(item)} />
                     </td>
                     <td className="py-4 px-6 text-sm text-gray-500">{new Date(item.created_at).toLocaleString('zh-TW')}</td>
                     <td className="py-4 px-6">
                       <div className="flex gap-2">
                         <button onClick={() => openEditForm(item)} className="p-2 hover:bg-gray-100 rounded-lg" title="編輯"><Pencil className="w-4 h-4 text-gray-500" /></button>
-                        <button onClick={() => handleDelete(item.id)} className="p-2 hover:bg-red-50 rounded-lg" title="刪除"><Trash2 className="w-4 h-4 text-red-500" /></button>
+                        <button onClick={() => setDeleteTarget(item)} className="p-2 hover:bg-red-50 rounded-lg" title="刪除"><Trash2 className="w-4 h-4 text-red-500" /></button>
                       </div>
                     </td>
                   </tr>
@@ -243,6 +230,17 @@ export default function KnowledgeBase() {
           </table>
         </div>
       </div>
+
+      <ConfirmDialog
+        open={!!deleteTarget}
+        title="刪除知識庫資料"
+        message={`確定要刪除「${deleteTarget?.title}」嗎？`}
+        confirmLabel="刪除"
+        danger
+        loading={deleting}
+        onConfirm={confirmDelete}
+        onCancel={() => setDeleteTarget(null)}
+      />
     </div>
   );
 }

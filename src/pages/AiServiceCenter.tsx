@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase';
-import { Bot, UserCheck, RefreshCcw, History, ListChecks, MessageSquare, Search, Headphones } from 'lucide-react';
+import { Bot, RefreshCcw, History, ListChecks, MessageSquare, Search, Headphones } from 'lucide-react';
+import { PageHeader, Button, EmptyState, StatusBadge } from '../components/ui';
 
 type Tab = 'active' | 'history' | 'conversations';
 
@@ -123,21 +124,19 @@ export default function AiServiceCenter() {
 
   return (
     <div className="max-w-5xl mx-auto space-y-6">
-      <div className="flex justify-between items-center bg-white p-6 rounded-xl shadow-sm border">
-        <div>
-          <h2 className="text-2xl font-bold text-gray-800 flex items-center gap-2">
-            <Headphones className="w-6 h-6 text-red-600" />
-            AI客服中心
-          </h2>
-          <p className="text-gray-500">處理進行中的真人對話請求、查詢轉接歷史與完整對話紀錄</p>
-        </div>
-        <button
-          onClick={tab === 'active' ? fetchHandoverUsers : tab === 'history' ? fetchHistory : () => fetchConversations(page, userFilter)}
-          className="p-2 hover:bg-gray-100 rounded-lg"
-        >
-          <RefreshCcw className="w-5 h-5 text-gray-400" />
-        </button>
-      </div>
+      <PageHeader
+        icon={<Headphones className="w-6 h-6 text-green-600" />}
+        title="AI客服中心"
+        description="處理進行中的真人對話請求、查詢轉接歷史與完整對話紀錄"
+        action={
+          <button
+            onClick={tab === 'active' ? fetchHandoverUsers : tab === 'history' ? fetchHistory : () => fetchConversations(page, userFilter)}
+            className="p-2 hover:bg-gray-100 rounded-lg"
+          >
+            <RefreshCcw className="w-5 h-5 text-gray-400" />
+          </button>
+        }
+      />
 
       <div className="flex gap-2 bg-white p-1.5 rounded-xl shadow-sm border w-fit">
         <button
@@ -176,14 +175,7 @@ export default function AiServiceCenter() {
                 {loading ? (
                   <tr><td colSpan={4} className="py-10 text-center text-gray-400">載入中...</td></tr>
                 ) : users.length === 0 ? (
-                  <tr>
-                    <td colSpan={4} className="py-20 text-center text-gray-400">
-                      <div className="flex flex-col items-center gap-2">
-                        <Bot className="w-12 h-12 text-gray-200" />
-                        <p>目前沒有待處理的真人請求</p>
-                      </div>
-                    </td>
-                  </tr>
+                  <tr><td colSpan={4}><EmptyState icon={<Bot className="w-12 h-12 text-gray-200" />} message="目前沒有待處理的真人請求" /></td></tr>
                 ) : (
                   users.map(user => (
                     <tr key={user.line_user_id} className="hover:bg-red-50 transition-colors">
@@ -193,12 +185,7 @@ export default function AiServiceCenter() {
                         {new Date(user.last_human_interaction).toLocaleString('zh-TW')}
                       </td>
                       <td className="py-4 px-6">
-                        <button
-                          onClick={() => switchToAI(user.line_user_id)}
-                          className="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-blue-700 shadow-sm"
-                        >
-                          轉回 AI 接手
-                        </button>
+                        <Button onClick={() => switchToAI(user.line_user_id)}>轉回 AI 接手</Button>
                       </td>
                     </tr>
                   ))
@@ -227,14 +214,7 @@ export default function AiServiceCenter() {
                 {loading ? (
                   <tr><td colSpan={6} className="py-10 text-center text-gray-400">載入中...</td></tr>
                 ) : history.length === 0 ? (
-                  <tr>
-                    <td colSpan={6} className="py-20 text-center text-gray-400">
-                      <div className="flex flex-col items-center gap-2">
-                        <History className="w-12 h-12 text-gray-200" />
-                        <p>尚無歷史紀錄</p>
-                      </div>
-                    </td>
-                  </tr>
+                  <tr><td colSpan={6}><EmptyState icon={<History className="w-12 h-12 text-gray-200" />} message="尚無歷史紀錄" /></td></tr>
                 ) : (
                   history.map((row) => (
                     <tr key={row.id} className="hover:bg-gray-50 transition-colors">
@@ -242,11 +222,7 @@ export default function AiServiceCenter() {
                       <td className="py-4 px-6 text-sm text-gray-600">{row.triggered_keyword || '-'}</td>
                       <td className="py-4 px-6 text-sm text-gray-600">{new Date(row.started_at).toLocaleString('zh-TW')}</td>
                       <td className="py-4 px-6 text-sm text-gray-600">{row.ended_at ? new Date(row.ended_at).toLocaleString('zh-TW') : '-'}</td>
-                      <td className="py-4 px-6">
-                        <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${row.status === 'open' ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-600'}`}>
-                          {row.status === 'open' ? '進行中' : '已結束'}
-                        </span>
-                      </td>
+                      <td className="py-4 px-6"><StatusBadge status={row.status} /></td>
                       <td className="py-4 px-6 text-sm text-gray-600">{row.resolved_by === 'timeout_auto' ? '自動逾時' : (row.resolved_by || '-')}</td>
                     </tr>
                   ))
@@ -268,10 +244,7 @@ export default function AiServiceCenter() {
               placeholder="搜尋暱稱或 LINE User ID"
               className="flex-1 px-4 py-2 border rounded-lg"
             />
-            <button onClick={handleConvSearch} className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700">
-              <Search className="w-4 h-4" />
-              搜尋
-            </button>
+            <Button onClick={handleConvSearch} icon={<Search className="w-4 h-4" />}>搜尋</Button>
           </div>
 
           <div className="bg-white rounded-xl shadow-sm border overflow-hidden">
@@ -290,17 +263,10 @@ export default function AiServiceCenter() {
                   {convLoading ? (
                     <tr><td colSpan={5} className="py-10 text-center text-gray-400">載入中...</td></tr>
                   ) : convRows.length === 0 ? (
-                    <tr>
-                      <td colSpan={5} className="py-20 text-center text-gray-400">
-                        <div className="flex flex-col items-center gap-2">
-                          <MessageSquare className="w-12 h-12 text-gray-200" />
-                          <p>查無對話紀錄</p>
-                        </div>
-                      </td>
-                    </tr>
+                    <tr><td colSpan={5}><EmptyState icon={<MessageSquare className="w-12 h-12 text-gray-200" />} message="查無對話紀錄" /></td></tr>
                   ) : (
                     convRows.map((row) => (
-                      <tr key={row.id} className="hover:bg-blue-50 transition-colors align-top">
+                      <tr key={row.id} className="hover:bg-green-50 transition-colors align-top">
                         <td className="py-4 px-6 text-sm text-gray-500 whitespace-nowrap">{new Date(row.created_at).toLocaleString('zh-TW')}</td>
                         <td className="py-4 px-6 text-sm">
                           <div className="font-medium text-gray-800">{row.nickname || '未取得'}</div>

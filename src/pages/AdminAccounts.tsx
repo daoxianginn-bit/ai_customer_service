@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import { UserPlus, Trash2, Users } from 'lucide-react';
+import { PageHeader, Button, EmptyState, ConfirmDialog } from '../components/ui';
 
 type Admin = {
   id: string;
@@ -32,6 +33,8 @@ export default function AdminAccounts() {
   const [inviting, setInviting] = useState(false);
   const [email, setEmail] = useState('');
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<Admin | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     fetchAdmins();
@@ -68,25 +71,23 @@ export default function AdminAccounts() {
     }
   };
 
-  const handleDelete = async (admin: Admin) => {
-    if (!confirm(`確定要移除 ${admin.email} 的登入權限嗎？`)) return;
+  const confirmDelete = async () => {
+    if (!deleteTarget) return;
+    setDeleting(true);
     try {
-      await callFn('delete-admin', { method: 'POST', body: JSON.stringify({ userId: admin.id }) });
+      await callFn('delete-admin', { method: 'POST', body: JSON.stringify({ userId: deleteTarget.id }) });
+      setDeleteTarget(null);
       fetchAdmins();
     } catch (err: any) {
       alert(`移除失敗：${err.message}`);
+    } finally {
+      setDeleting(false);
     }
   };
 
   return (
     <div className="max-w-4xl mx-auto space-y-6 pb-20">
-      <div className="bg-white p-6 rounded-xl shadow-sm border">
-        <h2 className="text-2xl font-bold text-gray-800 flex items-center gap-2">
-          <Users className="w-6 h-6 text-blue-600" />
-          帳號管理
-        </h2>
-        <p className="text-gray-500">邀請其他管理員登入後台，或移除不再需要的帳號</p>
-      </div>
+      <PageHeader icon={<Users className="w-6 h-6 text-green-600" />} title="帳號管理" description="邀請其他管理員登入後台，或移除不再需要的帳號" />
 
       <div className="bg-white p-6 rounded-xl shadow-sm border space-y-3">
         <h3 className="font-bold text-gray-800">邀請新管理員</h3>
@@ -98,10 +99,9 @@ export default function AdminAccounts() {
             placeholder="colleague@example.com"
             className="flex-1 px-4 py-2 border rounded-lg"
           />
-          <button onClick={handleInvite} disabled={inviting} className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 disabled:opacity-50">
-            <UserPlus className="w-4 h-4" />
+          <Button onClick={handleInvite} loading={inviting} icon={<UserPlus className="w-4 h-4" />}>
             {inviting ? '寄送中...' : '寄送邀請'}
-          </button>
+          </Button>
         </div>
         <p className="text-xs text-gray-400">對方會收到 Supabase 寄出的邀請信，點擊連結設定密碼後即可登入。</p>
       </div>
@@ -121,13 +121,13 @@ export default function AdminAccounts() {
               {loading ? (
                 <tr><td colSpan={4} className="py-10 text-center text-gray-400">載入中...</td></tr>
               ) : admins.length === 0 ? (
-                <tr><td colSpan={4} className="py-10 text-center text-gray-400">尚無管理員帳號</td></tr>
+                <tr><td colSpan={4}><EmptyState icon={<Users className="w-12 h-12 text-gray-200" />} message="尚無管理員帳號" /></td></tr>
               ) : (
                 admins.map((admin) => (
                   <tr key={admin.id} className="hover:bg-gray-50 transition-colors">
                     <td className="py-4 px-6 font-medium text-gray-800">
                       {admin.email}
-                      {admin.id === currentUserId && <span className="ml-2 text-xs text-blue-600">(你)</span>}
+                      {admin.id === currentUserId && <span className="ml-2 text-xs text-green-600">(你)</span>}
                     </td>
                     <td className="py-4 px-6">
                       <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${admin.invited ? 'bg-yellow-100 text-yellow-700' : 'bg-green-100 text-green-700'}`}>
@@ -137,7 +137,7 @@ export default function AdminAccounts() {
                     <td className="py-4 px-6 text-sm text-gray-500">{admin.last_sign_in_at ? new Date(admin.last_sign_in_at).toLocaleString('zh-TW') : '尚未登入'}</td>
                     <td className="py-4 px-6">
                       <button
-                        onClick={() => handleDelete(admin)}
+                        onClick={() => setDeleteTarget(admin)}
                         disabled={admin.id === currentUserId}
                         className="p-2 hover:bg-red-50 rounded-lg disabled:opacity-30 disabled:cursor-not-allowed"
                         title="移除"
@@ -152,6 +152,17 @@ export default function AdminAccounts() {
           </table>
         </div>
       </div>
+
+      <ConfirmDialog
+        open={!!deleteTarget}
+        title="移除管理員"
+        message={`確定要移除 ${deleteTarget?.email} 的登入權限嗎？`}
+        confirmLabel="移除"
+        danger
+        loading={deleting}
+        onConfirm={confirmDelete}
+        onCancel={() => setDeleteTarget(null)}
+      />
     </div>
   );
 }

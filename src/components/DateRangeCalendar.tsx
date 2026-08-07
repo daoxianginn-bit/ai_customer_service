@@ -98,7 +98,7 @@ export default function DateRangeCalendar({ startDate, endDate, onChange, onRang
           const inRange = !!(startDate && endDate && dateStr > startDate && dateStr < endDate);
           const isToday = dateStr === todayStr;
           const dayNum = Number(dateStr.slice(-2));
-          const bandClass = isStart || isEnd || inRange ? 'bg-blue-50' : '';
+          const bandClass = isStart || isEnd || inRange ? 'bg-green-50' : '';
           const roundClass = isStart && !endDate ? 'rounded-full' : isStart ? 'rounded-l-full' : isEnd ? 'rounded-r-full' : '';
           return (
             <div key={idx} className={`w-9 h-9 flex items-center justify-center ${bandClass} ${roundClass}`}>
@@ -107,9 +107,9 @@ export default function DateRangeCalendar({ startDate, endDate, onChange, onRang
                 onClick={() => handleClick(dateStr)}
                 className={`w-8 h-8 rounded-full flex items-center justify-center text-sm transition-colors ${
                   isStart || isEnd
-                    ? 'bg-blue-600 text-white font-semibold'
+                    ? 'bg-green-600 text-white font-semibold'
                     : isToday
-                    ? 'border border-blue-400 text-blue-600'
+                    ? 'border border-green-400 text-green-600'
                     : 'text-gray-700 hover:bg-gray-200'
                 }`}
               >

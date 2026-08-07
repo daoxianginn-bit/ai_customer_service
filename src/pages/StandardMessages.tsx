@@ -1,8 +1,9 @@
 import { useState, useEffect } from 'react';
 import { supabase } from '../lib/supabase';
-import { Save, MessageSquareText, Plus, Trash2, Pencil, X, GripVertical } from 'lucide-react';
+import { Save, MessageSquareText, Plus, Trash2, Pencil, GripVertical } from 'lucide-react';
 import CollapsibleSection from '../components/CollapsibleSection';
 import MessageTemplateEditor from '../components/MessageTemplateEditor';
+import { PageHeader, Button, Modal, ConfirmDialog, Switch } from '../components/ui';
 
 const QUOTE_MESSAGE_PLACEHOLDERS = ['入住日期', '退房日期', '人數', '是否包棟', '總金額'];
 const CONFIRM_MESSAGE_PLACEHOLDERS = ['姓名', '入住日期', '退房日期', '是否包棟', '人數', '大人小孩', '總金額', '訂金', '匯款日時間'];
@@ -54,6 +55,8 @@ export default function StandardMessages() {
   const [showFlowForm, setShowFlowForm] = useState(false);
   const [flowForm, setFlowForm] = useState<Flow>(emptyFlow());
   const [savingFlow, setSavingFlow] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<Flow | null>(null);
+  const [deletingFlow, setDeletingFlow] = useState(false);
 
   useEffect(() => {
     fetchSettings();
@@ -216,14 +219,19 @@ export default function StandardMessages() {
     }
   };
 
-  const handleDeleteFlow = async (flow: Flow) => {
-    if (!confirm(`確定要刪除流程「${flow.name}」嗎？`)) return;
-    const { error } = await supabase.from('booking_flows').delete().eq('id', flow.id);
-    if (error) {
-      alert(`刪除失敗：${error.message}`);
-      return;
+  const confirmDeleteFlow = async () => {
+    if (!deleteTarget) return;
+    setDeletingFlow(true);
+    try {
+      const { error } = await supabase.from('booking_flows').delete().eq('id', deleteTarget.id);
+      if (error) throw error;
+      setDeleteTarget(null);
+      fetchFlows();
+    } catch (err: any) {
+      alert(`刪除失敗：${err.message}`);
+    } finally {
+      setDeletingFlow(false);
     }
-    fetchFlows();
   };
 
   const toggleFlowActive = async (flow: Flow) => {
@@ -239,15 +247,11 @@ export default function StandardMessages() {
 
   return (
     <div className="max-w-6xl mx-auto space-y-6">
-      <div className="bg-white p-6 rounded-xl shadow-sm border flex flex-wrap justify-between items-start gap-4">
-        <div>
-          <h2 className="text-2xl font-bold text-gray-800 flex items-center gap-2">
-            <MessageSquareText className="w-6 h-6 text-blue-600" />
-            公版訊息管理
-          </h2>
-          <p className="text-gray-500 mt-1">管理系統自動發送的標準訊息：LINE 訂房對話的分步驟流程，以及報價確認／付款確認罐頭訊息。</p>
-        </div>
-      </div>
+      <PageHeader
+        icon={<MessageSquareText className="w-6 h-6 text-green-600" />}
+        title="公版訊息管理"
+        description="管理系統自動發送的標準訊息：LINE 訂房對話的分步驟流程，以及報價確認／付款確認罐頭訊息。"
+      />
 
       {/* 動態流程管理 */}
       <div className="bg-white rounded-xl shadow-sm border overflow-hidden">
@@ -259,9 +263,7 @@ export default function StandardMessages() {
               全部步驟做完後，若已收集齊「入住日期／退房日期／入住人數／是否包棟」，就會自動算價並進入確認流程；沒收集齊則轉真人客服處理。
             </p>
           </div>
-          <button onClick={openNewFlow} className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-blue-700 whitespace-nowrap">
-            <Plus className="w-4 h-4" /> 新增流程
-          </button>
+          <Button onClick={openNewFlow} icon={<Plus className="w-4 h-4" />} className="whitespace-nowrap">新增流程</Button>
         </div>
 
         <div className="divide-y divide-gray-100">
@@ -278,15 +280,9 @@ export default function StandardMessages() {
                   <p className="text-xs text-gray-400 mt-1">觸發關鍵字：{flow.trigger_keywords}</p>
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
-                  <button
-                    onClick={() => toggleFlowActive(flow)}
-                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${flow.is_active ? 'bg-green-500' : 'bg-gray-300'}`}
-                    title={flow.is_active ? '啟用中' : '已停用'}
-                  >
-                    <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${flow.is_active ? 'translate-x-6' : 'translate-x-1'}`} />
-                  </button>
+                  <Switch checked={flow.is_active} onChange={() => toggleFlowActive(flow)} title={flow.is_active ? '啟用中' : '已停用'} />
                   <button onClick={() => openEditFlow(flow)} className="p-2 hover:bg-gray-100 rounded-lg" title="編輯"><Pencil className="w-4 h-4 text-gray-500" /></button>
-                  <button onClick={() => handleDeleteFlow(flow)} className="p-2 hover:bg-red-50 rounded-lg" title="刪除"><Trash2 className="w-4 h-4 text-red-500" /></button>
+                  <button onClick={() => setDeleteTarget(flow)} className="p-2 hover:bg-red-50 rounded-lg" title="刪除"><Trash2 className="w-4 h-4 text-red-500" /></button>
                 </div>
               </div>
             ))
@@ -294,15 +290,19 @@ export default function StandardMessages() {
         </div>
       </div>
 
-      {showFlowForm && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-3xl max-h-[90vh] overflow-y-auto">
-            <div className="flex justify-between items-center p-6 border-b sticky top-0 bg-white">
-              <h3 className="text-lg font-bold text-gray-800">{flowForm.id ? '編輯流程' : '新增流程'}</h3>
-              <button onClick={() => setShowFlowForm(false)} className="p-1 text-gray-400 hover:text-gray-600"><X className="w-5 h-5" /></button>
-            </div>
-
-            <div className="p-6 space-y-6">
+      <Modal
+        open={showFlowForm}
+        title={flowForm.id ? '編輯流程' : '新增流程'}
+        onClose={() => setShowFlowForm(false)}
+        maxWidth="max-w-3xl"
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setShowFlowForm(false)}>取消</Button>
+            <Button onClick={handleSaveFlow} loading={savingFlow}>{savingFlow ? '儲存中...' : '儲存流程'}</Button>
+          </>
+        }
+      >
+              <div className="space-y-6">
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="block text-xs text-gray-500 mb-1">流程名稱</label>
@@ -336,7 +336,7 @@ export default function StandardMessages() {
                       <div>
                         <div className="flex justify-between items-center mb-2">
                           <label className="text-xs text-gray-500">預期顧客回答的欄位（最多 {MAX_FIELDS_PER_STEP} 個）</label>
-                          <button onClick={() => addField(stepIndex)} disabled={step.fields.length >= MAX_FIELDS_PER_STEP} className="text-xs flex items-center gap-1 text-blue-600 hover:text-blue-700 disabled:opacity-40 disabled:cursor-not-allowed">
+                          <button onClick={() => addField(stepIndex)} disabled={step.fields.length >= MAX_FIELDS_PER_STEP} className="text-xs flex items-center gap-1 text-green-600 hover:text-green-700 disabled:opacity-40 disabled:cursor-not-allowed">
                             <Plus className="w-3.5 h-3.5" /> 新增欄位
                           </button>
                         </div>
@@ -380,23 +380,24 @@ export default function StandardMessages() {
                 <Plus className="w-4 h-4" /> 新增步驟（{flowForm.steps.length}/{MAX_STEPS}）
               </button>
             </div>
-
-            <div className="flex justify-end gap-2 p-6 border-t sticky bottom-0 bg-white">
-              <button onClick={() => setShowFlowForm(false)} className="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg">取消</button>
-              <button onClick={handleSaveFlow} disabled={savingFlow} className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50">
-                {savingFlow ? '儲存中...' : '儲存流程'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      </Modal>
 
       <div className="bg-white p-6 rounded-xl shadow-sm border flex justify-end">
-        <button onClick={handleSaveSettings} disabled={saving} className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 disabled:opacity-50 whitespace-nowrap">
-          <Save className="w-4 h-4" />
+        <Button onClick={handleSaveSettings} loading={saving} icon={<Save className="w-4 h-4" />} className="whitespace-nowrap">
           {saving ? '儲存中...' : '儲存罐頭訊息'}
-        </button>
+        </Button>
       </div>
+
+      <ConfirmDialog
+        open={!!deleteTarget}
+        title="刪除流程"
+        message={`確定要刪除流程「${deleteTarget?.name}」嗎？`}
+        confirmLabel="刪除"
+        danger
+        loading={deletingFlow}
+        onConfirm={confirmDeleteFlow}
+        onCancel={() => setDeleteTarget(null)}
+      />
 
       <CollapsibleSection
         title="報價確認／付款確認罐頭訊息"

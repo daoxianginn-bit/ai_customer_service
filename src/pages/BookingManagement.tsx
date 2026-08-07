@@ -13,6 +13,7 @@ import {
 } from '../lib/bookingEngine';
 import CollapsibleSection from '../components/CollapsibleSection';
 import DateRangeCalendar from '../components/DateRangeCalendar';
+import { Button } from '../components/ui';
 
 // 房型/包棟方案定價目前支援的 tier，對應 bookingEngine.resolvePricingTier() 實際會判斷出來的級距。
 const PRICING_TIERS = ['平日', '小假日', '連假', '旺季', '定價'];
@@ -458,14 +459,9 @@ export default function BookingManagement() {
         title="報價設定"
         defaultOpen={false}
         headerExtra={
-          <button
-            onClick={handleSaveAll}
-            disabled={saving}
-            className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 disabled:opacity-50 whitespace-nowrap"
-          >
-            <Save className="w-4 h-4" />
+          <Button onClick={handleSaveAll} loading={saving} icon={<Save className="w-4 h-4" />}>
             {saving ? '儲存中...' : '儲存變更'}
-          </button>
+          </Button>
         }
       >
         <p className="px-6 pb-6 text-gray-500 text-sm">
@@ -701,11 +697,9 @@ export default function BookingManagement() {
       {/* 房型與定價（收合、預設隱藏） */}
       <CollapsibleSection
         title="房型與定價"
-        icon={<Home className="w-5 h-5 text-blue-600" />}
+        icon={<Home className="w-5 h-5 text-green-600" />}
         headerExtra={
-          <button onClick={addRoomType} className="flex items-center gap-1 bg-blue-600 text-white px-3 py-1.5 rounded-lg text-sm hover:bg-blue-700 whitespace-nowrap">
-            <Plus className="w-4 h-4" /> 新增房型
-          </button>
+          <Button onClick={addRoomType} icon={<Plus className="w-4 h-4" />}>新增房型</Button>
         }
       >
         <div className="overflow-x-auto">

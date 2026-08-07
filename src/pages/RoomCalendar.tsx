@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import { CalendarDays, ChevronLeft, ChevronRight } from 'lucide-react';
+import { PageHeader } from '../components/ui';
 
 type CellInfo = { status: string; guestName: string; bookingId: string };
 
@@ -119,20 +120,18 @@ export default function RoomCalendar() {
 
   return (
     <div className="max-w-6xl mx-auto space-y-6">
-      <div className="bg-white p-6 rounded-xl shadow-sm border flex flex-wrap justify-between items-center gap-4">
-        <div>
-          <h2 className="text-2xl font-bold text-gray-800 flex items-center gap-2">
-            <CalendarDays className="w-6 h-6 text-blue-600" />
-            房況/行事曆
-          </h2>
-          <p className="text-gray-500 mt-1">依房型檢視本月訂房狀況，顏色代表訂單狀態。</p>
-        </div>
-        <div className="flex items-center gap-2">
-          <button onClick={goPrevMonth} className="p-2 border rounded-lg hover:bg-gray-50"><ChevronLeft className="w-4 h-4" /></button>
-          <span className="font-semibold text-gray-700 w-24 text-center">{year}年{month + 1}月</span>
-          <button onClick={goNextMonth} className="p-2 border rounded-lg hover:bg-gray-50"><ChevronRight className="w-4 h-4" /></button>
-        </div>
-      </div>
+      <PageHeader
+        icon={<CalendarDays className="w-6 h-6 text-green-600" />}
+        title="房況/行事曆"
+        description="依房型檢視本月訂房狀況，顏色代表訂單狀態。"
+        action={
+          <div className="flex items-center gap-2">
+            <button onClick={goPrevMonth} className="p-2 border rounded-lg hover:bg-gray-50"><ChevronLeft className="w-4 h-4" /></button>
+            <span className="font-semibold text-gray-700 w-24 text-center">{year}年{month + 1}月</span>
+            <button onClick={goNextMonth} className="p-2 border rounded-lg hover:bg-gray-50"><ChevronRight className="w-4 h-4" /></button>
+          </div>
+        }
+      />
 
       <div className="flex flex-wrap gap-4 text-xs text-gray-500">
         {Object.entries(STATUS_LABEL).map(([status, label]) => (

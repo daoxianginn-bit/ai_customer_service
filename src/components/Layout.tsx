@@ -53,7 +53,7 @@ export default function Layout() {
   const linkClass = (to: string) => {
     const isActive = location.pathname === to;
     return `flex items-center gap-3 px-4 py-2 rounded-lg transition-colors ${
-      isActive ? 'bg-blue-50 text-blue-600 font-medium' : 'text-gray-700 hover:bg-blue-50 hover:text-blue-600'
+      isActive ? 'bg-green-50 text-green-700 font-medium' : 'text-gray-700 hover:bg-green-50 hover:text-green-700'
     }`;
   };
 
@@ -63,7 +63,7 @@ export default function Layout() {
       <aside className="w-64 bg-white border-r border-gray-200 flex flex-col">
         <div className="p-6 border-b">
           <h1 className="text-xl font-bold text-gray-800 flex items-center gap-2">
-            <Settings className="w-6 h-6 text-blue-600" />
+            <Settings className="w-6 h-6 text-green-600" />
             AI 客服後台
           </h1>
         </div>
@@ -80,7 +80,7 @@ export default function Layout() {
             <button
               onClick={() => setSettingsOpen((prev) => !prev)}
               className={`flex items-center justify-between w-full gap-3 px-4 py-2 rounded-lg transition-colors ${
-                isInSettings ? 'text-blue-600 font-medium' : 'text-gray-700 hover:bg-blue-50 hover:text-blue-600'
+                isInSettings ? 'text-green-700 font-medium' : 'text-gray-700 hover:bg-green-50 hover:text-green-700'
               }`}
             >
               <span className="flex items-center gap-3">

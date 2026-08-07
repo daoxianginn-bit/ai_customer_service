@@ -54,7 +54,7 @@ function App() {
     return (
       <div className="flex items-center justify-center h-screen bg-white">
         <div className="flex flex-col items-center gap-4">
-          <div className="w-10 h-10 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
+          <div className="w-10 h-10 border-4 border-green-600 border-t-transparent rounded-full animate-spin"></div>
           <p className="text-gray-500 font-medium">系統載入中...</p>
         </div>
       </div>
@@ -71,9 +71,9 @@ function App() {
           <div className="bg-gray-50 p-4 rounded-lg text-left text-xs font-mono text-gray-500 break-all mb-6">
             網址: {window.location.origin}
           </div>
-          <button 
-            onClick={() => window.location.reload()} 
-            className="w-full bg-blue-600 text-white py-2 rounded-lg font-semibold hover:bg-blue-700 transition-colors"
+          <button
+            onClick={() => window.location.reload()}
+            className="w-full bg-green-600 text-white py-2 rounded-lg font-semibold hover:bg-green-700 transition-colors"
           >
             重新整理頁面
           </button>

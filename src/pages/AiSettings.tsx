@@ -1,5 +1,6 @@
 import { Save, Bot } from 'lucide-react';
 import { useSettings } from '../lib/useSettings';
+import { PageHeader, Button } from '../components/ui';
 
 export default function AiSettings() {
   const { settings, setSettings, loading, saving, handleSave, handleChange } = useSettings();
@@ -9,21 +10,21 @@ export default function AiSettings() {
 
   return (
     <div className="max-w-4xl mx-auto space-y-8 pb-20">
-      <div className="flex justify-between items-center bg-white p-6 rounded-xl shadow-sm border">
-        <div>
-          <h2 className="text-2xl font-bold text-gray-800">AI 引擎設定</h2>
-          <p className="text-gray-500">選擇 AI 供應商、模型參數與系統指令</p>
-        </div>
-        <button onClick={handleSave} disabled={saving} className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 disabled:opacity-50">
-          <Save className="w-4 h-4" />
-          {saving ? '儲存中...' : '儲存變更'}
-        </button>
-      </div>
+      <PageHeader
+        icon={<Bot className="w-6 h-6 text-green-600" />}
+        title="AI 引擎設定"
+        description="選擇 AI 供應商、模型參數與系統指令"
+        action={
+          <Button onClick={handleSave} loading={saving} icon={<Save className="w-4 h-4" />}>
+            {saving ? '儲存中...' : '儲存變更'}
+          </Button>
+        }
+      />
 
       {/* AI Provider Switch */}
       <div className="grid grid-cols-2 gap-4">
-        <button onClick={() => setSettings({ ...settings, active_ai: 'gpt' })} className={`p-6 rounded-xl border-2 transition-all flex items-center gap-4 ${settings.active_ai === 'gpt' ? 'border-blue-500 bg-blue-50' : 'border-gray-200 bg-white hover:border-gray-300'}`}>
-          <div className={`p-3 rounded-lg ${settings.active_ai === 'gpt' ? 'bg-blue-500 text-white' : 'bg-gray-100 text-gray-500'}`}><Bot className="w-6 h-6" /></div>
+        <button onClick={() => setSettings({ ...settings, active_ai: 'gpt' })} className={`p-6 rounded-xl border-2 transition-all flex items-center gap-4 ${settings.active_ai === 'gpt' ? 'border-green-500 bg-green-50' : 'border-gray-200 bg-white hover:border-gray-300'}`}>
+          <div className={`p-3 rounded-lg ${settings.active_ai === 'gpt' ? 'bg-green-600 text-white' : 'bg-gray-100 text-gray-500'}`}><Bot className="w-6 h-6" /></div>
           <div className="text-left"><h3 className="font-bold">OpenAI GPT</h3><p className="text-sm text-gray-500">使用 GPT-5/4 系列模型</p></div>
         </button>
         <button onClick={() => setSettings({ ...settings, active_ai: 'gemini' })} className={`p-6 rounded-xl border-2 transition-all flex items-center gap-4 ${settings.active_ai === 'gemini' ? 'border-purple-500 bg-purple-50' : 'border-gray-200 bg-white hover:border-gray-300'}`}>
@@ -35,7 +36,7 @@ export default function AiSettings() {
       {/* AI Specific Settings */}
       <div className="bg-white p-8 rounded-xl shadow-sm border space-y-6">
         <h3 className="text-lg font-bold border-b pb-4 flex items-center gap-2">
-          <Bot className="w-5 h-5 text-blue-500" />
+          <Bot className="w-5 h-5 text-green-600" />
           {settings.active_ai === 'gpt' ? 'OpenAI 設定' : 'Gemini 設定'}
         </h3>
         <div className="grid grid-cols-2 gap-6">
@@ -72,15 +73,15 @@ export default function AiSettings() {
           )}
 
           {settings.active_ai === 'gpt' && settings.gpt_model_name?.includes('gpt-5') && (
-            <div className="col-span-2 grid grid-cols-2 gap-4 p-4 bg-blue-50 rounded-lg border border-blue-100">
+            <div className="col-span-2 grid grid-cols-2 gap-4 p-4 bg-green-50 rounded-lg border border-green-100">
               <div>
-                <label className="block text-sm font-bold text-blue-800 mb-1">推理力道 (Reasoning Effort)</label>
+                <label className="block text-sm font-bold text-green-800 mb-1">推理力道 (Reasoning Effort)</label>
                 <select name="gpt_reasoning_effort" value={settings.gpt_reasoning_effort || 'none'} onChange={handleChange} className="w-full px-4 py-2 border rounded-lg bg-white">
                   <option value="none">None</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">XHigh</option>
                 </select>
               </div>
               <div>
-                <label className="block text-sm font-bold text-blue-800 mb-1">詳細程度 (Verbosity)</label>
+                <label className="block text-sm font-bold text-green-800 mb-1">詳細程度 (Verbosity)</label>
                 <select name="gpt_verbosity" value={settings.gpt_verbosity || 'medium'} onChange={handleChange} className="w-full px-4 py-2 border rounded-lg bg-white">
                   <option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option>
                 </select>
