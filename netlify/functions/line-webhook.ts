@@ -437,6 +437,7 @@ async function mirrorBookingToSheet(settings: any, booking: any) {
   if (!settings.quote_sheet_id) return;
   try {
     const fields: Record<string, string> = {
+      訂單編號: booking.order_number || '',
       LINE_USER_ID: booking.line_user_id,
       LINE_NAME: booking.nickname || '',
       訂房姓名: booking.name || '',
@@ -446,6 +447,7 @@ async function mirrorBookingToSheet(settings: any, booking: any) {
       人數: booking.headcount != null ? String(booking.headcount) : '',
       大人小孩: formatAdultsKids(booking.adults, booking.kids, booking.infants),
       是否包棟: booking.whole_house == null ? '' : booking.whole_house ? '是' : '否',
+      房型: booking.room_type_label || '',
       總金額: booking.total_amount != null ? String(booking.total_amount) : '',
       預定日期: toTaiwanSlashFromIso(booking.reserved_at),
       狀態: bookingStatusLabel(booking.status),
@@ -499,6 +501,29 @@ async function checkBookingConflict(
   return false;
 }
 
+function generateOrderNumber(): string {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  const rand = String(Math.floor(Math.random() * 10000)).padStart(4, '0');
+  return `${y}${m}${day}-${rand}`;
+}
+
+// order_number 有 UNIQUE 限制，極低機率同一天亂數撞號時重試幾次即可。
+async function insertNewBooking(fields: Record<string, any>): Promise<any> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const { data, error } = await supabase
+      .from('bookings')
+      .insert({ ...fields, order_number: generateOrderNumber() })
+      .select()
+      .single();
+    if (!error) return data;
+    if (!String(error.message || '').includes('order_number')) throw error;
+  }
+  throw new Error('無法產生不重複的訂單編號，請稍後再試');
+}
+
 async function startBookingFlow(
   lineClient: Client,
   lineEvent: any,
@@ -520,12 +545,7 @@ async function startBookingFlow(
       const p = await lineClient.getProfile(userId);
       resolvedNickname = p.displayName;
     } catch {}
-    const { data, error } = await supabase
-      .from('bookings')
-      .insert({ line_user_id: userId, nickname: resolvedNickname, flow_id: flow.id, status: 'inquiring', collected_answers: {} })
-      .select()
-      .single();
-    if (error) throw error;
+    const data = await insertNewBooking({ line_user_id: userId, nickname: resolvedNickname, flow_id: flow.id, status: 'inquiring', collected_answers: {} });
     bookingId = data.id;
     mirrorBookingToSheet(settings, data).catch(() => {});
   } else {
@@ -702,6 +722,10 @@ async function finishBookingFlow(
     const roomNights = !useWholeHouse
       ? result.individual.nights.map((n) => ({ date: dateToIso(n.date), roomTypeIds: (n.roomsUsed || []).map((r) => r.id) }))
       : [];
+    // 房型摘要，供訂單管理/客製訊息發送列表快速顯示，不用每次都 join booking_room_nights。
+    const roomTypeLabel = useWholeHouse
+      ? '包棟'
+      : Array.from(new Set(result.individual.nights.flatMap((n) => (n.roomsUsed || []).map((r) => r.name)))).join('、') || null;
 
     const name = pickByLabelHeuristic(collected, allFields, ['姓名', '名字']) || nickname;
     const phone = pickByLabelHeuristic(collected, allFields, ['電話', '手機', '聯絡']);
@@ -717,6 +741,7 @@ async function finishBookingFlow(
         headcount,
         whole_house: useWholeHouse,
         total_amount: total,
+        room_type_label: roomTypeLabel,
         status: 'pending_confirmation',
         collected_answers: collected,
         updated_at: new Date().toISOString(),

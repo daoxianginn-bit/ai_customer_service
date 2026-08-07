@@ -136,7 +136,7 @@ export default function KnowledgeBase() {
         <div>
           <h2 className="text-2xl font-bold text-gray-800 flex items-center gap-2">
             <ClipboardList className="w-6 h-6 text-blue-600" />
-            知識庫管理
+            AI知識庫
           </h2>
           <p className="text-gray-500">可新增多筆文字或檔案資料，AI 回覆時會參考已啟用的項目</p>
         </div>

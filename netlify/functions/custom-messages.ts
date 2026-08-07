@@ -5,7 +5,7 @@ import fetch from 'node-fetch';
 
 // ========================================================================
 // 客製訊息發送（客製訊息發送頁）專用 function：
-// - list：查詢所有跟 LINE 官方帳號聊過天的聯絡人（不限於有訂房），可依暱稱搜尋，依最近互動時間排序
+// - list：依關鍵字/入住日期區間/訂單狀態/房型查詢訂單清單
 // - quota：查詢 LINE 官方帳號本月訊息額度（用/剩），發送前讓後台先看到還剩多少
 // - send：把合併好欄位的訊息，用 push message 實際發送給勾選的客人
 //
@@ -56,7 +56,13 @@ export const handler: Handler = async (event) => {
     }
 
     if (body.action === 'list') {
-      const { headers, rows } = await listContacts(body.search);
+      const { headers, rows } = await listOrders(settings, {
+        keyword: body.keyword,
+        startDate: body.startDate,
+        endDate: body.endDate,
+        status: body.status,
+        roomType: body.roomType,
+      });
       return { statusCode: 200, body: JSON.stringify({ headers, rows }) };
     }
 
@@ -102,49 +108,58 @@ function mergeTemplate(template: string, fields: Record<string, string>): string
 }
 
 // ========================================================================
-// 聯絡人清單查詢：以 `user_states`（所有跟 LINE 官方帳號聊過天的人）為主要來源，
-// 每位聯絡人再帶入他最近一筆訂房紀錄（如果有）供訊息合併欄位使用。
+// 訂單清單查詢：以 `bookings` 為主要來源，供「客製訊息發送」「訂單管理」共用的查詢邏輯。
+// 合併欄位裡的 [民宿名稱]/[客服LINE]/[禮金內容] 是全站共用的固定值，來自 settings，每一列都會帶上。
 // ========================================================================
 
-const MAX_CONTACTS = 200; // 避免一次查太多筆，之後若要看更多可以再加分頁
+const MAX_ORDERS = 200; // 避免一次查太多筆，之後若要看更多可以再加分頁
 
-async function listContacts(search?: string): Promise<{ headers: string[]; rows: Record<string, string>[] }> {
-  let query = supabase
-    .from('user_states')
-    .select('line_user_id, nickname, last_message_at')
-    .order('last_message_at', { ascending: false, nullsFirst: false })
-    .limit(MAX_CONTACTS);
-  if (search && search.trim()) query = query.ilike('nickname', `%${search.trim()}%`);
+interface OrderFilters {
+  keyword?: string;
+  startDate?: string;
+  endDate?: string;
+  status?: string;
+  roomType?: string;
+}
 
-  const { data: contacts, error } = await query;
-  if (error) throw new Error(error.message || '查詢聯絡人清單失敗');
+async function listOrders(settings: any, filters: OrderFilters): Promise<{ headers: string[]; rows: Record<string, string>[] }> {
+  let query = supabase.from('bookings').select('*').order('created_at', { ascending: false }).limit(MAX_ORDERS);
 
-  const userIds = (contacts || []).map((c: any) => c.line_user_id);
-  const latestBookingByUser: Record<string, any> = {};
-  if (userIds.length) {
-    const { data: bookingsData } = await supabase.from('bookings').select('*').in('line_user_id', userIds).order('created_at', { ascending: false });
-    for (const b of bookingsData || []) {
-      if (!latestBookingByUser[b.line_user_id]) latestBookingByUser[b.line_user_id] = b; // 已依 created_at desc 排序，第一筆遇到的就是最新一筆
-    }
+  if (filters.startDate) query = query.gte('checkin_date', filters.startDate);
+  if (filters.endDate) query = query.lte('checkin_date', filters.endDate);
+  if (filters.status) query = query.eq('status', filters.status);
+  if (filters.roomType === '包棟') query = query.eq('whole_house', true);
+  else if (filters.roomType) query = query.ilike('room_type_label', `%${filters.roomType}%`);
+  if (filters.keyword && filters.keyword.trim()) {
+    const kw = filters.keyword.trim().replace(/[%,()]/g, '');
+    query = query.or(`name.ilike.%${kw}%,nickname.ilike.%${kw}%,phone.ilike.%${kw}%,order_number.ilike.%${kw}%`);
   }
 
-  const headers = ['LINE_USER_ID', 'LINE_NAME', '最近互動時間', '訂房姓名', '入住日期', '退房日期', '入住天數', '人數', '大人小孩', '是否包棟', '總金額', '訂金', '狀態'];
-  const rows = (contacts || []).map((c: any) => {
-    const b = latestBookingByUser[c.line_user_id];
+  const { data, error } = await query;
+  if (error) throw new Error(error.message || '查詢訂單清單失敗');
+
+  const headers = [
+    'LINE_USER_ID', '訂單編號', '客戶姓名', '入住日期', '退房日期', '入住人數', '房型', '訂單狀態',
+    '總報價', '訂金', '尾款', '電話', '禮金內容', '民宿名稱', '客服LINE',
+  ];
+  const rows = (data || []).map((b: any) => {
+    const balanceDue = b.total_amount != null ? b.total_amount - (b.deposit ?? 0) : null;
     return {
-      LINE_USER_ID: c.line_user_id || '',
-      LINE_NAME: c.nickname || '',
-      最近互動時間: c.last_message_at ? new Date(c.last_message_at).toLocaleString('zh-TW') : '',
-      訂房姓名: b?.name || '',
-      入住日期: b?.checkin_date ? String(b.checkin_date).replace(/-/g, '/') : '',
-      退房日期: b?.checkout_date ? String(b.checkout_date).replace(/-/g, '/') : '',
-      入住天數: b?.nights != null ? String(b.nights) : '',
-      人數: b?.headcount != null ? String(b.headcount) : '',
-      大人小孩: b ? `${b.adults ?? 0}大${b.kids ?? 0}小${b.infants ? `${b.infants}幼` : ''}` : '',
-      是否包棟: b?.whole_house == null ? '' : b.whole_house ? '是' : '否',
-      總金額: b?.total_amount != null ? String(b.total_amount) : '',
-      訂金: b?.deposit != null ? String(b.deposit) : '',
-      狀態: b ? bookingStatusLabel(b.status) : '',
+      LINE_USER_ID: b.line_user_id || '',
+      訂單編號: b.order_number || '',
+      客戶姓名: b.name || b.nickname || '',
+      入住日期: b.checkin_date ? String(b.checkin_date).replace(/-/g, '/') : '',
+      退房日期: b.checkout_date ? String(b.checkout_date).replace(/-/g, '/') : '',
+      入住人數: b.headcount != null ? String(b.headcount) : '',
+      房型: b.room_type_label || (b.whole_house ? '包棟' : ''),
+      訂單狀態: bookingStatusLabel(b.status),
+      總報價: b.total_amount != null ? String(b.total_amount) : '',
+      訂金: b.deposit != null ? String(b.deposit) : '',
+      尾款: balanceDue != null ? String(balanceDue) : '',
+      電話: b.phone || '',
+      禮金內容: settings.booking_gift_message || '',
+      民宿名稱: settings.business_name || '',
+      客服LINE: settings.customer_service_line || '',
     };
   });
 

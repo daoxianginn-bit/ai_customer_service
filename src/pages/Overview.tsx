@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Bot, MessageSquare, UserCheck, Activity, Settings, MessageCircle, ClipboardList } from 'lucide-react';
+import { Bot, MessageSquare, UserCheck, Activity, Settings, Send, ClipboardList, CalendarDays, Users, BookOpen, Headphones } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { useSettings } from '../lib/useSettings';
 
@@ -41,7 +41,7 @@ export default function Overview() {
   return (
     <div className="max-w-5xl mx-auto space-y-8 pb-20">
       <div className="bg-white p-6 rounded-xl shadow-sm border">
-        <h2 className="text-2xl font-bold text-gray-800">系統總覽</h2>
+        <h2 className="text-2xl font-bold text-gray-800">首頁總覽</h2>
         <p className="text-gray-500">AI 客服系統目前運作狀態</p>
       </div>
 
@@ -79,33 +79,37 @@ export default function Overview() {
       </div>
 
       <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+        <Link to="/ai-service-center" className="bg-white p-5 rounded-xl shadow-sm border hover:border-blue-400 hover:bg-blue-50 transition-colors flex items-center gap-3">
+          <Headphones className="w-5 h-5 text-red-500" />
+          <span className="font-medium text-gray-700">AI客服中心</span>
+        </Link>
+        <Link to="/orders" className="bg-white p-5 rounded-xl shadow-sm border hover:border-blue-400 hover:bg-blue-50 transition-colors flex items-center gap-3">
+          <ClipboardList className="w-5 h-5 text-blue-500" />
+          <span className="font-medium text-gray-700">訂單管理</span>
+        </Link>
+        <Link to="/broadcast" className="bg-white p-5 rounded-xl shadow-sm border hover:border-blue-400 hover:bg-blue-50 transition-colors flex items-center gap-3">
+          <Send className="w-5 h-5 text-blue-500" />
+          <span className="font-medium text-gray-700">客製訊息發送</span>
+        </Link>
+        <Link to="/room-calendar" className="bg-white p-5 rounded-xl shadow-sm border hover:border-blue-400 hover:bg-blue-50 transition-colors flex items-center gap-3">
+          <CalendarDays className="w-5 h-5 text-blue-500" />
+          <span className="font-medium text-gray-700">房況/行事曆</span>
+        </Link>
+        <Link to="/customers" className="bg-white p-5 rounded-xl shadow-sm border hover:border-blue-400 hover:bg-blue-50 transition-colors flex items-center gap-3">
+          <Users className="w-5 h-5 text-blue-500" />
+          <span className="font-medium text-gray-700">客戶資料</span>
+        </Link>
+        <Link to="/knowledge-base" className="bg-white p-5 rounded-xl shadow-sm border hover:border-blue-400 hover:bg-blue-50 transition-colors flex items-center gap-3">
+          <BookOpen className="w-5 h-5 text-blue-500" />
+          <span className="font-medium text-gray-700">AI知識庫</span>
+        </Link>
         <Link to="/ai-settings" className="bg-white p-5 rounded-xl shadow-sm border hover:border-blue-400 hover:bg-blue-50 transition-colors flex items-center gap-3">
           <Bot className="w-5 h-5 text-blue-500" />
           <span className="font-medium text-gray-700">AI 引擎設定</span>
         </Link>
-        <Link to="/knowledge-base" className="bg-white p-5 rounded-xl shadow-sm border hover:border-blue-400 hover:bg-blue-50 transition-colors flex items-center gap-3">
-          <ClipboardList className="w-5 h-5 text-blue-500" />
-          <span className="font-medium text-gray-700">知識庫管理</span>
-        </Link>
-        <Link to="/line-settings" className="bg-white p-5 rounded-xl shadow-sm border hover:border-blue-400 hover:bg-blue-50 transition-colors flex items-center gap-3">
-          <MessageCircle className="w-5 h-5 text-blue-500" />
-          <span className="font-medium text-gray-700">LINE 串接設定</span>
-        </Link>
-        <Link to="/handover-rules" className="bg-white p-5 rounded-xl shadow-sm border hover:border-blue-400 hover:bg-blue-50 transition-colors flex items-center gap-3">
-          <UserCheck className="w-5 h-5 text-blue-500" />
-          <span className="font-medium text-gray-700">轉接規則</span>
-        </Link>
-        <Link to="/agent" className="bg-white p-5 rounded-xl shadow-sm border hover:border-blue-400 hover:bg-blue-50 transition-colors flex items-center gap-3">
-          <UserCheck className="w-5 h-5 text-red-500" />
-          <span className="font-medium text-gray-700">真人客服</span>
-        </Link>
-        <Link to="/conversations" className="bg-white p-5 rounded-xl shadow-sm border hover:border-blue-400 hover:bg-blue-50 transition-colors flex items-center gap-3">
-          <MessageSquare className="w-5 h-5 text-blue-500" />
-          <span className="font-medium text-gray-700">對話紀錄</span>
-        </Link>
         <Link to="/accounts" className="bg-white p-5 rounded-xl shadow-sm border hover:border-blue-400 hover:bg-blue-50 transition-colors flex items-center gap-3">
           <Settings className="w-5 h-5 text-blue-500" />
-          <span className="font-medium text-gray-700">帳號管理</span>
+          <span className="font-medium text-gray-700">系統設定</span>
         </Link>
       </div>
     </div>

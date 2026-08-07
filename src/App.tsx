@@ -7,12 +7,14 @@ import AiSettings from './pages/AiSettings';
 import KnowledgeBase from './pages/KnowledgeBase';
 import LineSettings from './pages/LineSettings';
 import HandoverRules from './pages/HandoverRules';
-import AgentService from './pages/AgentService';
-import Conversations from './pages/Conversations';
+import AiServiceCenter from './pages/AiServiceCenter';
 import AdminAccounts from './pages/AdminAccounts';
 import BookingManagement from './pages/BookingManagement';
-import BookingFlowSettings from './pages/BookingFlowSettings';
+import StandardMessages from './pages/StandardMessages';
 import CustomMessageSending from './pages/CustomMessageSending';
+import OrderManagement from './pages/OrderManagement';
+import RoomCalendar from './pages/RoomCalendar';
+import CustomerDirectory from './pages/CustomerDirectory';
 import Layout from './components/Layout';
 
 function App() {
@@ -86,16 +88,18 @@ function App() {
         <Route path="/login" element={!session ? <Login /> : <Navigate to="/" />} />
         <Route element={session ? <Layout /> : <Navigate to="/login" />}>
           <Route path="/" element={<Overview />} />
-          <Route path="/ai-settings" element={<AiSettings />} />
+          <Route path="/ai-service-center" element={<AiServiceCenter />} />
+          <Route path="/standard-messages" element={<StandardMessages />} />
+          <Route path="/broadcast" element={<CustomMessageSending />} />
+          <Route path="/orders" element={<OrderManagement />} />
+          <Route path="/room-calendar" element={<RoomCalendar />} />
+          <Route path="/room-pricing" element={<BookingManagement />} />
+          <Route path="/customers" element={<CustomerDirectory />} />
           <Route path="/knowledge-base" element={<KnowledgeBase />} />
+          <Route path="/ai-settings" element={<AiSettings />} />
           <Route path="/line-settings" element={<LineSettings />} />
           <Route path="/handover-rules" element={<HandoverRules />} />
-          <Route path="/agent" element={<AgentService />} />
-          <Route path="/conversations" element={<Conversations />} />
           <Route path="/accounts" element={<AdminAccounts />} />
-          <Route path="/booking" element={<BookingManagement />} />
-          <Route path="/booking-flow" element={<BookingFlowSettings />} />
-          <Route path="/broadcast" element={<CustomMessageSending />} />
         </Route>
         <Route path="*" element={<Navigate to="/" />} />
       </Routes>

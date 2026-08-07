@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Save, Copy, MessageCircle } from 'lucide-react';
+import { Save, Copy, MessageCircle, FileSpreadsheet } from 'lucide-react';
 import { useSettings } from '../lib/useSettings';
 
 export default function LineSettings() {
@@ -49,6 +49,24 @@ export default function LineSettings() {
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Channel Secret</label>
             <input type="password" name="line_channel_secret" value={settings.line_channel_secret || ''} onChange={handleChange} className="w-full px-4 py-2 border rounded-lg" />
+          </div>
+        </div>
+      </div>
+
+      <div className="bg-white p-8 rounded-xl shadow-sm border space-y-6">
+        <h3 className="text-lg font-bold border-b pb-4 flex items-center gap-2"><FileSpreadsheet className="w-5 h-5 text-green-600" />「報價」試算表（鏡射備份用）</h3>
+        <p className="text-sm text-gray-500 -mt-2">
+          訂房紀錄以資料庫為主要來源，這裡設定的試算表只是同步鏡射一份備份，寫入失敗不影響訂房流程本身。
+          這份試算表要分享給服務帳號（跟知識庫共用同一組），且權限要設為「編輯者」而不是「檢視者」。
+        </p>
+        <div className="flex flex-wrap gap-3">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">試算表 ID</label>
+            <input name="quote_sheet_id" value={settings.quote_sheet_id || ''} onChange={handleChange} className="w-80 px-4 py-2 border rounded-lg" placeholder="Google 試算表網址中 /d/ 後面那一段" />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">工作表 GID</label>
+            <input name="quote_sheet_gid" value={settings.quote_sheet_gid || '0'} onChange={handleChange} className="w-28 px-4 py-2 border rounded-lg" placeholder="0" />
           </div>
         </div>
       </div>

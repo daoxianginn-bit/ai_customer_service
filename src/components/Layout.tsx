@@ -3,7 +3,6 @@ import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import {
   LayoutDashboard,
-  MessageSquare,
   LogOut,
   Settings,
   UserCheck,
@@ -11,27 +10,33 @@ import {
   ClipboardList,
   MessageCircle,
   Users,
+  UserCog,
   ChevronDown,
   Calculator,
   Send,
-  Workflow,
+  Headphones,
+  MessageSquareText,
+  CalendarDays,
+  BookOpen,
 } from 'lucide-react';
 
 const topItems = [
-  { to: '/', label: '總覽', icon: LayoutDashboard },
-  { to: '/knowledge-base', label: '知識庫管理', icon: ClipboardList },
-  { to: '/booking', label: '試算報價', icon: Calculator },
+  { to: '/', label: '首頁總覽', icon: LayoutDashboard },
+  { to: '/ai-service-center', label: 'AI客服中心', icon: Headphones },
+  { to: '/standard-messages', label: '公版訊息管理', icon: MessageSquareText },
   { to: '/broadcast', label: '客製訊息發送', icon: Send },
-  { to: '/agent', label: '真人客服', icon: UserCheck },
-  { to: '/conversations', label: '對話紀錄', icon: MessageSquare },
+  { to: '/orders', label: '訂單管理', icon: ClipboardList },
+  { to: '/room-calendar', label: '房況/行事曆', icon: CalendarDays },
+  { to: '/room-pricing', label: '房型與報價', icon: Calculator },
+  { to: '/customers', label: '客戶資料', icon: Users },
+  { to: '/knowledge-base', label: 'AI知識庫', icon: BookOpen },
 ];
 
 const settingsItems = [
   { to: '/ai-settings', label: 'AI 引擎設定', icon: Bot },
   { to: '/line-settings', label: 'LINE 串接設定', icon: MessageCircle },
   { to: '/handover-rules', label: '轉接規則', icon: UserCheck },
-  { to: '/booking-flow', label: '訂房流程設定', icon: Workflow },
-  { to: '/accounts', label: '帳號管理', icon: Users },
+  { to: '/accounts', label: '帳號管理', icon: UserCog },
 ];
 
 export default function Layout() {

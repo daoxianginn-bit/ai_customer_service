@@ -30,7 +30,10 @@ CREATE TABLE IF NOT EXISTS public.settings (
     handover_keywords TEXT DEFAULT '真人,客服,人工',
     handover_timeout_minutes INTEGER DEFAULT 30,
     agent_user_ids TEXT DEFAULT '',
-    conversation_retention_days INTEGER DEFAULT 3
+    conversation_retention_days INTEGER DEFAULT 3,
+    business_name TEXT DEFAULT '', -- 民宿/商家名稱，客製訊息發送的 [民宿名稱] 合併欄位
+    customer_service_line TEXT DEFAULT '', -- 客服 LINE 帳號/ID，客製訊息發送的 [客服LINE] 合併欄位
+    booking_gift_message TEXT DEFAULT '' -- 禮金/加購項目說明，客製訊息發送的 [禮金內容] 合併欄位
 );
 
 -- 2. 用戶狀態表
@@ -273,12 +276,16 @@ CREATE TABLE IF NOT EXISTS public.bookings (
     status TEXT NOT NULL DEFAULT 'inquiring' CHECK (status IN ('inquiring', 'pending_confirmation', 'confirmed', 'cancelled', 'pending_manual_conflict')),
     collected_answers JSONB DEFAULT '{}',
     sheet_row_number INTEGER,
+    order_number TEXT UNIQUE, -- 建立訂單時產生，格式 YYYYMMDD-XXXX，供客服人員與顧客溝通時使用的可讀編號
+    room_type_label TEXT, -- 算完報價時寫入的人類可讀房型摘要（包棟＝「包棟」，個別租房＝房型名稱組合），列表顯示用，不用每次 join booking_room_nights
+    notes TEXT, -- 訂單管理頁的管理員備註，系統不會自動寫入
     reserved_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ DEFAULT now(),
     updated_at TIMESTAMPTZ DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_bookings_user ON public.bookings(line_user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_bookings_confirmed_dates ON public.bookings(checkin_date, checkout_date) WHERE status = 'confirmed';
+CREATE INDEX IF NOT EXISTS idx_bookings_order_number ON public.bookings(order_number);
 
 -- 8.7 個別房型每晚實際使用紀錄（顧客確認訂房當下才寫入），供「不同顧客訂到同一天/同房型」衝突檢查用。
 CREATE TABLE IF NOT EXISTS public.booking_room_nights (

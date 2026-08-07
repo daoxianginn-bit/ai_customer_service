@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { supabase } from '../lib/supabase';
-import { Save, FileSpreadsheet, MessageSquareText, Workflow, Plus, Trash2, Pencil, X, GripVertical } from 'lucide-react';
+import { Save, MessageSquareText, Plus, Trash2, Pencil, X, GripVertical } from 'lucide-react';
 import CollapsibleSection from '../components/CollapsibleSection';
 import MessageTemplateEditor from '../components/MessageTemplateEditor';
 
@@ -42,13 +42,11 @@ const emptyFlow = (): Flow => ({
   steps: [{ step_order: 1, message_template: '', fields: [{ key: newId(), label: '', quote_field: '' }] }],
 });
 
-export default function BookingFlowSettings() {
+export default function StandardMessages() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [settingsId, setSettingsId] = useState<string | null>(null);
 
-  const [quoteSheetId, setQuoteSheetId] = useState('');
-  const [quoteSheetGid, setQuoteSheetGid] = useState('0');
   const [quoteMessage, setQuoteMessage] = useState('');
   const [confirmMessage, setConfirmMessage] = useState('');
 
@@ -66,11 +64,9 @@ export default function BookingFlowSettings() {
     setLoading(true);
     const { data } = await supabase
       .from('settings')
-      .select('id, quote_sheet_id, quote_sheet_gid, booking_quote_message, booking_confirm_message')
+      .select('id, booking_quote_message, booking_confirm_message')
       .single();
     setSettingsId(data?.id || null);
-    setQuoteSheetId(data?.quote_sheet_id ?? '');
-    setQuoteSheetGid(data?.quote_sheet_gid ?? '0');
     setQuoteMessage(data?.booking_quote_message ?? '');
     setConfirmMessage(data?.booking_confirm_message ?? '');
     setLoading(false);
@@ -99,8 +95,6 @@ export default function BookingFlowSettings() {
       await supabase
         .from('settings')
         .update({
-          quote_sheet_id: quoteSheetId,
-          quote_sheet_gid: quoteSheetGid,
           booking_quote_message: quoteMessage,
           booking_confirm_message: confirmMessage,
         })
@@ -248,10 +242,10 @@ export default function BookingFlowSettings() {
       <div className="bg-white p-6 rounded-xl shadow-sm border flex flex-wrap justify-between items-start gap-4">
         <div>
           <h2 className="text-2xl font-bold text-gray-800 flex items-center gap-2">
-            <Workflow className="w-6 h-6 text-blue-600" />
-            訂房流程設定
+            <MessageSquareText className="w-6 h-6 text-blue-600" />
+            公版訊息管理
           </h2>
-          <p className="text-gray-500 mt-1">管理 LINE 訂房對話的分步驟流程，以及報價確認／付款確認罐頭訊息。</p>
+          <p className="text-gray-500 mt-1">管理系統自動發送的標準訊息：LINE 訂房對話的分步驟流程，以及報價確認／付款確認罐頭訊息。</p>
         </div>
       </div>
 
@@ -397,35 +391,11 @@ export default function BookingFlowSettings() {
         </div>
       )}
 
-      {/* 報價試算表 + 罐頭訊息（走完流程、算完價之後才會用到） */}
       <div className="bg-white p-6 rounded-xl shadow-sm border flex justify-end">
         <button onClick={handleSaveSettings} disabled={saving} className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 disabled:opacity-50 whitespace-nowrap">
           <Save className="w-4 h-4" />
-          {saving ? '儲存中...' : '儲存下方設定'}
+          {saving ? '儲存中...' : '儲存罐頭訊息'}
         </button>
-      </div>
-
-      <div className="bg-white rounded-xl shadow-sm border overflow-hidden">
-        <div className="p-6">
-          <h3 className="text-lg font-bold text-gray-800 flex items-center gap-2 mb-1">
-            <FileSpreadsheet className="w-5 h-5 text-green-600" />
-            「報價」試算表（鏡射備份用）
-          </h3>
-          <p className="text-xs text-gray-400 mb-3">
-            訂房紀錄以資料庫為主要來源，這裡設定的試算表只是同步鏡射一份備份，寫入失敗不影響訂房流程本身。
-            <strong>注意：</strong>這份試算表要分享給服務帳號（跟知識庫共用同一組），且權限要設為「編輯者」而不是「檢視者」。
-          </p>
-          <div className="flex flex-wrap gap-3">
-            <div>
-              <label className="block text-xs text-gray-500 mb-1">試算表 ID</label>
-              <input value={quoteSheetId} onChange={(e) => setQuoteSheetId(e.target.value)} className="w-80 px-3 py-2 border rounded-lg" placeholder="Google 試算表網址中 /d/ 後面那一段" />
-            </div>
-            <div>
-              <label className="block text-xs text-gray-500 mb-1">工作表 GID</label>
-              <input value={quoteSheetGid} onChange={(e) => setQuoteSheetGid(e.target.value)} className="w-28 px-3 py-2 border rounded-lg" placeholder="0" />
-            </div>
-          </div>
-        </div>
       </div>
 
       <CollapsibleSection
