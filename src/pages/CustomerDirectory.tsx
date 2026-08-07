@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase';
-import { Users, Search, X, MessageSquare, ClipboardList } from 'lucide-react';
+import { Users, Search, X, MessageSquare, ClipboardList, BadgeInfo, Copy } from 'lucide-react';
 
 const STATUS_LABEL: Record<string, string> = {
   inquiring: '待報價',
@@ -21,6 +21,27 @@ interface Contact {
   totalSpend: number;
 }
 
+type LookupType = 'basic' | 'live' | 'summary';
+
+const LOOKUP_TYPE_OPTIONS: { value: LookupType; label: string }[] = [
+  { value: 'basic', label: '基本資訊（LINE 暱稱＋LINE User ID）' },
+  { value: 'live', label: '即時大頭貼與狀態消息（呼叫 LINE API）' },
+  { value: 'summary', label: '互動與訂單摘要' },
+];
+
+async function callLineProfileFunction(lineUserId: string) {
+  const { data: sessionData } = await supabase.auth.getSession();
+  const token = sessionData.session?.access_token;
+  const res = await fetch('/.netlify/functions/line-profile', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ lineUserId }),
+  });
+  const result = await res.json();
+  if (!res.ok) throw new Error(result.error || '查詢失敗');
+  return result;
+}
+
 export default function CustomerDirectory() {
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [loading, setLoading] = useState(true);
@@ -31,9 +52,52 @@ export default function CustomerDirectory() {
   const [selectedConversations, setSelectedConversations] = useState<any[]>([]);
   const [detailLoading, setDetailLoading] = useState(false);
 
+  const [lookupUserId, setLookupUserId] = useState('');
+  const [lookupType, setLookupType] = useState<LookupType>('basic');
+  const [lookupResult, setLookupResult] = useState<any>(null);
+  const [lookupLoading, setLookupLoading] = useState(false);
+  const [lookupError, setLookupError] = useState('');
+  const [copied, setCopied] = useState(false);
+
   useEffect(() => {
     runQuery();
   }, []);
+
+  const runLookup = async () => {
+    if (!lookupUserId) {
+      setLookupError('請先選擇一位聯絡人');
+      return;
+    }
+    const contact = contacts.find((c) => c.line_user_id === lookupUserId);
+    if (!contact) return;
+
+    setLookupLoading(true);
+    setLookupError('');
+    setLookupResult(null);
+    setCopied(false);
+    try {
+      if (lookupType === 'basic') {
+        setLookupResult({ type: 'basic', nickname: contact.nickname, lineUserId: contact.line_user_id });
+      } else if (lookupType === 'summary') {
+        setLookupResult({ type: 'summary', ...contact });
+      } else {
+        const profile = await callLineProfileFunction(lookupUserId);
+        setLookupResult({ type: 'live', ...profile });
+      }
+    } catch (e: any) {
+      setLookupError(e.message);
+    } finally {
+      setLookupLoading(false);
+    }
+  };
+
+  const copyLookupId = () => {
+    const id = lookupResult?.lineUserId || lookupResult?.userId || lookupUserId;
+    if (!id) return;
+    navigator.clipboard.writeText(id);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
 
   const runQuery = async () => {
     setLoading(true);
@@ -98,6 +162,94 @@ export default function CustomerDirectory() {
           客戶資料
         </h2>
         <p className="text-gray-500 mt-1">所有跟 LINE 官方帳號互動過的聯絡人，點列查看訂單與對話紀錄。</p>
+      </div>
+
+      <div className="bg-white p-6 rounded-xl shadow-sm border space-y-3">
+        <h3 className="font-bold text-gray-800 flex items-center gap-2"><BadgeInfo className="w-5 h-5 text-blue-500" />LINE 資訊查詢</h3>
+        <p className="text-xs text-gray-400">
+          LINE 官方 API 不支援用名字搜尋任何用戶，只能查已經聊過天、加過官方帳號好友的聯絡人。從下面選一位聯絡人，再選要查的資訊類型。
+        </p>
+        <div className="flex flex-wrap gap-2 items-end">
+          <div className="flex-1 min-w-[220px]">
+            <label className="block text-xs text-gray-500 mb-1">選擇聯絡人</label>
+            <select value={lookupUserId} onChange={(e) => setLookupUserId(e.target.value)} className="w-full px-3 py-2 border rounded-lg bg-white text-sm">
+              <option value="">請選擇...</option>
+              {contacts.map((c) => (
+                <option key={c.line_user_id} value={c.line_user_id}>
+                  {c.nickname || '未取得暱稱'}{c.last_message_at ? `（最近互動 ${new Date(c.last_message_at).toLocaleDateString('zh-TW')}）` : ''}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="flex-1 min-w-[260px]">
+            <label className="block text-xs text-gray-500 mb-1">查詢類型</label>
+            <select value={lookupType} onChange={(e) => setLookupType(e.target.value as LookupType)} className="w-full px-3 py-2 border rounded-lg bg-white text-sm">
+              {LOOKUP_TYPE_OPTIONS.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
+            </select>
+          </div>
+          <button onClick={runLookup} disabled={lookupLoading} className="flex items-center gap-1 bg-blue-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50">
+            <Search className="w-4 h-4" /> {lookupLoading ? '查詢中...' : '查詢'}
+          </button>
+        </div>
+
+        {lookupError && <p className="text-sm text-red-600">{lookupError}</p>}
+
+        {lookupResult && (
+          <div className="border rounded-lg p-4 bg-gray-50 text-sm space-y-2">
+            {lookupResult.type === 'basic' && (
+              <>
+                <div className="flex justify-between items-center">
+                  <span className="text-gray-500">LINE 暱稱</span>
+                  <span className="font-medium text-gray-800">{lookupResult.nickname || '未取得'}</span>
+                </div>
+                <div className="flex justify-between items-center gap-2">
+                  <span className="text-gray-500">LINE User ID</span>
+                  <span className="flex items-center gap-2">
+                    <span className="font-mono text-xs text-gray-700">{lookupResult.lineUserId}</span>
+                    <button onClick={copyLookupId} className="p-1 hover:bg-gray-200 rounded" title="複製">
+                      <Copy className="w-3.5 h-3.5 text-gray-500" />
+                    </button>
+                    {copied && <span className="text-xs text-green-600">已複製</span>}
+                  </span>
+                </div>
+              </>
+            )}
+            {lookupResult.type === 'summary' && (
+              <>
+                <div className="flex justify-between"><span className="text-gray-500">LINE 暱稱</span><span className="font-medium text-gray-800">{lookupResult.nickname || '未取得'}</span></div>
+                <div className="flex justify-between"><span className="text-gray-500">最近互動時間</span><span>{lookupResult.last_message_at ? new Date(lookupResult.last_message_at).toLocaleString('zh-TW') : '-'}</span></div>
+                <div className="flex justify-between"><span className="text-gray-500">累積訂單數</span><span>{lookupResult.bookingCount}</span></div>
+                <div className="flex justify-between"><span className="text-gray-500">最近訂單狀態</span><span>{lookupResult.latestStatus ? STATUS_LABEL[lookupResult.latestStatus] || lookupResult.latestStatus : '-'}</span></div>
+                <div className="flex justify-between"><span className="text-gray-500">累積消費（已確認）</span><span>{lookupResult.totalSpend > 0 ? `NT$ ${lookupResult.totalSpend.toLocaleString()}` : '-'}</span></div>
+              </>
+            )}
+            {lookupResult.type === 'live' && (
+              <>
+                <div className="flex items-center gap-3">
+                  {lookupResult.pictureUrl ? (
+                    <img src={lookupResult.pictureUrl} alt="" className="w-12 h-12 rounded-full object-cover" />
+                  ) : (
+                    <div className="w-12 h-12 rounded-full bg-gray-200" />
+                  )}
+                  <div>
+                    <p className="font-medium text-gray-800">{lookupResult.displayName}</p>
+                    <p className="text-xs text-gray-500">{lookupResult.statusMessage || '（未設定狀態消息）'}</p>
+                  </div>
+                </div>
+                <div className="flex justify-between items-center gap-2 pt-2 border-t">
+                  <span className="text-gray-500">LINE User ID</span>
+                  <span className="flex items-center gap-2">
+                    <span className="font-mono text-xs text-gray-700">{lookupResult.userId}</span>
+                    <button onClick={copyLookupId} className="p-1 hover:bg-gray-200 rounded" title="複製">
+                      <Copy className="w-3.5 h-3.5 text-gray-500" />
+                    </button>
+                    {copied && <span className="text-xs text-green-600">已複製</span>}
+                  </span>
+                </div>
+              </>
+            )}
+          </div>
+        )}
       </div>
 
       <div className="bg-white p-4 rounded-xl shadow-sm border flex gap-2">
