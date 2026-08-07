@@ -41,7 +41,8 @@ CREATE TABLE IF NOT EXISTS public.user_states (
     last_human_interaction TIMESTAMP WITH TIME ZONE,
     last_ai_reset_at TIMESTAMP WITH TIME ZONE,
     last_event_id TEXT,
-    booking_session TEXT -- 訂房對話流程：進行中的訂房詢問狀態（JSON），null＝目前沒有進行中的詢問
+    booking_session TEXT, -- 訂房對話流程：進行中的訂房詢問狀態（JSON），null＝目前沒有進行中的詢問
+    last_message_at TIMESTAMP WITH TIME ZONE -- 最近一次跟 LINE 官方帳號互動的時間（不分是否轉真人/訂房），供「客製訊息發送」查詢聯絡人清單用
 );
 
 -- 3. 事件去重表 (防止 LINE Webhook 重試導致重複回覆)

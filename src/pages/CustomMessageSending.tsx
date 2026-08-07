@@ -35,8 +35,7 @@ export default function CustomMessageSending() {
   const [templates, setTemplates] = useState<Template[]>([]);
   const [selectedTemplateId, setSelectedTemplateId] = useState('');
 
-  const [startDate, setStartDate] = useState('');
-  const [endDate, setEndDate] = useState('');
+  const [search, setSearch] = useState('');
   const [querying, setQuerying] = useState(false);
   const [headers, setHeaders] = useState<string[]>([]);
   const [rows, setRows] = useState<Record<string, string>[]>([]);
@@ -55,6 +54,7 @@ export default function CustomMessageSending() {
   useEffect(() => {
     fetchTemplates();
     fetchQuota();
+    runQuery();
   }, []);
 
   const fetchTemplates = async () => {
@@ -72,13 +72,13 @@ export default function CustomMessageSending() {
   };
 
   const rowKey = (row: Record<string, string>, index: number) => row['LINE_USER_ID'] || `row-${index}`;
-  const displayName = (row: Record<string, string>) => row['訂房姓名'] || row['LINE_NAME'] || '（未知）';
+  const displayName = (row: Record<string, string>) => row['LINE_NAME'] || row['訂房姓名'] || '（未知）';
 
   const runQuery = async () => {
     setQuerying(true);
     setSelectedKeys(new Set());
     try {
-      const result = await callCustomMessagesFunction('list', { startDate, endDate });
+      const result = await callCustomMessagesFunction('list', { search });
       setHeaders(result.headers || []);
       setRows(result.rows || []);
     } catch (e: any) {
@@ -193,7 +193,7 @@ export default function CustomMessageSending() {
             客製訊息發送
           </h2>
           <p className="text-gray-500 mt-1">
-            依入住日期區間從「報價」試算表查出客人名單，勾選要發送的對象，選一個訊息範本後發送。這是主動推播（push），會消耗 LINE 官方帳號的免費訊息額度。
+            查詢所有跟 LINE 官方帳號聊過天的聯絡人（不限於有訂房詢問），勾選要發送的對象，選一個訊息範本後發送。這是主動推播（push），會消耗 LINE 官方帳號的免費訊息額度。
           </p>
         </div>
         <div className="flex items-center gap-2 bg-gray-50 border rounded-lg px-4 py-2 text-sm text-gray-700">
@@ -212,20 +212,22 @@ export default function CustomMessageSending() {
         </div>
       </div>
 
-      {/* 步驟一：查詢入住日期區間 */}
+      {/* 步驟一：查詢聯絡人名單 */}
       <div className="bg-white rounded-xl shadow-sm border overflow-hidden">
         <div className="p-6 border-b">
           <h3 className="text-lg font-bold text-gray-800">① 查詢名單</h3>
-          <p className="text-sm text-gray-500 mt-1">依「報價」試算表裡的入住日期區間查詢客人。</p>
+          <p className="text-sm text-gray-500 mt-1">可依 LINE 暱稱搜尋，預設依最近互動時間排序（最多顯示 200 位）。</p>
         </div>
         <div className="p-6 border-b flex flex-wrap gap-3 items-end">
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">入住日期（起）</label>
-            <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="px-3 py-2 border rounded-lg" />
-          </div>
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">入住日期（迄）</label>
-            <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} className="px-3 py-2 border rounded-lg" />
+          <div className="flex-1 min-w-[200px]">
+            <label className="block text-xs text-gray-500 mb-1">LINE 暱稱</label>
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && runQuery()}
+              placeholder="輸入暱稱關鍵字，留空查全部"
+              className="w-full px-3 py-2 border rounded-lg"
+            />
           </div>
           <button
             onClick={runQuery}
@@ -244,10 +246,11 @@ export default function CustomMessageSending() {
                 <th className="py-2 px-4">
                   <input type="checkbox" checked={rows.length > 0 && selectedKeys.size === rows.length} onChange={toggleSelectAll} disabled={!rows.length} />
                 </th>
-                <th className="py-2 px-4">姓名</th>
+                <th className="py-2 px-4">LINE 暱稱</th>
+                <th className="py-2 px-4">最近互動時間</th>
                 <th className="py-2 px-4">入住日期</th>
-                <th className="py-2 px-4">退房日期</th>
                 <th className="py-2 px-4">總金額</th>
+                <th className="py-2 px-4">狀態</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
@@ -259,16 +262,17 @@ export default function CustomMessageSending() {
                       <input type="checkbox" checked={selectedKeys.has(key)} onChange={() => toggleSelected(key)} />
                     </td>
                     <td className="py-2 px-4">{displayName(r)}</td>
+                    <td className="py-2 px-4 text-gray-500">{r['最近互動時間']}</td>
                     <td className="py-2 px-4">{r['入住日期']}</td>
-                    <td className="py-2 px-4">{r['退房日期']}</td>
                     <td className="py-2 px-4">{r['總金額']}</td>
+                    <td className="py-2 px-4 text-gray-500">{r['狀態']}</td>
                   </tr>
                 );
               })}
               {rows.length === 0 && (
                 <tr>
-                  <td colSpan={5} className="py-10 text-center text-gray-400">
-                    {querying ? '查詢中...' : '請選擇入住日期區間後按「查詢」'}
+                  <td colSpan={6} className="py-10 text-center text-gray-400">
+                    {querying ? '查詢中...' : '查無聯絡人'}
                   </td>
                 </tr>
               )}
@@ -282,7 +286,7 @@ export default function CustomMessageSending() {
         <div className="p-6 border-b flex justify-between items-center">
           <div>
             <h3 className="text-lg font-bold text-gray-800">② 訊息範本</h3>
-            <p className="text-sm text-gray-500 mt-1">方括號 [欄位名稱] 會用查詢到的那一列資料自動帶入，欄位名稱來自「報價」試算表的標題列。</p>
+            <p className="text-sm text-gray-500 mt-1">方括號 [欄位名稱] 會用查詢到的那一列資料自動帶入；沒有訂房紀錄的聯絡人，報價相關欄位會是空白。</p>
           </div>
           <button onClick={openNewTemplate} className="flex items-center gap-1 bg-gray-700 text-white px-3 py-1.5 rounded-lg text-sm hover:bg-gray-800">
             <Plus className="w-4 h-4" /> 新增範本
@@ -404,7 +408,7 @@ export default function CustomMessageSending() {
               </p>
               <div className="max-h-48 overflow-y-auto border rounded-lg p-3 text-sm text-gray-600 space-y-1">
                 {selectedRows.map((r, i) => (
-                  <div key={i}>・{displayName(r)}（入住 {r['入住日期']}）</div>
+                  <div key={i}>・{displayName(r)}{r['入住日期'] ? `（入住 ${r['入住日期']}）` : ''}</div>
                 ))}
               </div>
               <p className="text-xs text-gray-400">範本：{selectedTemplate.title}</p>

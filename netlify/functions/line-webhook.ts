@@ -78,6 +78,17 @@ export const handler: Handler = async (event) => {
       const { data: userState } = await supabase.from('user_states').select('*').eq('line_user_id', userId).single();
       let nickname = userState?.nickname || null;
 
+      // 聯絡人紀錄：暱稱只在還沒抓過時才呼叫 LINE Profile API（之後都沿用快取，避免每則訊息都打 API），
+      // 但每則訊息都更新 last_message_at，讓「客製訊息發送」能查到所有聊過天的人，不限於有轉真人/訂房過的。
+      if (!nickname) {
+        try { const p = await lineClient.getProfile(userId); nickname = p.displayName; } catch (e) {}
+      }
+      try {
+        await supabase.from('user_states').upsert({ line_user_id: userId, nickname, last_message_at: new Date().toISOString() });
+      } catch (e) {
+        console.error('[Contacts] Failed to upsert user_states:', e);
+      }
+
       await logConversation(userId, nickname, 'inbound', userMessage, 'user');
 
       // 3. 關鍵字偵測 (轉真人客服)

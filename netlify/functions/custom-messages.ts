@@ -5,7 +5,7 @@ import fetch from 'node-fetch';
 
 // ========================================================================
 // 客製訊息發送（客製訊息發送頁）專用 function：
-// - list：依入住日期區間，從 `bookings` 資料表查出符合的客人清單
+// - list：查詢所有跟 LINE 官方帳號聊過天的聯絡人（不限於有訂房），可依暱稱搜尋，依最近互動時間排序
 // - quota：查詢 LINE 官方帳號本月訊息額度（用/剩），發送前讓後台先看到還剩多少
 // - send：把合併好欄位的訊息，用 push message 實際發送給勾選的客人
 //
@@ -56,7 +56,7 @@ export const handler: Handler = async (event) => {
     }
 
     if (body.action === 'list') {
-      const { headers, rows } = await listBookings(body.startDate, body.endDate);
+      const { headers, rows } = await listContacts(body.search);
       return { statusCode: 200, body: JSON.stringify({ headers, rows }) };
     }
 
@@ -102,32 +102,51 @@ function mergeTemplate(template: string, fields: Record<string, string>): string
 }
 
 // ========================================================================
-// 訂房名單查詢：以資料庫 `bookings` 表為主要來源（取代原本的 Google「報價」試算表查詢）
+// 聯絡人清單查詢：以 `user_states`（所有跟 LINE 官方帳號聊過天的人）為主要來源，
+// 每位聯絡人再帶入他最近一筆訂房紀錄（如果有）供訊息合併欄位使用。
 // ========================================================================
 
-async function listBookings(startDate?: string, endDate?: string): Promise<{ headers: string[]; rows: Record<string, string>[] }> {
-  let query = supabase.from('bookings').select('*').not('checkin_date', 'is', null).order('checkin_date', { ascending: true });
-  if (startDate) query = query.gte('checkin_date', startDate);
-  if (endDate) query = query.lte('checkin_date', endDate);
+const MAX_CONTACTS = 200; // 避免一次查太多筆，之後若要看更多可以再加分頁
 
-  const { data, error } = await query;
-  if (error) throw new Error(error.message || '查詢訂房名單失敗');
+async function listContacts(search?: string): Promise<{ headers: string[]; rows: Record<string, string>[] }> {
+  let query = supabase
+    .from('user_states')
+    .select('line_user_id, nickname, last_message_at')
+    .order('last_message_at', { ascending: false, nullsFirst: false })
+    .limit(MAX_CONTACTS);
+  if (search && search.trim()) query = query.ilike('nickname', `%${search.trim()}%`);
 
-  const headers = ['LINE_USER_ID', 'LINE_NAME', '訂房姓名', '入住日期', '退房日期', '入住天數', '人數', '大人小孩', '是否包棟', '總金額', '訂金', '狀態'];
-  const rows = (data || []).map((b: any) => ({
-    LINE_USER_ID: b.line_user_id || '',
-    LINE_NAME: b.nickname || '',
-    訂房姓名: b.name || '',
-    入住日期: b.checkin_date ? String(b.checkin_date).replace(/-/g, '/') : '',
-    退房日期: b.checkout_date ? String(b.checkout_date).replace(/-/g, '/') : '',
-    入住天數: b.nights != null ? String(b.nights) : '',
-    人數: b.headcount != null ? String(b.headcount) : '',
-    大人小孩: `${b.adults ?? 0}大${b.kids ?? 0}小${b.infants ? `${b.infants}幼` : ''}`,
-    是否包棟: b.whole_house == null ? '' : b.whole_house ? '是' : '否',
-    總金額: b.total_amount != null ? String(b.total_amount) : '',
-    訂金: b.deposit != null ? String(b.deposit) : '',
-    狀態: bookingStatusLabel(b.status),
-  }));
+  const { data: contacts, error } = await query;
+  if (error) throw new Error(error.message || '查詢聯絡人清單失敗');
+
+  const userIds = (contacts || []).map((c: any) => c.line_user_id);
+  const latestBookingByUser: Record<string, any> = {};
+  if (userIds.length) {
+    const { data: bookingsData } = await supabase.from('bookings').select('*').in('line_user_id', userIds).order('created_at', { ascending: false });
+    for (const b of bookingsData || []) {
+      if (!latestBookingByUser[b.line_user_id]) latestBookingByUser[b.line_user_id] = b; // 已依 created_at desc 排序，第一筆遇到的就是最新一筆
+    }
+  }
+
+  const headers = ['LINE_USER_ID', 'LINE_NAME', '最近互動時間', '訂房姓名', '入住日期', '退房日期', '入住天數', '人數', '大人小孩', '是否包棟', '總金額', '訂金', '狀態'];
+  const rows = (contacts || []).map((c: any) => {
+    const b = latestBookingByUser[c.line_user_id];
+    return {
+      LINE_USER_ID: c.line_user_id || '',
+      LINE_NAME: c.nickname || '',
+      最近互動時間: c.last_message_at ? new Date(c.last_message_at).toLocaleString('zh-TW') : '',
+      訂房姓名: b?.name || '',
+      入住日期: b?.checkin_date ? String(b.checkin_date).replace(/-/g, '/') : '',
+      退房日期: b?.checkout_date ? String(b.checkout_date).replace(/-/g, '/') : '',
+      入住天數: b?.nights != null ? String(b.nights) : '',
+      人數: b?.headcount != null ? String(b.headcount) : '',
+      大人小孩: b ? `${b.adults ?? 0}大${b.kids ?? 0}小${b.infants ? `${b.infants}幼` : ''}` : '',
+      是否包棟: b?.whole_house == null ? '' : b.whole_house ? '是' : '否',
+      總金額: b?.total_amount != null ? String(b.total_amount) : '',
+      訂金: b?.deposit != null ? String(b.deposit) : '',
+      狀態: b ? bookingStatusLabel(b.status) : '',
+    };
+  });
 
   return { headers, rows };
 }
