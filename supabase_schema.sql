@@ -299,6 +299,7 @@ CREATE INDEX IF NOT EXISTS idx_booking_room_nights_lookup ON public.booking_room
 -- 9. 啟用 RLS（僅限已登入使用者存取，用 DROP + CREATE 讓整份腳本可重複執行）
 ALTER TABLE public.settings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.user_states ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.processed_events ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.knowledge_base_items ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.handover_logs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.conversations ENABLE ROW LEVEL SECURITY;
@@ -322,6 +323,10 @@ DROP POLICY IF EXISTS "Allow Auth Access" ON public.settings;
 CREATE POLICY "Allow Auth Access" ON public.settings FOR ALL USING (auth.role() = 'authenticated');
 DROP POLICY IF EXISTS "Allow Auth Access States" ON public.user_states;
 CREATE POLICY "Allow Auth Access States" ON public.user_states FOR ALL USING (auth.role() = 'authenticated');
+-- processed_events 只有 line-webhook.ts 用 service role key 寫入/查詢（會略過 RLS），
+-- 前端從不存取這張表，這裡開 RLS 只是不讓 anon key 直接讀寫，不影響 webhook 運作。
+DROP POLICY IF EXISTS "Allow Auth Access Processed Events" ON public.processed_events;
+CREATE POLICY "Allow Auth Access Processed Events" ON public.processed_events FOR ALL USING (auth.role() = 'authenticated');
 DROP POLICY IF EXISTS "Allow Auth Access KB" ON public.knowledge_base_items;
 CREATE POLICY "Allow Auth Access KB" ON public.knowledge_base_items FOR ALL USING (auth.role() = 'authenticated');
 DROP POLICY IF EXISTS "Allow Auth Access Handover Logs" ON public.handover_logs;
