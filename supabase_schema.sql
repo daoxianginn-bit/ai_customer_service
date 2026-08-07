@@ -42,10 +42,8 @@ CREATE TABLE IF NOT EXISTS public.user_states (
     nickname TEXT,
     is_human_mode BOOLEAN DEFAULT false,
     last_human_interaction TIMESTAMP WITH TIME ZONE,
-    last_ai_reset_at TIMESTAMP WITH TIME ZONE,
-    last_event_id TEXT,
-    booking_session TEXT, -- 訂房對話流程：進行中的訂房詢問狀態（JSON），null＝目前沒有進行中的詢問
-    last_message_at TIMESTAMP WITH TIME ZONE -- 最近一次跟 LINE 官方帳號互動的時間（不分是否轉真人/訂房），供「客製訊息發送」查詢聯絡人清單用
+    last_ai_reset_at TIMESTAMP WITH TIME ZONE
+    -- last_event_id / booking_session / last_message_at 由後面的 ALTER TABLE 補齊，新舊專案都適用
 );
 
 -- 3. 事件去重表 (防止 LINE Webhook 重試導致重複回覆)
@@ -224,6 +222,11 @@ ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS booking_confirm_message TEX
 -- 目前生效中的促銷方案：後台選定後，LINE 訂房對話流程會自動套用同一個。放在 promotions 表格之後（要參照其 id）。
 ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS active_promotion_id UUID REFERENCES public.promotions(id) ON DELETE SET NULL;
 
+-- user_states 後來加的欄位（新專案 CREATE TABLE 時不含這些，靠這幾行 ALTER 補齊，既有專案升級也適用）
+ALTER TABLE public.user_states ADD COLUMN IF NOT EXISTS last_event_id TEXT;
+ALTER TABLE public.user_states ADD COLUMN IF NOT EXISTS booking_session TEXT; -- 訂房對話流程：進行中的訂房詢問狀態（JSON），null＝目前沒有進行中的詢問
+ALTER TABLE public.user_states ADD COLUMN IF NOT EXISTS last_message_at TIMESTAMP WITH TIME ZONE; -- 最近一次跟 LINE 官方帳號互動的時間（不分是否轉真人/訂房），供「客製訊息發送」查詢聯絡人清單用
+
 -- 客製訊息發送：後台自訂的可重複使用訊息範本
 CREATE TABLE IF NOT EXISTS public.custom_message_templates (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -276,13 +279,17 @@ CREATE TABLE IF NOT EXISTS public.bookings (
     status TEXT NOT NULL DEFAULT 'inquiring' CHECK (status IN ('inquiring', 'pending_confirmation', 'confirmed', 'cancelled', 'pending_manual_conflict')),
     collected_answers JSONB DEFAULT '{}',
     sheet_row_number INTEGER,
-    order_number TEXT UNIQUE, -- 建立訂單時產生，格式 YYYYMMDD-XXXX，供客服人員與顧客溝通時使用的可讀編號
-    room_type_label TEXT, -- 算完報價時寫入的人類可讀房型摘要（包棟＝「包棟」，個別租房＝房型名稱組合），列表顯示用，不用每次 join booking_room_nights
-    notes TEXT, -- 訂單管理頁的管理員備註，系統不會自動寫入
     reserved_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ DEFAULT now(),
     updated_at TIMESTAMPTZ DEFAULT now()
+    -- order_number / room_type_label / notes 由後面的 ALTER TABLE 補齊，新舊專案都適用
 );
+
+-- bookings 後來加的欄位（新專案 CREATE TABLE 時不含這些，靠這幾行 ALTER 補齊，既有專案升級也適用）
+ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS order_number TEXT UNIQUE; -- 建立訂單時產生，格式 YYYYMMDD-XXXX，供客服人員與顧客溝通時使用的可讀編號
+ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS room_type_label TEXT; -- 算完報價時寫入的人類可讀房型摘要（包棟＝「包棟」，個別租房＝房型名稱組合），列表顯示用，不用每次 join booking_room_nights
+ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS notes TEXT; -- 訂單管理頁的管理員備註，系統不會自動寫入
+
 CREATE INDEX IF NOT EXISTS idx_bookings_user ON public.bookings(line_user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_bookings_confirmed_dates ON public.bookings(checkin_date, checkout_date) WHERE status = 'confirmed';
 CREATE INDEX IF NOT EXISTS idx_bookings_order_number ON public.bookings(order_number);
