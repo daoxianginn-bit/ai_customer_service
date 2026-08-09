@@ -1,11 +1,18 @@
-const STATUS_CONFIG: Record<string, { label: string; className: string }> = {
-  inquiring: { label: '待報價', className: 'bg-gray-100 text-gray-600' },
-  pending_confirmation: { label: '待確認', className: 'bg-yellow-100 text-yellow-700' },
-  confirmed: { label: '已確認', className: 'bg-green-100 text-green-700' },
-  cancelled: { label: '已取消', className: 'bg-red-100 text-red-600' },
-  pending_manual_conflict: { label: '待人工確認', className: 'bg-orange-100 text-orange-700' },
+import { ALL_BOOKING_STATUSES } from '../../lib/bookingStatus';
+
+const BOOKING_STATUS_CONFIG: Record<string, { label: string; className: string }> = Object.fromEntries(
+  ALL_BOOKING_STATUSES.map((s) => [s.value, { label: s.label, className: s.badgeClassName }])
+);
+
+// 訂單狀態以外的其他狀態代碼（例如真人客服轉接紀錄），跟訂單狀態不共用同一份定義。
+const OTHER_STATUS_CONFIG: Record<string, { label: string; className: string }> = {
   open: { label: '進行中', className: 'bg-red-100 text-red-700' },
   closed: { label: '已結束', className: 'bg-gray-100 text-gray-600' },
+};
+
+const STATUS_CONFIG: Record<string, { label: string; className: string }> = {
+  ...BOOKING_STATUS_CONFIG,
+  ...OTHER_STATUS_CONFIG,
 };
 
 interface StatusBadgeProps {

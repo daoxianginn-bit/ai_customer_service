@@ -115,7 +115,9 @@ export default function BookingManagement() {
           'id, booking_whole_house_enabled, consecutive_stay_discount_cleaning, consecutive_stay_discount_no_cleaning, consecutive_stay_default_option, peak_season_weekday_tier, active_promotion_id'
         )
         .single(),
-      supabase.from('room_types').select('*').order('display_order'),
+      // 房型與定價只處理「房間」類型的資料（可訂房、可訂價），其他類型（例如公共空間）在
+      // 「房型與空間維護」頁面管理，跟訂價/訂房邏輯無關。
+      supabase.from('room_types').select('*').eq('type', '房間').order('display_order'),
       supabase.from('room_pricing').select('*'),
       supabase.from('room_extra_person_pricing').select('*'),
       supabase.from('whole_house_packages').select('*').order('display_order'),
@@ -193,22 +195,9 @@ export default function BookingManagement() {
     }
   };
 
-  // ---------------- 房型 ----------------
-  const addRoomType = () => {
-    setRoomTypes([...roomTypes, { id: newId(), name: '新房型', floor: '', capacity: 2, max_extra_persons: 0, display_order: roomTypes.length, is_active: true }]);
-  };
-
+  // ---------------- 房型（基本資料在「房型與空間維護」管理，這裡只改訂價相關欄位） ----------------
   const updateRoomType = (id: string, field: string, value: any) => {
     setRoomTypes(roomTypes.map((r) => (r.id === id ? { ...r, [field]: value } : r)));
-  };
-
-  const deleteRoomType = (id: string) => {
-    if (!confirm('確定要刪除這個房型嗎？相關定價與包棟房型組合也會一併刪除。')) return;
-    setRoomTypes(roomTypes.filter((r) => r.id !== id));
-    setRoomPricing(roomPricing.filter((p) => p.room_type_id !== id));
-    setRoomExtraPersonPricing(roomExtraPersonPricing.filter((p) => p.room_type_id !== id));
-    setPackageRooms(packageRooms.filter((pr) => pr.room_type_id !== id));
-    queueDelete('room_types', id);
   };
 
   // ---------------- 包棟方案 ----------------
@@ -698,46 +687,29 @@ export default function BookingManagement() {
       <CollapsibleSection
         title="房型與定價"
         icon={<Home className="w-5 h-5 text-green-600" />}
-        headerExtra={
-          <Button onClick={addRoomType} icon={<Plus className="w-4 h-4" />}>新增房型</Button>
-        }
+        description="房型基本資料（樓層/名稱/容納人數）請到「房型與空間維護」新增或修改，這裡只設定訂價相關欄位。"
       >
         <div className="overflow-x-auto">
           <table className="w-full text-left text-sm">
             <thead className="bg-gray-50 border-b">
               <tr className="text-gray-600">
-                <th className="py-3 px-4">房型名稱</th>
-                <th className="py-3 px-4">樓層</th>
-                <th className="py-3 px-4">容納人數</th>
+                <th className="py-3 px-4">房間（樓層＋名稱＋人數）</th>
                 <th className="py-3 px-4">最多加人</th>
                 <th className="py-3 px-4">排序</th>
-                <th className="py-3 px-4">啟用</th>
                 {PRICING_TIERS.map((t) => (
                   <th key={t} className="py-3 px-4">{t}</th>
                 ))}
-                <th className="py-3 px-4"></th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
               {roomTypes.map((r) => (
                 <tr key={r.id}>
-                  <td className="p-2">
-                    <input value={r.name} onChange={(e) => updateRoomType(r.id, 'name', e.target.value)} className="w-28 px-2 py-1 border rounded" />
-                  </td>
-                  <td className="p-2">
-                    <input value={r.floor} onChange={(e) => updateRoomType(r.id, 'floor', e.target.value)} className="w-16 px-2 py-1 border rounded" placeholder="2F" />
-                  </td>
-                  <td className="p-2">
-                    <input type="number" value={r.capacity} onChange={(e) => updateRoomType(r.id, 'capacity', Number(e.target.value))} className="w-16 px-2 py-1 border rounded" />
-                  </td>
+                  <td className="p-2 text-gray-700">{r.floor ? `${r.floor}-` : ''}{r.name}（{r.capacity}人）</td>
                   <td className="p-2">
                     <input type="number" min={0} value={r.max_extra_persons ?? 0} onChange={(e) => updateRoomType(r.id, 'max_extra_persons', Number(e.target.value))} className="w-16 px-2 py-1 border rounded" title="0＝不支援加人" />
                   </td>
                   <td className="p-2">
                     <input type="number" value={r.display_order} onChange={(e) => updateRoomType(r.id, 'display_order', Number(e.target.value))} className="w-14 px-2 py-1 border rounded" />
-                  </td>
-                  <td className="p-2 text-center">
-                    <input type="checkbox" checked={r.is_active} onChange={(e) => updateRoomType(r.id, 'is_active', e.target.checked)} />
                   </td>
                   {PRICING_TIERS.map((tier) => (
                     <td key={tier} className="p-2">
@@ -750,17 +722,12 @@ export default function BookingManagement() {
                       />
                     </td>
                   ))}
-                  <td className="p-2">
-                    <button onClick={() => deleteRoomType(r.id)} className="p-1.5 text-red-500 hover:bg-red-50 rounded">
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  </td>
                 </tr>
               ))}
               {roomTypes.length === 0 && (
                 <tr>
-                  <td colSpan={7 + PRICING_TIERS.length} className="py-10 text-center text-gray-400">
-                    尚未設定房型，點右上角「新增房型」開始
+                  <td colSpan={3 + PRICING_TIERS.length} className="py-10 text-center text-gray-400">
+                    尚未設定任何「房間」類型的資料，請先到「房型與空間維護」新增
                   </td>
                 </tr>
               )}

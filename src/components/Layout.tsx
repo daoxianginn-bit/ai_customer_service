@@ -18,16 +18,22 @@ import {
   MessageSquareText,
   CalendarDays,
   BookOpen,
+  Variable,
+  DoorOpen,
+  Package,
 } from 'lucide-react';
 
 const topItems = [
   { to: '/', label: '首頁總覽', icon: LayoutDashboard },
   { to: '/ai-service-center', label: 'AI客服中心', icon: Headphones },
-  { to: '/standard-messages', label: '公版訊息管理', icon: MessageSquareText },
+  { to: '/standard-messages', label: 'LINE 自定訊息流程', icon: MessageSquareText },
+  { to: '/message-variables', label: '訊息變數資料維護', icon: Variable },
   { to: '/broadcast', label: '客製訊息發送', icon: Send },
   { to: '/orders', label: '訂單管理', icon: ClipboardList },
   { to: '/room-calendar', label: '房況/行事曆', icon: CalendarDays },
+  { to: '/room-spaces', label: '房型與空間維護', icon: DoorOpen },
   { to: '/room-pricing', label: '房型與報價', icon: Calculator },
+  { to: '/consumables', label: '耗材維護', icon: Package },
   { to: '/customers', label: '客戶資料', icon: Users },
   { to: '/knowledge-base', label: 'AI知識庫', icon: BookOpen },
 ];

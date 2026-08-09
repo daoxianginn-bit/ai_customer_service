@@ -5,6 +5,8 @@ import OpenAI from 'openai';
 import fetch from 'node-fetch';
 import crypto from 'crypto';
 import { computeMultiNightQuote } from '../../src/lib/bookingEngine';
+import { buildMergeFields, MessageVariable } from '../../src/lib/messageVariables';
+import { bookingStatusLabel, OCCUPYING_STATUSES } from '../../src/lib/bookingStatus';
 
 const supabase = createClient(
   process.env.SUPABASE_URL || '',
@@ -77,14 +79,22 @@ export const handler: Handler = async (event) => {
       // 2. 獲取當前狀態
       const { data: userState } = await supabase.from('user_states').select('*').eq('line_user_id', userId).single();
       let nickname = userState?.nickname || null;
+      let avatarUrl = userState?.avatar_url || null;
 
-      // 聯絡人紀錄：暱稱只在還沒抓過時才呼叫 LINE Profile API（之後都沿用快取，避免每則訊息都打 API），
-      // 但每則訊息都更新 last_message_at，讓「客製訊息發送」能查到所有聊過天的人，不限於有轉真人/訂房過的。
+      // 聯絡人紀錄：暱稱/大頭貼只在還沒抓過時才呼叫 LINE Profile API（之後都沿用快取，避免每則訊息都打 API），
+      // 但每則訊息都更新 last_message_at，讓「客製訊息發送」/「客戶資料」能查到所有聊過天的人，不限於有轉真人/訂房過的。
       if (!nickname) {
-        try { const p = await lineClient.getProfile(userId); nickname = p.displayName; } catch (e) {}
+        try { const p = await lineClient.getProfile(userId); nickname = p.displayName; avatarUrl = p.pictureUrl || null; } catch (e) {}
       }
       try {
-        await supabase.from('user_states').upsert({ line_user_id: userId, nickname, last_message_at: new Date().toISOString() });
+        await supabase.from('user_states').upsert({
+          line_user_id: userId,
+          nickname,
+          avatar_url: avatarUrl,
+          last_message_at: new Date().toISOString(),
+          // first_message_at 只在第一次見到這個 userId 時寫入一次，之後 upsert 不會再覆蓋
+          ...(userState ? {} : { first_message_at: new Date().toISOString() }),
+        });
       } catch (e) {
         console.error('[Contacts] Failed to upsert user_states:', e);
       }
@@ -151,7 +161,7 @@ export const handler: Handler = async (event) => {
 
         if (matchedFlow) {
           try {
-            await startBookingFlow(lineClient, lineEvent, settings, userId, nickname, matchedFlow, existingSession);
+            await startBookingFlow(lineClient, lineEvent, settings, userId, nickname, matchedFlow);
           } catch (e: any) {
             console.error('[Booking] start flow failed:', e.message);
           }
@@ -360,7 +370,8 @@ function pickByLabelHeuristic(collected: Record<string, string>, allFields: Flow
 
 async function fetchBookingData() {
   const [rt, rp, rep, wp, wpp, epr, dr, promo] = await Promise.all([
-    supabase.from('room_types').select('*'),
+    // 只抓「房間」類型：其他類型（例如公共空間）不能訂房，不該進到報價引擎
+    supabase.from('room_types').select('*').eq('type', '房間'),
     supabase.from('room_pricing').select('*'),
     supabase.from('room_extra_person_pricing').select('*'),
     supabase.from('whole_house_packages').select('*'),
@@ -417,19 +428,13 @@ function mergeTemplate(template: string, fields: Record<string, string>): string
   return result;
 }
 
-function toSlashDate(isoDate: string | null | undefined): string {
-  return (isoDate || '').replace(/-/g, '/');
+async function fetchMessageVariables(): Promise<MessageVariable[]> {
+  const { data } = await supabase.from('message_variables').select('variable_name, source, field_key').order('display_order');
+  return (data as MessageVariable[]) || [];
 }
 
-function bookingStatusLabel(status: string): string {
-  switch (status) {
-    case 'inquiring': return '詢問中';
-    case 'pending_confirmation': return '待確認';
-    case 'confirmed': return '已確認';
-    case 'cancelled': return '已取消';
-    case 'pending_manual_conflict': return '待人工確認（檔期衝突）';
-    default: return status;
-  }
+function toSlashDate(isoDate: string | null | undefined): string {
+  return (isoDate || '').replace(/-/g, '/');
 }
 
 // 鏡射寫入 Google「報價」試算表（盡力而為，失敗不影響資料庫端的訂房流程）
@@ -467,7 +472,8 @@ async function mirrorBookingToSheet(settings: any, booking: any) {
   }
 }
 
-// 不同顧客訂到同一天/同房型（或跟包棟）衝突檢查，只比對狀態＝已確認的訂單。
+// 不同顧客訂到同一天/同房型（或跟包棟）衝突檢查，比對所有「房間已鎖定」的狀態（待預定～已確認，
+// 含系統待人工確認），不只是已確認，避免同一天有兩筆都還在收訂金階段的訂單互相沒偵測到衝突。
 async function checkBookingConflict(
   target: { checkin_date: string; checkout_date: string; whole_house: boolean; roomTypeIdsByNight: Map<string, string[]> },
   excludeBookingId: string
@@ -475,7 +481,7 @@ async function checkBookingConflict(
   const { data: overlapping } = await supabase
     .from('bookings')
     .select('id, whole_house')
-    .eq('status', 'confirmed')
+    .in('status', OCCUPYING_STATUSES)
     .neq('id', excludeBookingId)
     .lt('checkin_date', target.checkout_date)
     .gt('checkout_date', target.checkin_date);
@@ -530,13 +536,22 @@ async function startBookingFlow(
   settings: any,
   userId: string,
   nickname: string | null,
-  flow: FlowDef,
-  existingSession: BookingSession | null
+  flow: FlowDef
 ) {
+  // 用資料庫的實際訂單狀態判斷是否接續舊訂單，不能只看 session——
+  // session 30 分鐘沒回覆就會過期消失，但客人的舊訂單可能還卡在
+  // inquiring/quoted，這時若客人重新輸入關鍵字，
+  // 只憑 session 判斷會誤判成全新訂單，產生同一位客人重複的訂單編號。
   let bookingId: string | null = null;
-  if (existingSession?.bookingId) {
-    const { data: existingBooking } = await supabase.from('bookings').select('id, status').eq('id', existingSession.bookingId).maybeSingle();
-    if (existingBooking && existingBooking.status === 'inquiring') bookingId = existingBooking.id;
+  const { data: latestBooking } = await supabase
+    .from('bookings')
+    .select('id, status')
+    .eq('line_user_id', userId)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (latestBooking && (latestBooking.status === 'inquiring' || latestBooking.status === 'quoted')) {
+    bookingId = latestBooking.id;
   }
 
   let resolvedNickname = nickname;
@@ -549,7 +564,7 @@ async function startBookingFlow(
     bookingId = data.id;
     mirrorBookingToSheet(settings, data).catch(() => {});
   } else {
-    await supabase.from('bookings').update({ flow_id: flow.id }).eq('id', bookingId);
+    await supabase.from('bookings').update({ flow_id: flow.id, status: 'inquiring' }).eq('id', bookingId);
   }
 
   const firstStep = flow.steps.find((s) => s.step_order === 1);
@@ -742,7 +757,7 @@ async function finishBookingFlow(
         whole_house: useWholeHouse,
         total_amount: total,
         room_type_label: roomTypeLabel,
-        status: 'pending_confirmation',
+        status: 'quoted',
         collected_answers: collected,
         updated_at: new Date().toISOString(),
       })
@@ -753,13 +768,15 @@ async function finishBookingFlow(
 
     mirrorBookingToSheet(settings, updatedBooking).catch(() => {});
 
-    const quoteMessage = mergeTemplate(settings.booking_quote_message || '', {
-      入住日期: toSlashDate(checkinIso),
-      退房日期: toSlashDate(checkoutIso),
-      人數: String(headcount),
-      是否包棟: useWholeHouse ? '是' : '否',
-      總金額: total.toLocaleString(),
-    });
+    const quoteVariables = await fetchMessageVariables();
+    const quoteMessage = mergeTemplate(
+      settings.booking_quote_message || '',
+      buildMergeFields(quoteVariables, {
+        booking: updatedBooking,
+        customer: { nickname, line_user_id: userId },
+        settings,
+      })
+    );
 
     await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: quoteMessage });
     await logConversation(userId, nickname, 'outbound', quoteMessage, 'system');
@@ -845,7 +862,7 @@ async function handleBookingConfirmation(
       try {
         await lineClient.pushMessage(id, {
           type: 'text',
-          text: `⚠️ 檔期衝突通知：【${booking.name || ''}】想確認 ${toSlashDate(booking.checkin_date)}~${toSlashDate(booking.checkout_date)} 訂房，但已有其他「已確認」訂單日期/房型重疊，請人工核實實際空房狀況並跟客人聯繫。`,
+          text: `⚠️ 檔期衝突通知：【${booking.name || ''}】想確認 ${toSlashDate(booking.checkin_date)}~${toSlashDate(booking.checkout_date)} 訂房，但已有其他訂單日期/房型重疊，請人工核實實際空房狀況並跟客人聯繫。`,
         });
       } catch {}
     }
@@ -853,8 +870,10 @@ async function handleBookingConfirmation(
     return;
   }
 
+  // 客戶口頭確認、房間鎖定、匯款資訊已送出，但實際匯款尚未核實，所以是「待預定」不是「已預定」；
+  // 之後管理員核對到真的收到訂金匯款，要在「訂單管理」手動改成「已預定」並填入匯款末5碼。
   const nowIso = new Date().toISOString();
-  const { data: confirmed } = await supabase.from('bookings').update({ status: 'confirmed', reserved_at: nowIso, updated_at: nowIso }).eq('id', booking.id).select().single();
+  const { data: confirmed } = await supabase.from('bookings').update({ status: 'awaiting_deposit', reserved_at: nowIso, updated_at: nowIso }).eq('id', booking.id).select().single();
 
   if (!quote.useWholeHouse && quote.roomNights?.length) {
     const rows = quote.roomNights.flatMap((rn) => rn.roomTypeIds.map((roomTypeId) => ({ booking_id: booking.id, night_date: rn.date, room_type_id: roomTypeId })));
@@ -880,17 +899,29 @@ async function handleBookingConfirmation(
     }
   }
 
-  const confirmMessage = mergeTemplate(settings.booking_confirm_message || '', {
-    姓名: booking.name || '',
-    入住日期: toSlashDate(booking.checkin_date),
-    退房日期: toSlashDate(booking.checkout_date),
-    是否包棟: quote.useWholeHouse ? '是' : '否',
-    人數: String(booking.headcount ?? ''),
-    大人小孩: formatAdultsKids(booking.adults, booking.kids, booking.infants),
-    總金額: quote.total.toLocaleString(),
-    訂金: Number.isFinite(depositNumber) ? depositNumber.toLocaleString() : '（請洽真人客服確認金額）',
-    匯款日時間: computePaymentDeadline(),
+  const confirmVariables = await fetchMessageVariables();
+  const depositResolved = Number.isFinite(depositNumber) ? depositNumber : null;
+  const confirmFields = buildMergeFields(confirmVariables, {
+    booking: {
+      ...booking,
+      whole_house: quote.useWholeHouse,
+      total_amount: quote.total,
+      deposit: depositResolved,
+    },
+    customer: { nickname, line_user_id: userId },
+    settings,
   });
+  // 訂金抓不到金額時，顯示提示文字而不是空白，比對照表機械式算出來的空字串更友善。
+  if (depositResolved === null) {
+    for (const v of confirmVariables) {
+      if (v.source === 'booking' && v.field_key === 'deposit') confirmFields[v.variable_name] = '（請洽真人客服確認金額）';
+    }
+  }
+  // 匯款日時間是系統即時算出來的截止時間，不是任何資料表的欄位，永遠由這裡直接帶入，
+  // 不受「訊息變數資料維護」頁面的設定影響（就算被刪除或改名也一樣會生效）。
+  confirmFields['匯款日時間'] = computePaymentDeadline();
+
+  const confirmMessage = mergeTemplate(settings.booking_confirm_message || '', confirmFields);
 
   await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: confirmMessage });
   await logConversation(userId, nickname, 'outbound', confirmMessage, 'system');

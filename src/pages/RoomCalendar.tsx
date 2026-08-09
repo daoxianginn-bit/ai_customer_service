@@ -2,20 +2,20 @@ import { useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import { CalendarDays, ChevronLeft, ChevronRight } from 'lucide-react';
 import { PageHeader } from '../components/ui';
+import { OCCUPYING_STATUSES, bookingStatusLabel } from '../lib/bookingStatus';
 
 type CellInfo = { status: string; guestName: string; bookingId: string };
 
+// 行事曆用實心色塊呈現，跟 StatusBadge 的淺色徽章不同視覺語言，這裡單獨定義。
 const STATUS_COLOR: Record<string, string> = {
+  awaiting_deposit: 'bg-yellow-400',
+  reserved: 'bg-purple-500',
+  awaiting_balance: 'bg-orange-500',
   confirmed: 'bg-green-500',
-  pending_confirmation: 'bg-yellow-400',
-  pending_manual_conflict: 'bg-orange-500',
+  pending_manual_conflict: 'bg-red-500',
 };
 
-const STATUS_LABEL: Record<string, string> = {
-  confirmed: '已確認',
-  pending_confirmation: '待確認',
-  pending_manual_conflict: '待人工確認',
-};
+const CALENDAR_STATUSES = [...OCCUPYING_STATUSES]; // awaiting_deposit/reserved/awaiting_balance/confirmed/pending_manual_conflict
 
 function pad(n: number): string {
   return String(n).padStart(2, '0');
@@ -55,13 +55,13 @@ export default function RoomCalendar() {
   const fetchMonthData = async () => {
     setLoading(true);
     try {
-      const { data: rt } = await supabase.from('room_types').select('*').eq('is_active', true).order('display_order');
+      const { data: rt } = await supabase.from('room_types').select('*').eq('is_active', true).eq('type', '房間').order('display_order');
       setRoomTypes(rt || []);
 
       const { data: bookings } = await supabase
         .from('bookings')
         .select('id, name, nickname, whole_house, status, checkin_date, checkout_date')
-        .in('status', ['confirmed', 'pending_confirmation', 'pending_manual_conflict'])
+        .in('status', [...CALENDAR_STATUSES, 'quoted'])
         .lte('checkin_date', monthEndIso)
         .gt('checkout_date', monthStartIso);
 
@@ -79,7 +79,7 @@ export default function RoomCalendar() {
             wholeHouseMap[cursor] = { status: b.status, guestName, bookingId: b.id };
             cursor = addDays(cursor, 1);
           }
-        } else if (b.status === 'pending_confirmation') {
+        } else if (b.status === 'quoted') {
           pendingList.push(b);
         }
       }
@@ -134,10 +134,10 @@ export default function RoomCalendar() {
       />
 
       <div className="flex flex-wrap gap-4 text-xs text-gray-500">
-        {Object.entries(STATUS_LABEL).map(([status, label]) => (
+        {CALENDAR_STATUSES.map((status) => (
           <span key={status} className="flex items-center gap-1.5">
             <span className={`w-3 h-3 rounded ${STATUS_COLOR[status]}`} />
-            {label}
+            {bookingStatusLabel(status)}
           </span>
         ))}
       </div>
@@ -167,7 +167,7 @@ export default function RoomCalendar() {
                   const info = wholeHouseByDate[iso];
                   return (
                     <td key={d} className="border-b border-l p-0.5 text-center">
-                      {info ? <div className={`h-6 rounded ${STATUS_COLOR[info.status] || 'bg-gray-300'}`} title={`${info.guestName}（${STATUS_LABEL[info.status]}）`} /> : <div className="h-6" />}
+                      {info ? <div className={`h-6 rounded ${STATUS_COLOR[info.status] || 'bg-gray-300'}`} title={`${info.guestName}（${bookingStatusLabel(info.status)}）`} /> : <div className="h-6" />}
                     </td>
                   );
                 })}
@@ -187,7 +187,7 @@ export default function RoomCalendar() {
                       return (
                         <td key={d} className="border-b border-l p-0.5 text-center">
                           {info ? (
-                            <div className={`h-6 rounded ${STATUS_COLOR[info.status] || 'bg-gray-300'}`} title={`${info.guestName}（${STATUS_LABEL[info.status]}）`} />
+                            <div className={`h-6 rounded ${STATUS_COLOR[info.status] || 'bg-gray-300'}`} title={`${info.guestName}（${bookingStatusLabel(info.status)}）`} />
                           ) : blockedByWholeHouse ? (
                             <div className="h-6 rounded bg-purple-100" title="包棟佔用" />
                           ) : (
@@ -206,8 +206,8 @@ export default function RoomCalendar() {
 
       {unassignedPending.length > 0 && (
         <div className="bg-white rounded-xl shadow-sm border p-6">
-          <h3 className="font-bold text-gray-800 mb-1">本月待確認訂單（尚未鎖定房型）</h3>
-          <p className="text-xs text-gray-400 mb-3">個別租房要等顧客確認訂房後才會鎖定實際房型，這裡先列出還在等待確認、月曆上暫時看不到的訂單。</p>
+          <h3 className="font-bold text-gray-800 mb-1">本月已報價訂單（尚未鎖定房型）</h3>
+          <p className="text-xs text-gray-400 mb-3">個別租房要等顧客確認訂房、進入「待預定」以後才會鎖定實際房型，這裡先列出還在等待客戶回覆、月曆上暫時看不到的訂單。</p>
           <div className="space-y-1 text-sm text-gray-600">
             {unassignedPending.map((b) => (
               <div key={b.id}>・{b.name || b.nickname || '未取得'}（{String(b.checkin_date).replace(/-/g, '/')} ~ {String(b.checkout_date).replace(/-/g, '/')}）</div>

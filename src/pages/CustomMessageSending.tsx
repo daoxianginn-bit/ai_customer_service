@@ -3,6 +3,7 @@ import { supabase } from '../lib/supabase';
 import { Search, Send, Plus, Trash2, Pencil, Gauge, RotateCcw, Save, Eye, Eraser, User } from 'lucide-react';
 import MessageTemplateEditor from '../components/MessageTemplateEditor';
 import { PageHeader, Button, Modal, ConfirmDialog, StatusBadge } from '../components/ui';
+import { BOOKING_STATUS_OPTIONS } from '../lib/bookingStatus';
 
 interface Template {
   id: string;
@@ -10,19 +11,26 @@ interface Template {
   body: string;
 }
 
+interface OrderRow {
+  id: string;
+  line_user_id: string;
+  order_number: string;
+  name: string;
+  checkin_date: string;
+  checkout_date: string;
+  headcount: string;
+  room_type_label: string;
+  status: string;
+  total_amount: string;
+  deposit: string;
+  balance_due: string;
+  fields: Record<string, string>;
+}
+
 const MAX_BATCH_SEND = 50;
 const PAGE_SIZE = 10;
 
-const QUICK_INSERT_FIELDS = ['客戶姓名', '入住日期', '退房日期', '入住人數', '房型', '總報價', '訂金', '尾款', '禮金內容', '民宿名稱', '客服LINE'];
-
-const STATUS_OPTIONS = [
-  { value: '', label: '全部狀態' },
-  { value: 'inquiring', label: '待報價' },
-  { value: 'pending_confirmation', label: '待確認' },
-  { value: 'confirmed', label: '已確認' },
-  { value: 'cancelled', label: '已取消' },
-  { value: 'pending_manual_conflict', label: '待人工確認' },
-];
+const STATUS_OPTIONS = [{ value: '', label: '全部狀態' }, ...BOOKING_STATUS_OPTIONS.map((s) => ({ value: s.value, label: s.label }))];
 
 const QUICK_FILTER_CHIPS = STATUS_OPTIONS.filter((s) => s.value);
 
@@ -58,7 +66,8 @@ export default function CustomMessageSending() {
   const [roomTypeOptions, setRoomTypeOptions] = useState<string[]>([]);
 
   const [querying, setQuerying] = useState(false);
-  const [rows, setRows] = useState<Record<string, string>[]>([]);
+  const [rows, setRows] = useState<OrderRow[]>([]);
+  const [variables, setVariables] = useState<string[]>([]);
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   const [page, setPage] = useState(0);
 
@@ -86,7 +95,7 @@ export default function CustomMessageSending() {
   };
 
   const fetchRoomTypeOptions = async () => {
-    const { data } = await supabase.from('room_types').select('name').order('display_order');
+    const { data } = await supabase.from('room_types').select('name').eq('type', '房間').order('display_order');
     setRoomTypeOptions((data || []).map((r: any) => r.name));
   };
 
@@ -99,8 +108,8 @@ export default function CustomMessageSending() {
     }
   };
 
-  const rowKey = (row: Record<string, string>, index: number) => row['訂單編號'] || row['LINE_USER_ID'] || `row-${index}`;
-  const displayName = (row: Record<string, string>) => row['客戶姓名'] || '（未知）';
+  const rowKey = (row: OrderRow, index: number) => row.id || row.line_user_id || `row-${index}`;
+  const displayName = (row: OrderRow) => row.name || '（未知）';
 
   const runQuery = async (overrideStatus?: string) => {
     setQuerying(true);
@@ -115,6 +124,7 @@ export default function CustomMessageSending() {
         roomType,
       });
       setRows(result.rows || []);
+      setVariables(result.variables || []);
     } catch (e: any) {
       alert(`查詢失敗：${e.message}`);
     } finally {
@@ -172,7 +182,7 @@ export default function CustomMessageSending() {
     return result;
   };
 
-  const previewMessage = previewCustomer ? mergeTemplateLocal(draftBody, previewCustomer) : draftBody;
+  const previewMessage = previewCustomer ? mergeTemplateLocal(draftBody, previewCustomer.fields) : draftBody;
 
   const openNewTemplate = () => {
     setEditingTemplate({ title: '', body: '' });
@@ -253,8 +263,8 @@ export default function CustomMessageSending() {
     setSending(true);
     try {
       const recipients = selectedRows
-        .filter((r) => r['LINE_USER_ID'])
-        .map((r) => ({ lineUserId: r['LINE_USER_ID'], fields: r }));
+        .filter((r) => r.line_user_id)
+        .map((r) => ({ lineUserId: r.line_user_id, fields: r.fields }));
       const result = await callCustomMessagesFunction('send', { recipients, template: draftBody });
       const ok = (result.results || []).filter((r: any) => r.ok).length;
       const fail = (result.results || []).length - ok;
@@ -376,13 +386,13 @@ export default function CustomMessageSending() {
                           <input type="checkbox" checked={selectedKeys.has(key)} onChange={() => toggleSelected(key)} />
                         </td>
                         <td className="py-2 px-3">{displayName(r)}</td>
-                        <td className="py-2 px-3 whitespace-nowrap">{r['入住日期']}</td>
-                        <td className="py-2 px-3">{r['入住人數']}</td>
-                        <td className="py-2 px-3">{r['房型']}</td>
+                        <td className="py-2 px-3 whitespace-nowrap">{r.checkin_date}</td>
+                        <td className="py-2 px-3">{r.headcount}</td>
+                        <td className="py-2 px-3">{r.room_type_label}</td>
                         <td className="py-2 px-3">
-                          {r['狀態代碼'] ? <StatusBadge status={r['狀態代碼']} /> : <span className="text-gray-400">-</span>}
+                          {r.status ? <StatusBadge status={r.status} /> : <span className="text-gray-400">-</span>}
                         </td>
-                        <td className="py-2 px-3 whitespace-nowrap">{r['總報價'] ? `NT$ ${Number(r['總報價']).toLocaleString()}` : ''}</td>
+                        <td className="py-2 px-3 whitespace-nowrap">{r.total_amount ? `NT$ ${Number(r.total_amount).toLocaleString()}` : ''}</td>
                       </tr>
                     );
                   })}
@@ -427,7 +437,7 @@ export default function CustomMessageSending() {
               )}
             </div>
 
-            <MessageTemplateEditor value={draftBody} onChange={setDraftBody} placeholders={QUICK_INSERT_FIELDS} rows={14} placeholder="輸入訊息內容，或點下方快捷欄位插入合併欄位" />
+            <MessageTemplateEditor value={draftBody} onChange={setDraftBody} placeholders={variables} rows={14} placeholder="輸入訊息內容，或點下方快捷欄位插入合併欄位" />
 
             <div className="flex flex-wrap gap-2 pt-1">
               <button onClick={saveDraftAsTemplate} className="flex items-center gap-1 px-3 py-1.5 border rounded-lg text-xs text-gray-600 hover:bg-gray-50">
@@ -449,14 +459,13 @@ export default function CustomMessageSending() {
             <h3 className="font-bold text-gray-800 text-sm">3. 發送預覽</h3>
 
             {previewCustomer ? (
-              <div className="border rounded-lg p-3 text-xs space-y-1 bg-gray-50">
-                <div className="flex justify-between"><span className="text-gray-400">客戶姓名</span><span className="font-medium text-gray-800">{previewCustomer['客戶姓名']}</span></div>
-                <div className="flex justify-between"><span className="text-gray-400">入住日期</span><span>{previewCustomer['入住日期']}</span></div>
-                <div className="flex justify-between"><span className="text-gray-400">入住人數</span><span>{previewCustomer['入住人數']}</span></div>
-                <div className="flex justify-between"><span className="text-gray-400">房型</span><span>{previewCustomer['房型']}</span></div>
-                <div className="flex justify-between"><span className="text-gray-400">總報價</span><span>{previewCustomer['總報價'] ? `NT$ ${Number(previewCustomer['總報價']).toLocaleString()}` : '-'}</span></div>
-                <div className="flex justify-between"><span className="text-gray-400">訂金</span><span>{previewCustomer['訂金'] ? `NT$ ${Number(previewCustomer['訂金']).toLocaleString()}` : '-'}</span></div>
-                <div className="flex justify-between"><span className="text-gray-400">尾款</span><span>{previewCustomer['尾款'] ? `NT$ ${Number(previewCustomer['尾款']).toLocaleString()}` : '-'}</span></div>
+              <div className="border rounded-lg p-3 text-xs space-y-1 bg-gray-50 max-h-48 overflow-y-auto">
+                {Object.entries(previewCustomer.fields).map(([key, value]) => (
+                  <div key={key} className="flex justify-between gap-2">
+                    <span className="text-gray-400 shrink-0">{key}</span>
+                    <span className="text-right break-all">{value || '-'}</span>
+                  </div>
+                ))}
               </div>
             ) : (
               <p className="text-xs text-gray-400">勾選左側名單中的顧客，這裡會即時預覽套版後的訊息內容。</p>
@@ -516,7 +525,7 @@ export default function CustomMessageSending() {
               <MessageTemplateEditor
                 value={editingTemplate.body}
                 onChange={(v) => setEditingTemplate({ ...editingTemplate, body: v })}
-                placeholders={QUICK_INSERT_FIELDS}
+                placeholders={variables}
                 rows={10}
               />
             </div>
@@ -552,7 +561,7 @@ export default function CustomMessageSending() {
             </div>
             <div className="max-h-40 overflow-y-auto border rounded-lg p-3 space-y-1">
               {selectedRows.map((r, i) => (
-                <div key={i}>・{displayName(r)}{r['入住日期'] ? `（入住 ${r['入住日期']}）` : ''}</div>
+                <div key={i}>・{displayName(r)}{r.checkin_date ? `（入住 ${r.checkin_date}）` : ''}</div>
               ))}
             </div>
           </div>

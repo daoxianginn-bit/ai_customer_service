@@ -2,6 +2,7 @@ import { Handler } from '@netlify/functions';
 import { Client } from '@line/bot-sdk';
 import { createClient } from '@supabase/supabase-js';
 import fetch from 'node-fetch';
+import { buildMergeFields, MessageVariable } from '../../src/lib/messageVariables';
 
 // ========================================================================
 // 客製訊息發送（客製訊息發送頁）專用 function：
@@ -18,17 +19,6 @@ const supabase = createClient(process.env.SUPABASE_URL || '', process.env.SUPABA
 // 單次發送人數上限：同步逐一 push，人太多容易超過 Netlify function 執行時間上限被砍掉，
 // 前端跟後端都用這個常數擋，超過就請對方分批送。
 const MAX_BATCH_SEND = 50;
-
-function bookingStatusLabel(status: string): string {
-  switch (status) {
-    case 'inquiring': return '詢問中';
-    case 'pending_confirmation': return '待確認';
-    case 'confirmed': return '已確認';
-    case 'cancelled': return '已取消';
-    case 'pending_manual_conflict': return '待人工確認（檔期衝突）';
-    default: return status;
-  }
-}
 
 export const handler: Handler = async (event) => {
   if (event.httpMethod !== 'POST') return { statusCode: 405, body: 'Method Not Allowed' };
@@ -56,14 +46,14 @@ export const handler: Handler = async (event) => {
     }
 
     if (body.action === 'list') {
-      const { headers, rows } = await listOrders(settings, {
+      const { variables, rows } = await listOrders(settings, {
         keyword: body.keyword,
         startDate: body.startDate,
         endDate: body.endDate,
         status: body.status,
         roomType: body.roomType,
       });
-      return { statusCode: 200, body: JSON.stringify({ headers, rows }) };
+      return { statusCode: 200, body: JSON.stringify({ variables, rows }) };
     }
 
     if (body.action === 'send') {
@@ -108,8 +98,11 @@ function mergeTemplate(template: string, fields: Record<string, string>): string
 }
 
 // ========================================================================
-// 訂單清單查詢：以 `bookings` 為主要來源，供「客製訊息發送」「訂單管理」共用的查詢邏輯。
-// 合併欄位裡的 [民宿名稱]/[客服LINE]/[禮金內容] 是全站共用的固定值，來自 settings，每一列都會帶上。
+// 訂單清單查詢：以 `bookings` 為主要來源，供「客製訊息發送」共用的查詢邏輯。
+// 每一列同時回傳：
+// - 固定的顯示/識別欄位（id/line_user_id/name/checkin_date/...）：table 欄位跟發送對象一定要靠這些穩定
+//   的 key 才找得到，不會因為管理員在「訊息變數資料維護」改名/刪除變數而跟著壞掉。
+// - fields：依「訊息變數資料維護」目前設定的變數清單，動態算出來的合併欄位（給範本 [變數名稱] 套用）。
 // ========================================================================
 
 const MAX_ORDERS = 200; // 避免一次查太多筆，之後若要看更多可以再加分頁
@@ -122,7 +115,12 @@ interface OrderFilters {
   roomType?: string;
 }
 
-async function listOrders(settings: any, filters: OrderFilters): Promise<{ headers: string[]; rows: Record<string, string>[] }> {
+async function fetchMessageVariables(): Promise<MessageVariable[]> {
+  const { data } = await supabase.from('message_variables').select('variable_name, source, field_key').order('display_order');
+  return (data as MessageVariable[]) || [];
+}
+
+async function listOrders(settings: any, filters: OrderFilters): Promise<{ variables: string[]; rows: any[] }> {
   let query = supabase.from('bookings').select('*').order('created_at', { ascending: false }).limit(MAX_ORDERS);
 
   if (filters.startDate) query = query.gte('checkin_date', filters.startDate);
@@ -138,33 +136,41 @@ async function listOrders(settings: any, filters: OrderFilters): Promise<{ heade
   const { data, error } = await query;
   if (error) throw new Error(error.message || '查詢訂單清單失敗');
 
-  const headers = [
-    'LINE_USER_ID', '訂單編號', '客戶姓名', '入住日期', '退房日期', '入住人數', '房型', '訂單狀態',
-    '總報價', '訂金', '尾款', '電話', '禮金內容', '民宿名稱', '客服LINE',
-  ];
-  const rows = (data || []).map((b: any) => {
+  const bookings = data || [];
+  const variables = await fetchMessageVariables();
+
+  const userIds = Array.from(new Set(bookings.map((b: any) => b.line_user_id).filter(Boolean)));
+  let customerByUser: Record<string, any> = {};
+  if (userIds.length) {
+    const { data: states } = await supabase.from('user_states').select('line_user_id, nickname, last_message_at, first_message_at').in('line_user_id', userIds);
+    for (const s of states || []) customerByUser[s.line_user_id] = s;
+  }
+
+  const rows = bookings.map((b: any) => {
     const balanceDue = b.total_amount != null ? b.total_amount - (b.deposit ?? 0) : null;
+    const fields = buildMergeFields(variables, {
+      booking: b,
+      customer: customerByUser[b.line_user_id] || { nickname: b.nickname, line_user_id: b.line_user_id },
+      settings,
+    });
     return {
-      LINE_USER_ID: b.line_user_id || '',
-      訂單編號: b.order_number || '',
-      客戶姓名: b.name || b.nickname || '',
-      入住日期: b.checkin_date ? String(b.checkin_date).replace(/-/g, '/') : '',
-      退房日期: b.checkout_date ? String(b.checkout_date).replace(/-/g, '/') : '',
-      入住人數: b.headcount != null ? String(b.headcount) : '',
-      房型: b.room_type_label || (b.whole_house ? '包棟' : ''),
-      訂單狀態: bookingStatusLabel(b.status),
-      狀態代碼: b.status,
-      總報價: b.total_amount != null ? String(b.total_amount) : '',
-      訂金: b.deposit != null ? String(b.deposit) : '',
-      尾款: balanceDue != null ? String(balanceDue) : '',
-      電話: b.phone || '',
-      禮金內容: settings.booking_gift_message || '',
-      民宿名稱: settings.business_name || '',
-      客服LINE: settings.customer_service_line || '',
+      id: b.id,
+      line_user_id: b.line_user_id || '',
+      order_number: b.order_number || '',
+      name: b.name || b.nickname || '',
+      checkin_date: b.checkin_date ? String(b.checkin_date).replace(/-/g, '/') : '',
+      checkout_date: b.checkout_date ? String(b.checkout_date).replace(/-/g, '/') : '',
+      headcount: b.headcount != null ? String(b.headcount) : '',
+      room_type_label: b.room_type_label || (b.whole_house ? '包棟' : ''),
+      status: b.status,
+      total_amount: b.total_amount != null ? String(b.total_amount) : '',
+      deposit: b.deposit != null ? String(b.deposit) : '',
+      balance_due: balanceDue != null ? String(balanceDue) : '',
+      fields,
     };
   });
 
-  return { headers, rows };
+  return { variables: variables.map((v) => v.variable_name), rows };
 }
 
 // ========================================================================

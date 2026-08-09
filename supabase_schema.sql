@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS public.user_states (
     is_human_mode BOOLEAN DEFAULT false,
     last_human_interaction TIMESTAMP WITH TIME ZONE,
     last_ai_reset_at TIMESTAMP WITH TIME ZONE
-    -- last_event_id / booking_session / last_message_at 由後面的 ALTER TABLE 補齊，新舊專案都適用
+    -- last_event_id / booking_session / last_message_at / first_message_at / avatar_url 由後面的 ALTER TABLE 補齊，新舊專案都適用
 );
 
 -- 3. 事件去重表 (防止 LINE Webhook 重試導致重複回覆)
@@ -111,7 +111,14 @@ CREATE TABLE IF NOT EXISTS public.room_types (
     display_order INTEGER DEFAULT 0,
     is_active BOOLEAN DEFAULT true,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+    -- type / equipment 由後面的 ALTER TABLE 補齊，新舊專案都適用
 );
+
+-- room_types 後來加的欄位：「房型與空間維護」頁面用來管理房間/空間的基本資料。
+-- type 用自由文字（不是固定選項），預設「房間」；只有 type='房間' 的資料列會出現在「房型定價」的
+-- 訂價/訂房邏輯裡（其他 type 例如「空間」是純設施紀錄，不能訂房、不需要價格）。
+ALTER TABLE public.room_types ADD COLUMN IF NOT EXISTS type TEXT DEFAULT '房間';
+ALTER TABLE public.room_types ADD COLUMN IF NOT EXISTS equipment TEXT DEFAULT ''; -- 設備說明，自由文字
 
 CREATE TABLE IF NOT EXISTS public.room_pricing (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -127,6 +134,27 @@ CREATE TABLE IF NOT EXISTS public.room_extra_person_pricing (
     tier TEXT NOT NULL,
     price NUMERIC,
     UNIQUE (room_type_id, tier)
+);
+
+-- 耗材維護：會被用掉、需要補貨的消耗品（例如沐浴乳、衛生紙），跟床單/毛巾這類重複使用的
+-- 布巾備品分開管理（布巾備品直接寫在 room_types.equipment 說明文字裡即可，不需要庫存數量）。
+CREATE TABLE IF NOT EXISTS public.consumables (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL,
+    unit TEXT DEFAULT '', -- 單位，例如：瓶、包、捲
+    stock_quantity INTEGER DEFAULT 0,
+    restock_threshold INTEGER DEFAULT 0, -- 低於這個數字在畫面上標示「該補貨了」
+    notes TEXT DEFAULT '',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+);
+
+-- 耗材可以對應到多個房型/空間（例如衛生紙每個房間都要），房型/空間也可以對應多種耗材
+CREATE TABLE IF NOT EXISTS public.consumable_spaces (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    consumable_id UUID NOT NULL REFERENCES public.consumables(id) ON DELETE CASCADE,
+    room_type_id UUID NOT NULL REFERENCES public.room_types(id) ON DELETE CASCADE,
+    UNIQUE (consumable_id, room_type_id)
 );
 
 CREATE TABLE IF NOT EXISTS public.whole_house_packages (
@@ -226,6 +254,8 @@ ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS active_promotion_id UUID RE
 ALTER TABLE public.user_states ADD COLUMN IF NOT EXISTS last_event_id TEXT;
 ALTER TABLE public.user_states ADD COLUMN IF NOT EXISTS booking_session TEXT; -- 訂房對話流程：進行中的訂房詢問狀態（JSON），null＝目前沒有進行中的詢問
 ALTER TABLE public.user_states ADD COLUMN IF NOT EXISTS last_message_at TIMESTAMP WITH TIME ZONE; -- 最近一次跟 LINE 官方帳號互動的時間（不分是否轉真人/訂房），供「客製訊息發送」查詢聯絡人清單用
+ALTER TABLE public.user_states ADD COLUMN IF NOT EXISTS first_message_at TIMESTAMP WITH TIME ZONE; -- 第一次互動時間，只在 line-webhook.ts 第一次見到這個 line_user_id 時寫入一次，之後不會再更新
+ALTER TABLE public.user_states ADD COLUMN IF NOT EXISTS avatar_url TEXT; -- LINE 大頭貼網址，跟暱稱同時機快取（第一次互動 / 手動按「重新整理暱稱」時更新）
 
 -- 客製訊息發送：後台自訂的可重複使用訊息範本
 CREATE TABLE IF NOT EXISTS public.custom_message_templates (
@@ -234,6 +264,47 @@ CREATE TABLE IF NOT EXISTS public.custom_message_templates (
     body TEXT NOT NULL DEFAULT '',
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
 );
+
+-- 訊息變數資料維護：管理員自訂「[變數名稱]」對應到哪個資料來源的哪個欄位，
+-- LINE 自定訊息流程的罐頭訊息、客製訊息發送的範本都共用這份對照表來源算合併欄位的值。
+-- 「來源」限定訂單/客戶/民宿設定三種（對應 bookings / user_states / settings 三張表），
+-- 「欄位」也只能從該來源的白名單選，避免管理員不小心曝光不該顯示的資料庫欄位。
+CREATE TABLE IF NOT EXISTS public.message_variables (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    variable_name TEXT NOT NULL UNIQUE,
+    source TEXT NOT NULL CHECK (source IN ('booking', 'customer', 'settings')),
+    field_key TEXT NOT NULL,
+    display_order INTEGER DEFAULT 0,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+);
+
+-- 預設帶入現有系統已經在用的變數，讓既有的罐頭訊息／客製訊息範本升級後不會突然找不到變數。
+-- 「客戶姓名」跟「姓名」、「入住人數」跟「人數」、「總報價」跟「總金額」是同一個欄位的兩種命名
+-- （客製訊息發送 vs 罐頭訊息歷史上取的名字不同），兩個都保留，管理員可以自行刪除不需要的那個。
+INSERT INTO public.message_variables (variable_name, source, field_key, display_order) VALUES
+    ('訂單編號', 'booking', 'order_number', 1),
+    ('姓名', 'booking', 'name', 2),
+    ('客戶姓名', 'booking', 'name', 3),
+    ('入住日期', 'booking', 'checkin_date', 4),
+    ('退房日期', 'booking', 'checkout_date', 5),
+    ('人數', 'booking', 'headcount', 6),
+    ('入住人數', 'booking', 'headcount', 7),
+    ('大人小孩', 'booking', 'adults_kids', 8),
+    ('是否包棟', 'booking', 'whole_house', 9),
+    ('房型', 'booking', 'room_type_label', 10),
+    ('訂單狀態', 'booking', 'status', 11),
+    ('總金額', 'booking', 'total_amount', 12),
+    ('總報價', 'booking', 'total_amount', 13),
+    ('訂金', 'booking', 'deposit', 14),
+    ('尾款', 'booking', 'balance_due', 15),
+    ('電話', 'booking', 'phone', 16),
+    ('LINE暱稱', 'customer', 'nickname', 17),
+    ('LINE User ID', 'customer', 'line_user_id', 18),
+    ('禮金內容', 'settings', 'booking_gift_message', 19),
+    ('民宿名稱', 'settings', 'business_name', 20),
+    ('客服LINE', 'settings', 'customer_service_line', 21)
+ON CONFLICT (variable_name) DO NOTHING;
 
 -- 8.5 動態訂房流程（可新增多組流程，各自有觸發關鍵字與最多 5 個步驟）
 -- 每個步驟送出 message_template 給顧客，等顧客回覆後依 fields 定義擷取 1~3 個答案；
@@ -289,9 +360,45 @@ CREATE TABLE IF NOT EXISTS public.bookings (
 ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS order_number TEXT UNIQUE; -- 建立訂單時產生，格式 YYYYMMDD-XXXX，供客服人員與顧客溝通時使用的可讀編號
 ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS room_type_label TEXT; -- 算完報價時寫入的人類可讀房型摘要（包棟＝「包棟」，個別租房＝房型名稱組合），列表顯示用，不用每次 join booking_room_nights
 ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS notes TEXT; -- 訂單管理頁的管理員備註，系統不會自動寫入
+ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS remit_last5 TEXT; -- 匯款末5碼，狀態改成「已預定」時訂單管理頁會要求填寫（僅前端表單驗證，不是資料庫層級限制，避免擋到 LINE 自動流程寫入）
+
+-- 訂單狀態改版（10 種狀態，取代原本 5 種）：
+-- 待報價 inquiring／已報價 quoted／待預定 awaiting_deposit／已預定 reserved／待收尾款 awaiting_balance／
+-- 已確認 confirmed／待退款 awaiting_refund／已退款 refunded／已取消 cancelled（沒收過款、不需退款的取消）／
+-- 待人工確認 pending_manual_conflict（系統偵測到檔期衝突，非管理員手動可選狀態，LINE 自動流程專用）。
+-- 既有資料先轉換再套用新限制，避免既有訂單違反新的 CHECK：
+-- 舊 pending_confirmation（報價已送出，等客戶回覆）→ 新 quoted（意思相同）
+-- 舊 confirmed（客戶已回「是」，鎖房並發送匯款資訊，不代表真的收到款項）→ 新 reserved
+--   （沿用「已收到訂金」的既有語意——這批舊資料是回填歷史訂單時，依「訂金付款日有無填寫」判斷已收訂金才標記
+--   confirmed，所以轉成 reserved 最接近事實；LINE 自動流程之後改成同一個時間點寫入 awaiting_deposit，
+--   等後台人工核對實際匯款後再手動改成 reserved，兩者定義才會一致）。
+-- 順序很重要：先把舊的 CHECK 限制拿掉，UPDATE 才能把資料改成新的狀態代碼（新代碼在舊限制下是
+-- 不合法的值，UPDATE 若在拿掉舊限制之前執行會直接違反舊 CHECK 失敗），最後才套用新的限制。
+DO $$
+DECLARE
+  con_name text;
+BEGIN
+  SELECT conname INTO con_name
+  FROM pg_constraint
+  WHERE conrelid = 'public.bookings'::regclass AND contype = 'c' AND pg_get_constraintdef(oid) LIKE '%status%';
+  IF con_name IS NOT NULL THEN
+    EXECUTE format('ALTER TABLE public.bookings DROP CONSTRAINT %I', con_name);
+  END IF;
+END $$;
+
+UPDATE public.bookings SET status = 'quoted' WHERE status = 'pending_confirmation';
+UPDATE public.bookings SET status = 'reserved' WHERE status = 'confirmed';
+
+ALTER TABLE public.bookings ADD CONSTRAINT bookings_status_check CHECK (status IN (
+  'inquiring', 'quoted', 'awaiting_deposit', 'reserved', 'awaiting_balance',
+  'confirmed', 'awaiting_refund', 'refunded', 'cancelled', 'pending_manual_conflict'
+));
+DROP INDEX IF EXISTS idx_bookings_confirmed_dates; -- 舊索引，條件只認舊的 'confirmed' 狀態，被下面新的取代
 
 CREATE INDEX IF NOT EXISTS idx_bookings_user ON public.bookings(line_user_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_bookings_confirmed_dates ON public.bookings(checkin_date, checkout_date) WHERE status = 'confirmed';
+-- 「佔用中」的狀態（房間已鎖定、還沒到取消/退款的訂單），供檔期衝突檢查跟房況行事曆使用
+CREATE INDEX IF NOT EXISTS idx_bookings_occupying_dates ON public.bookings(checkin_date, checkout_date)
+  WHERE status IN ('awaiting_deposit', 'reserved', 'awaiting_balance', 'confirmed', 'pending_manual_conflict');
 CREATE INDEX IF NOT EXISTS idx_bookings_order_number ON public.bookings(order_number);
 
 -- 8.7 個別房型每晚實際使用紀錄（顧客確認訂房當下才寫入），供「不同顧客訂到同一天/同房型」衝突檢查用。
@@ -314,6 +421,8 @@ ALTER TABLE public.admin_profiles ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.room_types ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.room_pricing ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.room_extra_person_pricing ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.consumables ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.consumable_spaces ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.whole_house_packages ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.whole_house_package_pricing ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.whole_house_package_rooms ENABLE ROW LEVEL SECURITY;
@@ -321,6 +430,7 @@ ALTER TABLE public.whole_house_extra_person_rules ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.promotions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.booking_date_ranges ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.custom_message_templates ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.message_variables ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.booking_flows ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.booking_flow_steps ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.bookings ENABLE ROW LEVEL SECURITY;
@@ -348,6 +458,10 @@ DROP POLICY IF EXISTS "Allow Auth Access Room Pricing" ON public.room_pricing;
 CREATE POLICY "Allow Auth Access Room Pricing" ON public.room_pricing FOR ALL USING (auth.role() = 'authenticated');
 DROP POLICY IF EXISTS "Allow Auth Access Room Extra Person Pricing" ON public.room_extra_person_pricing;
 CREATE POLICY "Allow Auth Access Room Extra Person Pricing" ON public.room_extra_person_pricing FOR ALL USING (auth.role() = 'authenticated');
+DROP POLICY IF EXISTS "Allow Auth Access Consumables" ON public.consumables;
+CREATE POLICY "Allow Auth Access Consumables" ON public.consumables FOR ALL USING (auth.role() = 'authenticated');
+DROP POLICY IF EXISTS "Allow Auth Access Consumable Spaces" ON public.consumable_spaces;
+CREATE POLICY "Allow Auth Access Consumable Spaces" ON public.consumable_spaces FOR ALL USING (auth.role() = 'authenticated');
 DROP POLICY IF EXISTS "Allow Auth Access WH Packages" ON public.whole_house_packages;
 CREATE POLICY "Allow Auth Access WH Packages" ON public.whole_house_packages FOR ALL USING (auth.role() = 'authenticated');
 DROP POLICY IF EXISTS "Allow Auth Access WH Package Pricing" ON public.whole_house_package_pricing;
@@ -362,6 +476,8 @@ DROP POLICY IF EXISTS "Allow Auth Access Booking Date Ranges" ON public.booking_
 CREATE POLICY "Allow Auth Access Booking Date Ranges" ON public.booking_date_ranges FOR ALL USING (auth.role() = 'authenticated');
 DROP POLICY IF EXISTS "Allow Auth Access Custom Message Templates" ON public.custom_message_templates;
 CREATE POLICY "Allow Auth Access Custom Message Templates" ON public.custom_message_templates FOR ALL USING (auth.role() = 'authenticated');
+DROP POLICY IF EXISTS "Allow Auth Access Message Variables" ON public.message_variables;
+CREATE POLICY "Allow Auth Access Message Variables" ON public.message_variables FOR ALL USING (auth.role() = 'authenticated');
 DROP POLICY IF EXISTS "Allow Auth Access Booking Flows" ON public.booking_flows;
 CREATE POLICY "Allow Auth Access Booking Flows" ON public.booking_flows FOR ALL USING (auth.role() = 'authenticated');
 DROP POLICY IF EXISTS "Allow Auth Access Booking Flow Steps" ON public.booking_flow_steps;

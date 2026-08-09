@@ -17,7 +17,7 @@ const QUOTE_FIELD_OPTIONS = [
 ];
 
 const MAX_STEPS = 5;
-const MAX_FIELDS_PER_STEP = 3;
+const MAX_FIELDS_PER_STEP = 10;
 
 function newId(): string {
   return crypto.randomUUID();
@@ -249,7 +249,7 @@ export default function StandardMessages() {
     <div className="max-w-6xl mx-auto space-y-6">
       <PageHeader
         icon={<MessageSquareText className="w-6 h-6 text-green-600" />}
-        title="公版訊息管理"
+        title="LINE 自定訊息流程"
         description="管理系統自動發送的標準訊息：LINE 訂房對話的分步驟流程，以及報價確認／付款確認罐頭訊息。"
       />
 

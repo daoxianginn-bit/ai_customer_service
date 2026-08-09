@@ -1,20 +1,63 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase';
-import { ClipboardList, Search, RotateCcw, Save } from 'lucide-react';
-import { PageHeader, Button, Modal, StatusBadge, EmptyState } from '../components/ui';
+import { ClipboardList, Search, RotateCcw, Save, Plus, Trash2, AlertCircle } from 'lucide-react';
+import { PageHeader, Button, Modal, StatusBadge, EmptyState, ConfirmDialog } from '../components/ui';
+import { BOOKING_STATUS_OPTIONS, SYSTEM_ONLY_STATUS, REQUIRES_REMIT_LAST5_STATUS } from '../lib/bookingStatus';
 
 const PAGE_SIZE = 15;
 
-const STATUS_OPTIONS = [
-  { value: '', label: '全部狀態' },
-  { value: 'inquiring', label: '待報價' },
-  { value: 'pending_confirmation', label: '待確認' },
-  { value: 'confirmed', label: '已確認' },
-  { value: 'cancelled', label: '已取消' },
-  { value: 'pending_manual_conflict', label: '待人工確認' },
-];
+const FILTER_STATUS_OPTIONS = [{ value: '', label: '全部狀態' }, ...BOOKING_STATUS_OPTIONS, SYSTEM_ONLY_STATUS];
 
-const EDITABLE_STATUS_OPTIONS = STATUS_OPTIONS.filter((s) => s.value);
+interface OrderForm {
+  id?: string;
+  order_number?: string;
+  name: string;
+  nickname: string;
+  line_user_id: string;
+  phone: string;
+  checkin_date: string;
+  checkout_date: string;
+  headcount: string;
+  adults: string;
+  kids: string;
+  infants: string;
+  whole_house: boolean;
+  room_type_label: string;
+  total_amount: string;
+  deposit: string;
+  remit_last5: string;
+  status: string;
+  notes: string;
+}
+
+const emptyForm = (): OrderForm => ({
+  name: '', nickname: '', line_user_id: '', phone: '',
+  checkin_date: '', checkout_date: '', headcount: '', adults: '', kids: '', infants: '',
+  whole_house: false, room_type_label: '', total_amount: '', deposit: '', remit_last5: '',
+  status: 'inquiring', notes: '',
+});
+
+function generateOrderNumber(): string {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  const rand = String(Math.floor(Math.random() * 10000)).padStart(4, '0');
+  return `${y}${m}${day}-${rand}`;
+}
+
+function StatusHelpIcon() {
+  return (
+    <div className="group relative inline-flex">
+      <AlertCircle className="w-3.5 h-3.5 text-gray-400 cursor-help" />
+      <div className="hidden group-hover:block absolute z-20 left-0 top-5 w-80 bg-gray-800 text-white text-xs rounded-lg p-3 space-y-1.5 shadow-lg">
+        {[...BOOKING_STATUS_OPTIONS, SYSTEM_ONLY_STATUS].map((s) => (
+          <div key={s.value}><strong className="text-white">{s.label}</strong>：<span className="text-gray-300">{s.description}</span></div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 export default function OrderManagement() {
   const [keyword, setKeyword] = useState('');
@@ -29,11 +72,14 @@ export default function OrderManagement() {
   const [page, setPage] = useState(0);
   const [hasMore, setHasMore] = useState(false);
 
-  const [selected, setSelected] = useState<any | null>(null);
-  const [editStatus, setEditStatus] = useState('');
-  const [editDeposit, setEditDeposit] = useState('');
-  const [editNotes, setEditNotes] = useState('');
+  const [showForm, setShowForm] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [form, setForm] = useState<OrderForm>(emptyForm());
   const [saving, setSaving] = useState(false);
+  const [formError, setFormError] = useState('');
+
+  const [deleteTarget, setDeleteTarget] = useState<any | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     fetchRoomTypeOptions();
@@ -41,7 +87,7 @@ export default function OrderManagement() {
   }, []);
 
   const fetchRoomTypeOptions = async () => {
-    const { data } = await supabase.from('room_types').select('name').order('display_order');
+    const { data } = await supabase.from('room_types').select('name').eq('type', '房間').order('display_order');
     setRoomTypeOptions((data || []).map((r: any) => r.name));
   };
 
@@ -81,39 +127,129 @@ export default function OrderManagement() {
     setTimeout(() => runQuery(0), 0);
   };
 
-  const openDetail = (row: any) => {
-    setSelected(row);
-    setEditStatus(row.status);
-    setEditDeposit(row.deposit != null ? String(row.deposit) : '');
-    setEditNotes(row.notes || '');
+  const openNew = () => {
+    setEditingId(null);
+    setForm(emptyForm());
+    setFormError('');
+    setShowForm(true);
   };
 
-  const closeDetail = () => setSelected(null);
+  const openEdit = (row: any) => {
+    setEditingId(row.id);
+    setForm({
+      id: row.id,
+      order_number: row.order_number || '',
+      name: row.name || '',
+      nickname: row.nickname || '',
+      line_user_id: row.line_user_id || '',
+      phone: row.phone || '',
+      checkin_date: row.checkin_date || '',
+      checkout_date: row.checkout_date || '',
+      headcount: row.headcount != null ? String(row.headcount) : '',
+      adults: row.adults != null ? String(row.adults) : '',
+      kids: row.kids != null ? String(row.kids) : '',
+      infants: row.infants != null ? String(row.infants) : '',
+      whole_house: !!row.whole_house,
+      room_type_label: row.room_type_label || '',
+      total_amount: row.total_amount != null ? String(row.total_amount) : '',
+      deposit: row.deposit != null ? String(row.deposit) : '',
+      remit_last5: row.remit_last5 || '',
+      status: row.status,
+      notes: row.notes || '',
+    });
+    setFormError('');
+    setShowForm(true);
+  };
 
-  const saveDetail = async () => {
-    if (!selected) return;
+  const closeForm = () => setShowForm(false);
+
+  const saveForm = async () => {
+    if (form.status === REQUIRES_REMIT_LAST5_STATUS && !form.remit_last5.trim()) {
+      setFormError('狀態改成「已預定」時，請先填寫匯款末5碼再儲存。');
+      return;
+    }
     setSaving(true);
+    setFormError('');
     try {
-      const depositValue = editDeposit === '' ? null : Number(editDeposit);
-      const { error } = await supabase
-        .from('bookings')
-        .update({ status: editStatus, deposit: depositValue, notes: editNotes, updated_at: new Date().toISOString() })
-        .eq('id', selected.id);
-      if (error) throw error;
-      setSelected(null);
+      const checkin = form.checkin_date || null;
+      const checkout = form.checkout_date || null;
+      let nights: number | null = null;
+      if (checkin && checkout) {
+        const diff = Math.round((new Date(`${checkout}T00:00:00`).getTime() - new Date(`${checkin}T00:00:00`).getTime()) / 86400000);
+        nights = diff > 0 ? diff : null;
+      }
+
+      const payload = {
+        name: form.name || null,
+        nickname: form.nickname || null,
+        line_user_id: form.line_user_id || '',
+        phone: form.phone || null,
+        checkin_date: checkin,
+        checkout_date: checkout,
+        nights,
+        headcount: form.headcount === '' ? null : Number(form.headcount),
+        adults: form.adults === '' ? null : Number(form.adults),
+        kids: form.kids === '' ? null : Number(form.kids),
+        infants: form.infants === '' ? null : Number(form.infants),
+        whole_house: form.whole_house,
+        room_type_label: form.room_type_label || null,
+        total_amount: form.total_amount === '' ? null : Number(form.total_amount),
+        deposit: form.deposit === '' ? null : Number(form.deposit),
+        remit_last5: form.remit_last5 || null,
+        status: form.status,
+        notes: form.notes || null,
+        updated_at: new Date().toISOString(),
+      };
+
+      if (editingId) {
+        const { error } = await supabase.from('bookings').update(payload).eq('id', editingId);
+        if (error) throw error;
+      } else {
+        let lastError: any = null;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const { error } = await supabase.from('bookings').insert({ ...payload, order_number: generateOrderNumber() });
+          if (!error) { lastError = null; break; }
+          lastError = error;
+          if (!String(error.message || '').includes('order_number')) break;
+        }
+        if (lastError) throw lastError;
+      }
+      setShowForm(false);
       runQuery(page);
     } catch (err: any) {
-      alert(`儲存失敗：${err.message}`);
+      setFormError(`儲存失敗：${err.message}`);
     } finally {
       setSaving(false);
     }
   };
 
+  const confirmDelete = async () => {
+    if (!deleteTarget) return;
+    setDeleting(true);
+    try {
+      const { error } = await supabase.from('bookings').delete().eq('id', deleteTarget.id);
+      if (error) throw error;
+      setDeleteTarget(null);
+      runQuery(page);
+    } catch (err: any) {
+      alert(`刪除失敗：${err.message}`);
+    } finally {
+      setDeleting(false);
+    }
+  };
+
   const balanceDue = (row: any) => (row.total_amount != null ? row.total_amount - (row.deposit ?? 0) : null);
+
+  const formStatusOptions = form.status === SYSTEM_ONLY_STATUS.value ? [SYSTEM_ONLY_STATUS, ...BOOKING_STATUS_OPTIONS] : BOOKING_STATUS_OPTIONS;
 
   return (
     <div className="max-w-6xl mx-auto space-y-6">
-      <PageHeader icon={<ClipboardList className="w-6 h-6 text-green-600" />} title="訂單管理" description="查詢、檢視與編輯所有訂房紀錄的狀態、訂金與備註。" />
+      <PageHeader
+        icon={<ClipboardList className="w-6 h-6 text-green-600" />}
+        title="訂單管理"
+        description="新增、查詢、檢視與編輯所有訂房紀錄。"
+        action={<Button onClick={openNew} icon={<Plus className="w-4 h-4" />}>新增訂單</Button>}
+      />
 
       <div className="bg-white p-4 rounded-xl shadow-sm border space-y-3">
         <div className="flex flex-wrap gap-3 items-end">
@@ -132,7 +268,7 @@ export default function OrderManagement() {
           <div>
             <label className="block text-xs text-gray-500 mb-1">訂單狀態</label>
             <select value={status} onChange={(e) => setStatus(e.target.value)} className="px-3 py-2 border rounded-lg text-sm bg-white">
-              {STATUS_OPTIONS.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
+              {FILTER_STATUS_OPTIONS.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
             </select>
           </div>
           <div>
@@ -162,16 +298,17 @@ export default function OrderManagement() {
                 <th className="py-3 px-4">總報價</th>
                 <th className="py-3 px-4">尾款</th>
                 <th className="py-3 px-4">狀態</th>
+                <th className="py-3 px-4"></th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
               {loading ? (
-                <tr><td colSpan={9} className="py-10 text-center text-gray-400">載入中...</td></tr>
+                <tr><td colSpan={10} className="py-10 text-center text-gray-400">載入中...</td></tr>
               ) : rows.length === 0 ? (
-                <tr><td colSpan={9}><EmptyState icon={<ClipboardList className="w-12 h-12 text-gray-200" />} message="查無符合條件的訂單" /></td></tr>
+                <tr><td colSpan={10}><EmptyState icon={<ClipboardList className="w-12 h-12 text-gray-200" />} message="查無符合條件的訂單" /></td></tr>
               ) : (
                 rows.map((row) => (
-                  <tr key={row.id} onClick={() => openDetail(row)} className="hover:bg-green-50 transition-colors cursor-pointer">
+                  <tr key={row.id} onClick={() => openEdit(row)} className="hover:bg-green-50 transition-colors cursor-pointer">
                     <td className="py-3 px-4 font-mono text-xs text-gray-500">{row.order_number || '-'}</td>
                     <td className="py-3 px-4 font-medium text-gray-800">{row.name || row.nickname || '未取得'}</td>
                     <td className="py-3 px-4 whitespace-nowrap">{row.checkin_date ? String(row.checkin_date).replace(/-/g, '/') : '-'}</td>
@@ -181,6 +318,11 @@ export default function OrderManagement() {
                     <td className="py-3 px-4 whitespace-nowrap">{row.total_amount != null ? `NT$ ${Number(row.total_amount).toLocaleString()}` : '-'}</td>
                     <td className="py-3 px-4 whitespace-nowrap">{balanceDue(row) != null ? `NT$ ${Number(balanceDue(row)).toLocaleString()}` : '-'}</td>
                     <td className="py-3 px-4"><StatusBadge status={row.status} /></td>
+                    <td className="py-3 px-4 text-right">
+                      <button onClick={(e) => { e.stopPropagation(); setDeleteTarget(row); }} className="p-1.5 text-red-500 hover:bg-red-50 rounded" title="刪除">
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </td>
                   </tr>
                 ))
               )}
@@ -195,48 +337,110 @@ export default function OrderManagement() {
       </div>
 
       <Modal
-        open={!!selected}
-        title={`訂單詳情 ${selected?.order_number ? `（${selected.order_number}）` : ''}`}
-        onClose={closeDetail}
-        maxWidth="max-w-lg"
+        open={showForm}
+        title={editingId ? `編輯訂單${form.order_number ? `（${form.order_number}）` : ''}` : '新增訂單'}
+        onClose={closeForm}
+        maxWidth="max-w-2xl"
         footer={
           <>
-            <Button variant="secondary" onClick={closeDetail}>取消</Button>
-            <Button onClick={saveDetail} loading={saving} icon={<Save className="w-4 h-4" />}>{saving ? '儲存中...' : '儲存變更'}</Button>
+            <Button variant="secondary" onClick={closeForm}>取消</Button>
+            <Button onClick={saveForm} loading={saving} icon={<Save className="w-4 h-4" />}>{saving ? '儲存中...' : '儲存變更'}</Button>
           </>
         }
       >
-        {selected && (
-          <>
-            <div className="grid grid-cols-2 gap-3 text-sm text-gray-600">
-              <div><span className="text-gray-400">客戶姓名／暱稱：</span>{selected.name || selected.nickname || '未取得'}</div>
-              <div><span className="text-gray-400">電話：</span>{selected.phone || '-'}</div>
-              <div><span className="text-gray-400">入住日期：</span>{selected.checkin_date ? String(selected.checkin_date).replace(/-/g, '/') : '-'}</div>
-              <div><span className="text-gray-400">退房日期：</span>{selected.checkout_date ? String(selected.checkout_date).replace(/-/g, '/') : '-'}</div>
-              <div><span className="text-gray-400">人數：</span>{selected.headcount ?? '-'}</div>
-              <div><span className="text-gray-400">房型：</span>{selected.room_type_label || (selected.whole_house ? '包棟' : '-')}</div>
-              <div><span className="text-gray-400">總報價：</span>{selected.total_amount != null ? `NT$ ${Number(selected.total_amount).toLocaleString()}` : '-'}</div>
-              <div><span className="text-gray-400">尾款：</span>{balanceDue(selected) != null ? `NT$ ${Number(balanceDue(selected)).toLocaleString()}` : '-'}</div>
-              <div className="col-span-2 font-mono text-xs text-gray-400 break-all">LINE ID：{selected.line_user_id}</div>
-            </div>
-
-            <div>
-              <label className="block text-xs text-gray-500 mb-1">訂單狀態</label>
-              <select value={editStatus} onChange={(e) => setEditStatus(e.target.value)} className="w-full px-3 py-2 border rounded-lg bg-white">
-                {EDITABLE_STATUS_OPTIONS.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
-              </select>
-            </div>
-            <div>
-              <label className="block text-xs text-gray-500 mb-1">訂金</label>
-              <input type="number" value={editDeposit} onChange={(e) => setEditDeposit(e.target.value)} className="w-full px-3 py-2 border rounded-lg" placeholder="尚未填寫" />
-            </div>
-            <div>
-              <label className="block text-xs text-gray-500 mb-1">備註</label>
-              <textarea value={editNotes} onChange={(e) => setEditNotes(e.target.value)} rows={4} className="w-full px-3 py-2 border rounded-lg" placeholder="內部備註，客戶不會看到" />
-            </div>
-          </>
-        )}
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">訂單編號</label>
+            <input value={editingId ? form.order_number : '（儲存後自動產生）'} disabled className="w-full px-3 py-2 border rounded-lg bg-gray-100 text-gray-400" />
+          </div>
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">LINE User ID</label>
+            <input value={form.line_user_id} onChange={(e) => setForm({ ...form, line_user_id: e.target.value })} className="w-full px-3 py-2 border rounded-lg" placeholder="非 LINE 客戶可留空" />
+          </div>
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">客戶姓名</label>
+            <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className="w-full px-3 py-2 border rounded-lg" />
+          </div>
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">LINE 暱稱</label>
+            <input value={form.nickname} onChange={(e) => setForm({ ...form, nickname: e.target.value })} className="w-full px-3 py-2 border rounded-lg" />
+          </div>
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">電話</label>
+            <input value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} className="w-full px-3 py-2 border rounded-lg" />
+          </div>
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">房型</label>
+            <input value={form.room_type_label} onChange={(e) => setForm({ ...form, room_type_label: e.target.value })} className="w-full px-3 py-2 border rounded-lg" placeholder="例如：2F-暖木(2人)" />
+          </div>
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">入住日期</label>
+            <input type="date" value={form.checkin_date} onChange={(e) => setForm({ ...form, checkin_date: e.target.value })} className="w-full px-3 py-2 border rounded-lg" />
+          </div>
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">退房日期</label>
+            <input type="date" value={form.checkout_date} onChange={(e) => setForm({ ...form, checkout_date: e.target.value })} className="w-full px-3 py-2 border rounded-lg" />
+          </div>
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">入住人數</label>
+            <input type="number" value={form.headcount} onChange={(e) => setForm({ ...form, headcount: e.target.value })} className="w-full px-3 py-2 border rounded-lg" />
+          </div>
+          <div className="flex items-end pb-2">
+            <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+              <input type="checkbox" checked={form.whole_house} onChange={(e) => setForm({ ...form, whole_house: e.target.checked })} className="w-4 h-4" />
+              是否包棟
+            </label>
+          </div>
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">大人</label>
+            <input type="number" value={form.adults} onChange={(e) => setForm({ ...form, adults: e.target.value })} className="w-full px-3 py-2 border rounded-lg" />
+          </div>
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">小孩</label>
+            <input type="number" value={form.kids} onChange={(e) => setForm({ ...form, kids: e.target.value })} className="w-full px-3 py-2 border rounded-lg" />
+          </div>
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">嬰兒</label>
+            <input type="number" value={form.infants} onChange={(e) => setForm({ ...form, infants: e.target.value })} className="w-full px-3 py-2 border rounded-lg" />
+          </div>
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">總金額</label>
+            <input type="number" value={form.total_amount} onChange={(e) => setForm({ ...form, total_amount: e.target.value })} className="w-full px-3 py-2 border rounded-lg" />
+          </div>
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">訂金</label>
+            <input type="number" value={form.deposit} onChange={(e) => setForm({ ...form, deposit: e.target.value })} className="w-full px-3 py-2 border rounded-lg" />
+          </div>
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">
+              匯款末5碼{form.status === REQUIRES_REMIT_LAST5_STATUS && <span className="text-red-500"> *</span>}
+            </label>
+            <input value={form.remit_last5} onChange={(e) => setForm({ ...form, remit_last5: e.target.value })} className="w-full px-3 py-2 border rounded-lg" placeholder="狀態設為「已預定」時必填" />
+          </div>
+          <div>
+            <label className="flex items-center gap-1 text-xs text-gray-500 mb-1">訂單狀態 <StatusHelpIcon /></label>
+            <select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value })} className="w-full px-3 py-2 border rounded-lg bg-white">
+              {formStatusOptions.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
+            </select>
+          </div>
+          <div className="col-span-2">
+            <label className="block text-xs text-gray-500 mb-1">備註</label>
+            <textarea value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} rows={3} className="w-full px-3 py-2 border rounded-lg" placeholder="內部備註，客戶不會看到" />
+          </div>
+        </div>
+        {formError && <p className="text-sm text-red-600">{formError}</p>}
       </Modal>
+
+      <ConfirmDialog
+        open={!!deleteTarget}
+        title="刪除訂單"
+        message={`確定要刪除訂單「${deleteTarget?.order_number || deleteTarget?.name || ''}」嗎？此操作無法復原。`}
+        confirmLabel="刪除"
+        danger
+        loading={deleting}
+        onConfirm={confirmDelete}
+        onCancel={() => setDeleteTarget(null)}
+      />
     </div>
   );
 }

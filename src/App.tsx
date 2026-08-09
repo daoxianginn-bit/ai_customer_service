@@ -11,9 +11,12 @@ import AiServiceCenter from './pages/AiServiceCenter';
 import AdminAccounts from './pages/AdminAccounts';
 import BookingManagement from './pages/BookingManagement';
 import StandardMessages from './pages/StandardMessages';
+import MessageVariables from './pages/MessageVariables';
 import CustomMessageSending from './pages/CustomMessageSending';
 import OrderManagement from './pages/OrderManagement';
 import RoomCalendar from './pages/RoomCalendar';
+import RoomSpaceManagement from './pages/RoomSpaceManagement';
+import ConsumablesManagement from './pages/ConsumablesManagement';
 import CustomerDirectory from './pages/CustomerDirectory';
 import Layout from './components/Layout';
 
@@ -90,10 +93,13 @@ function App() {
           <Route path="/" element={<Overview />} />
           <Route path="/ai-service-center" element={<AiServiceCenter />} />
           <Route path="/standard-messages" element={<StandardMessages />} />
+          <Route path="/message-variables" element={<MessageVariables />} />
           <Route path="/broadcast" element={<CustomMessageSending />} />
           <Route path="/orders" element={<OrderManagement />} />
           <Route path="/room-calendar" element={<RoomCalendar />} />
+          <Route path="/room-spaces" element={<RoomSpaceManagement />} />
           <Route path="/room-pricing" element={<BookingManagement />} />
+          <Route path="/consumables" element={<ConsumablesManagement />} />
           <Route path="/customers" element={<CustomerDirectory />} />
           <Route path="/knowledge-base" element={<KnowledgeBase />} />
           <Route path="/ai-settings" element={<AiSettings />} />
