@@ -1,12 +1,13 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import { supabase } from '../lib/supabase';
-import { Save, MessageSquareText, Plus, Trash2, Pencil, GripVertical } from 'lucide-react';
-import CollapsibleSection from '../components/CollapsibleSection';
+import {
+  MessageSquareText, Plus, Trash2, Pencil, Calculator, CheckCircle2, Wallet,
+  MessageCircleQuestion, Sparkles, Cpu, AlertTriangle, UserRound, ArrowRight,
+} from 'lucide-react';
 import MessageTemplateEditor from '../components/MessageTemplateEditor';
-import { PageHeader, Button, Modal, ConfirmDialog, Switch } from '../components/ui';
-
-const QUOTE_MESSAGE_PLACEHOLDERS = ['入住日期', '退房日期', '人數', '是否包棟', '總金額'];
-const CONFIRM_MESSAGE_PLACEHOLDERS = ['姓名', '入住日期', '退房日期', '是否包棟', '人數', '大人小孩', '總金額', '訂金', '匯款日時間'];
+import VariableText from '../components/VariableText';
+import { PageHeader, Button, ConfirmDialog, Switch, EmptyState } from '../components/ui';
+import { TriggerRule, KeywordMatch, parseTriggerRules, serializeTriggerRules } from '../lib/messageVariables';
 
 const QUOTE_FIELD_OPTIONS = [
   { value: '', label: '無（純收集資訊，不影響算價）' },
@@ -16,410 +17,730 @@ const QUOTE_FIELD_OPTIONS = [
   { value: 'whole_house', label: '是否包棟' },
 ];
 
+// 這四個算價欄位全部收集齊，流程走完才算得出金額、才會進到報價確認與付款確認；
+// 少任何一個都會轉真人客服，那兩段訊息永遠不會送出。
+const QUOTE_REQUIRED_FIELDS = ['checkin_date', 'checkout_date', 'headcount', 'whole_house'];
+
 const MAX_STEPS = 5;
 const MAX_FIELDS_PER_STEP = 10;
+
+const NEW_FLOW_ID = '__new__';
 
 function newId(): string {
   return crypto.randomUUID();
 }
 
 type FlowField = { key: string; label: string; quote_field: string };
-type FlowStep = { id?: string; step_order: number; message_template: string; fields: FlowField[] };
+type FlowStep = { step_order: number; message_template: string; fields: FlowField[] };
 type Flow = {
   id: string;
   name: string;
-  trigger_keywords: string;
+  trigger_rules: TriggerRule[];
+  reply_mode: 'ai' | 'system';
+  quote_message: string;
+  confirm_message: string;
   is_active: boolean;
   display_order: number;
   steps: FlowStep[];
 };
 
-const emptyFlow = (): Flow => ({
+const emptyFlow = (displayOrder: number): Flow => ({
   id: '',
   name: '',
-  trigger_keywords: '',
+  trigger_rules: [{ keyword: '', match: 'contains' }],
+  reply_mode: 'ai',
+  quote_message: '',
+  confirm_message: '',
   is_active: true,
-  display_order: 0,
+  display_order: displayOrder,
   steps: [{ step_order: 1, message_template: '', fields: [{ key: newId(), label: '', quote_field: '' }] }],
 });
 
+function collectedQuoteFields(flow: Flow): Set<string> {
+  return new Set(flow.steps.flatMap((s) => s.fields.map((f) => f.quote_field)).filter(Boolean));
+}
+
+function missingQuoteFields(flow: Flow): string[] {
+  const have = collectedQuoteFields(flow);
+  return QUOTE_REQUIRED_FIELDS.filter((k) => !have.has(k)).map(
+    (k) => QUOTE_FIELD_OPTIONS.find((o) => o.value === k)?.label || k
+  );
+}
+
+// ------------------------------------------------------------------------
+// 版面共用的小元件
+// ------------------------------------------------------------------------
+
+function Stage({ index, title, icon, muted, children }: {
+  index: number | null;
+  title: string;
+  icon: React.ReactNode;
+  muted?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="flex gap-3 py-5 border-b last:border-b-0">
+      <div className={`w-7 h-7 rounded-full flex items-center justify-center shrink-0 text-xs font-semibold ${
+        muted ? 'bg-gray-100 text-gray-400' : 'bg-green-50 text-green-700'
+      }`}>
+        {index ?? icon}
+      </div>
+      <div className="min-w-0 flex-1">
+        <h4 className={`text-sm font-semibold flex items-center gap-2 ${muted ? 'text-gray-500' : 'text-gray-800'}`}>
+          {index !== null && <span className="text-gray-400">{icon}</span>}
+          {title}
+        </h4>
+        <div className="mt-3">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+function KeywordChip({ rule }: { rule: TriggerRule }) {
+  const exact = rule.match === 'exact';
+  return (
+    <span className={`inline-flex items-center rounded-md text-xs overflow-hidden border ${
+      exact ? 'border-green-200 bg-green-50' : 'border-gray-200 bg-gray-50'
+    }`}>
+      <span className={`px-1.5 py-1 ${exact ? 'text-green-700 bg-green-100' : 'text-gray-500 bg-gray-100'}`}>
+        {exact ? '等於' : '相關'}
+      </span>
+      <span className="px-2 py-1 text-gray-700">{rule.keyword}</span>
+    </span>
+  );
+}
+
+function ReplyModeSummary({ mode }: { mode: 'ai' | 'system' }) {
+  return mode === 'ai' ? (
+    <span className="inline-flex items-center gap-1.5 text-xs text-gray-600">
+      <Sparkles className="w-3.5 h-3.5 text-green-600" />
+      AI 理解顧客回覆<span className="text-gray-400">（讀得懂「下週五」這類說法，每則訊息會用到 token）</span>
+    </span>
+  ) : (
+    <span className="inline-flex items-center gap-1.5 text-xs text-gray-600">
+      <Cpu className="w-3.5 h-3.5 text-gray-500" />
+      系統自行比對<span className="text-gray-400">（完全不呼叫 AI，只認得標準寫法如 7/30、4 位、包棟）</span>
+    </span>
+  );
+}
+
+// ------------------------------------------------------------------------
+
 export default function StandardMessages() {
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [settingsId, setSettingsId] = useState<string | null>(null);
-
-  const [quoteMessage, setQuoteMessage] = useState('');
-  const [confirmMessage, setConfirmMessage] = useState('');
-
   const [flows, setFlows] = useState<Flow[]>([]);
-  const [showFlowForm, setShowFlowForm] = useState(false);
-  const [flowForm, setFlowForm] = useState<Flow>(emptyFlow());
-  const [savingFlow, setSavingFlow] = useState(false);
+  const [variables, setVariables] = useState<string[]>([]);
+  const [errorMsg, setErrorMsg] = useState('');
+
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState<Flow | null>(null);
+  const [baseline, setBaseline] = useState<string>('');
+  const [saving, setSaving] = useState(false);
+
   const [deleteTarget, setDeleteTarget] = useState<Flow | null>(null);
-  const [deletingFlow, setDeletingFlow] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [pendingAction, setPendingAction] = useState<(() => void) | null>(null);
+
+  const dirty = editing && draft !== null && JSON.stringify(draft) !== baseline;
+
+  const selected = useMemo(
+    () => (selectedId === NEW_FLOW_ID ? draft : flows.find((f) => f.id === selectedId) || null),
+    [selectedId, flows, draft]
+  );
 
   useEffect(() => {
-    fetchSettings();
-    fetchFlows();
+    fetchAll();
   }, []);
 
-  const fetchSettings = async () => {
+  // 編輯到一半按上一頁／關掉分頁時，讓瀏覽器跳原生的離開確認，避免辛苦打的內容直接消失。
+  useEffect(() => {
+    if (!dirty) return;
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, [dirty]);
+
+  const fetchAll = async () => {
     setLoading(true);
-    const { data } = await supabase
-      .from('settings')
-      .select('id, booking_quote_message, booking_confirm_message')
-      .single();
-    setSettingsId(data?.id || null);
-    setQuoteMessage(data?.booking_quote_message ?? '');
-    setConfirmMessage(data?.booking_confirm_message ?? '');
+    setErrorMsg('');
+    const [flowRes, stepRes, varRes] = await Promise.all([
+      supabase.from('booking_flows').select('*').order('display_order'),
+      supabase.from('booking_flow_steps').select('*').order('step_order'),
+      supabase.from('message_variables').select('variable_name').order('display_order'),
+    ]);
+
+    if (flowRes.error) {
+      setErrorMsg(`查詢流程失敗：${flowRes.error.message}`);
+      setLoading(false);
+      return;
+    }
+
+    const list: Flow[] = (flowRes.data || []).map((f: any) => ({
+      id: f.id,
+      name: f.name,
+      trigger_rules: parseTriggerRules(f.trigger_rules, f.trigger_keywords),
+      reply_mode: f.reply_mode === 'system' ? 'system' : 'ai',
+      quote_message: f.quote_message ?? '',
+      confirm_message: f.confirm_message ?? '',
+      is_active: f.is_active,
+      display_order: f.display_order,
+      steps: (stepRes.data || [])
+        .filter((s: any) => s.flow_id === f.id)
+        .map((s: any) => ({ step_order: s.step_order, message_template: s.message_template, fields: s.fields || [] })),
+    }));
+
+    setFlows(list);
+    setVariables((varRes.data || []).map((v: any) => v.variable_name));
+    setSelectedId((prev) => (prev && prev !== NEW_FLOW_ID && list.some((f) => f.id === prev) ? prev : list[0]?.id ?? null));
     setLoading(false);
   };
 
-  const fetchFlows = async () => {
-    const { data: flowRows } = await supabase.from('booking_flows').select('*').order('display_order');
-    const { data: stepRows } = await supabase.from('booking_flow_steps').select('*').order('step_order');
-    const flowsList: Flow[] = (flowRows || []).map((f: any) => ({
-      id: f.id,
-      name: f.name,
-      trigger_keywords: f.trigger_keywords,
-      is_active: f.is_active,
-      display_order: f.display_order,
-      steps: (stepRows || [])
-        .filter((s: any) => s.flow_id === f.id)
-        .map((s: any) => ({ id: s.id, step_order: s.step_order, message_template: s.message_template, fields: s.fields || [] })),
-    }));
-    setFlows(flowsList);
+  // 所有會離開目前編輯狀態的動作都要走這裡：有未儲存的變更就先跳確認視窗。
+  const guard = useCallback((action: () => void) => {
+    if (dirty) {
+      setPendingAction(() => action);
+      return;
+    }
+    action();
+  }, [dirty]);
+
+  const selectFlow = (id: string) => guard(() => {
+    setSelectedId(id);
+    setEditing(false);
+    setDraft(null);
+  });
+
+  const startNewFlow = () => guard(() => {
+    const fresh = emptyFlow(flows.length);
+    setDraft(fresh);
+    setBaseline(JSON.stringify(fresh));
+    setSelectedId(NEW_FLOW_ID);
+    setEditing(true);
+  });
+
+  const startEdit = () => {
+    if (!selected) return;
+    const copy: Flow = JSON.parse(JSON.stringify(selected));
+    if (copy.trigger_rules.length === 0) copy.trigger_rules = [{ keyword: '', match: 'contains' }];
+    setDraft(copy);
+    setBaseline(JSON.stringify(copy));
+    setEditing(true);
   };
 
-  const handleSaveSettings = async () => {
-    if (!settingsId) return;
+  const cancelEdit = () => guard(() => {
+    setEditing(false);
+    setDraft(null);
+    if (selectedId === NEW_FLOW_ID) setSelectedId(flows[0]?.id ?? null);
+  });
+
+  const patchDraft = (patch: Partial<Flow>) => setDraft((d) => (d ? { ...d, ...patch } : d));
+
+  // --- 關鍵字 ---
+  const addKeyword = () => draft && patchDraft({ trigger_rules: [...draft.trigger_rules, { keyword: '', match: 'contains' }] });
+  const removeKeyword = (i: number) => draft && patchDraft({ trigger_rules: draft.trigger_rules.filter((_, x) => x !== i) });
+  const updateKeyword = (i: number, patch: Partial<TriggerRule>) =>
+    draft && patchDraft({ trigger_rules: draft.trigger_rules.map((r, x) => (x === i ? { ...r, ...patch } : r)) });
+
+  // --- 步驟 ---
+  const addStep = () => {
+    if (!draft || draft.steps.length >= MAX_STEPS) return;
+    patchDraft({
+      steps: [...draft.steps, { step_order: draft.steps.length + 1, message_template: '', fields: [{ key: newId(), label: '', quote_field: '' }] }],
+    });
+  };
+  const removeStep = (i: number) =>
+    draft && patchDraft({ steps: draft.steps.filter((_, x) => x !== i).map((s, x) => ({ ...s, step_order: x + 1 })) });
+  const updateStep = (i: number, patch: Partial<FlowStep>) =>
+    draft && patchDraft({ steps: draft.steps.map((s, x) => (x === i ? { ...s, ...patch } : s)) });
+
+  const addField = (si: number) => {
+    if (!draft || draft.steps[si].fields.length >= MAX_FIELDS_PER_STEP) return;
+    updateStep(si, { fields: [...draft.steps[si].fields, { key: newId(), label: '', quote_field: '' }] });
+  };
+  const removeField = (si: number, fi: number) =>
+    draft && updateStep(si, { fields: draft.steps[si].fields.filter((_, x) => x !== fi) });
+  const updateField = (si: number, fi: number, patch: Partial<FlowField>) =>
+    draft && updateStep(si, { fields: draft.steps[si].fields.map((f, x) => (x === fi ? { ...f, ...patch } : f)) });
+
+  // --- 儲存 ---
+  const handleSave = async () => {
+    if (!draft) return;
+    const rules = draft.trigger_rules.map((r) => ({ ...r, keyword: r.keyword.trim() })).filter((r) => r.keyword);
+
+    if (!draft.name.trim()) return setErrorMsg('請輸入流程名稱');
+    if (rules.length === 0) return setErrorMsg('請至少設定一個觸發關鍵字');
+    for (const step of draft.steps) {
+      if (!step.message_template.trim()) return setErrorMsg(`步驟 ${step.step_order} 的訊息內容不能是空的`);
+      if (step.fields.some((f) => !f.label.trim())) return setErrorMsg(`步驟 ${step.step_order} 有欄位沒有填名稱`);
+    }
+
     setSaving(true);
+    setErrorMsg('');
     try {
-      await supabase
-        .from('settings')
-        .update({
-          booking_quote_message: quoteMessage,
-          booking_confirm_message: confirmMessage,
-        })
-        .eq('id', settingsId);
-      alert('已儲存！');
-    } catch (err: any) {
-      alert(`儲存失敗：${err.message}`);
+      const payload = {
+        name: draft.name.trim(),
+        trigger_rules: rules,
+        // 舊欄位同步寫入，萬一要退回改版前的程式仍讀得到關鍵字
+        trigger_keywords: serializeTriggerRules(rules),
+        reply_mode: draft.reply_mode,
+        quote_message: draft.quote_message,
+        confirm_message: draft.confirm_message,
+        is_active: draft.is_active,
+        display_order: draft.display_order,
+        updated_at: new Date().toISOString(),
+      };
+
+      let flowId = draft.id;
+      if (flowId) {
+        const { error } = await supabase.from('booking_flows').update(payload).eq('id', flowId);
+        if (error) throw error;
+        await supabase.from('booking_flow_steps').delete().eq('flow_id', flowId);
+      } else {
+        const { data, error } = await supabase.from('booking_flows').insert(payload).select('id').single();
+        if (error) throw error;
+        flowId = data.id;
+      }
+
+      const stepRows = draft.steps.map((s) => ({
+        flow_id: flowId,
+        step_order: s.step_order,
+        message_template: s.message_template,
+        fields: s.fields.map((f) => ({ key: f.key, label: f.label.trim(), quote_field: f.quote_field || null })),
+      }));
+      const { error: stepsError } = await supabase.from('booking_flow_steps').insert(stepRows);
+      if (stepsError) throw stepsError;
+
+      setEditing(false);
+      setDraft(null);
+      setSelectedId(flowId);
+      await fetchAll();
+    } catch (e: any) {
+      setErrorMsg(`儲存失敗：${e.message}`);
     } finally {
       setSaving(false);
     }
   };
 
-  const openNewFlow = () => {
-    setFlowForm({ ...emptyFlow(), display_order: flows.length });
-    setShowFlowForm(true);
-  };
-
-  const openEditFlow = (flow: Flow) => {
-    setFlowForm(JSON.parse(JSON.stringify(flow)));
-    setShowFlowForm(true);
-  };
-
-  const addStep = () => {
-    if (flowForm.steps.length >= MAX_STEPS) return;
-    setFlowForm({
-      ...flowForm,
-      steps: [...flowForm.steps, { step_order: flowForm.steps.length + 1, message_template: '', fields: [{ key: newId(), label: '', quote_field: '' }] }],
-    });
-  };
-
-  const removeStep = (index: number) => {
-    const steps = flowForm.steps.filter((_, i) => i !== index).map((s, i) => ({ ...s, step_order: i + 1 }));
-    setFlowForm({ ...flowForm, steps });
-  };
-
-  const updateStepMessage = (index: number, value: string) => {
-    const steps = [...flowForm.steps];
-    steps[index] = { ...steps[index], message_template: value };
-    setFlowForm({ ...flowForm, steps });
-  };
-
-  const addField = (stepIndex: number) => {
-    const steps = [...flowForm.steps];
-    if (steps[stepIndex].fields.length >= MAX_FIELDS_PER_STEP) return;
-    steps[stepIndex] = { ...steps[stepIndex], fields: [...steps[stepIndex].fields, { key: newId(), label: '', quote_field: '' }] };
-    setFlowForm({ ...flowForm, steps });
-  };
-
-  const removeField = (stepIndex: number, fieldIndex: number) => {
-    const steps = [...flowForm.steps];
-    steps[stepIndex] = { ...steps[stepIndex], fields: steps[stepIndex].fields.filter((_, i) => i !== fieldIndex) };
-    setFlowForm({ ...flowForm, steps });
-  };
-
-  const updateField = (stepIndex: number, fieldIndex: number, patch: Partial<FlowField>) => {
-    const steps = [...flowForm.steps];
-    const fields = [...steps[stepIndex].fields];
-    fields[fieldIndex] = { ...fields[fieldIndex], ...patch };
-    steps[stepIndex] = { ...steps[stepIndex], fields };
-    setFlowForm({ ...flowForm, steps });
-  };
-
-  const handleSaveFlow = async () => {
-    if (!flowForm.name.trim()) {
-      alert('請輸入流程名稱');
-      return;
-    }
-    if (!flowForm.trigger_keywords.trim()) {
-      alert('請輸入至少一個觸發關鍵字');
-      return;
-    }
-    for (const step of flowForm.steps) {
-      if (!step.message_template.trim()) {
-        alert(`第 ${step.step_order} 步驟的訊息內容不能是空的`);
-        return;
-      }
-      if (step.fields.some((f) => !f.label.trim())) {
-        alert(`第 ${step.step_order} 步驟有欄位沒有填標籤`);
-        return;
-      }
-    }
-
-    setSavingFlow(true);
-    try {
-      let flowId = flowForm.id;
-      const flowPayload = {
-        name: flowForm.name,
-        trigger_keywords: flowForm.trigger_keywords,
-        is_active: flowForm.is_active,
-        display_order: flowForm.display_order,
-        updated_at: new Date().toISOString(),
-      };
-
-      if (flowId) {
-        const { error } = await supabase.from('booking_flows').update(flowPayload).eq('id', flowId);
-        if (error) throw error;
-        await supabase.from('booking_flow_steps').delete().eq('flow_id', flowId);
-      } else {
-        const { data, error } = await supabase.from('booking_flows').insert(flowPayload).select('id').single();
-        if (error) throw error;
-        flowId = data.id;
-      }
-
-      const stepRows = flowForm.steps.map((s) => ({
-        flow_id: flowId,
-        step_order: s.step_order,
-        message_template: s.message_template,
-        fields: s.fields.map((f) => ({ key: f.key, label: f.label, quote_field: f.quote_field || null })),
-      }));
-      const { error: stepsError } = await supabase.from('booking_flow_steps').insert(stepRows);
-      if (stepsError) throw stepsError;
-
-      setShowFlowForm(false);
-      fetchFlows();
-    } catch (err: any) {
-      alert(`儲存失敗：${err.message}`);
-    } finally {
-      setSavingFlow(false);
-    }
-  };
-
-  const confirmDeleteFlow = async () => {
+  const confirmDelete = async () => {
     if (!deleteTarget) return;
-    setDeletingFlow(true);
+    setDeleting(true);
     try {
       const { error } = await supabase.from('booking_flows').delete().eq('id', deleteTarget.id);
       if (error) throw error;
       setDeleteTarget(null);
-      fetchFlows();
-    } catch (err: any) {
-      alert(`刪除失敗：${err.message}`);
+      setSelectedId(null);
+      setEditing(false);
+      setDraft(null);
+      await fetchAll();
+    } catch (e: any) {
+      setErrorMsg(`刪除失敗：${e.message}`);
     } finally {
-      setDeletingFlow(false);
+      setDeleting(false);
     }
   };
 
-  const toggleFlowActive = async (flow: Flow) => {
+  const toggleActive = async (flow: Flow) => {
     const { error } = await supabase.from('booking_flows').update({ is_active: !flow.is_active }).eq('id', flow.id);
     if (error) {
-      alert(`更新失敗：${error.message}`);
+      setErrorMsg(`更新失敗：${error.message}`);
       return;
     }
-    fetchFlows();
+    setFlows((prev) => prev.map((f) => (f.id === flow.id ? { ...f, is_active: !f.is_active } : f)));
   };
 
   if (loading) return <div className="p-8 text-center text-gray-500">載入中...</div>;
 
+  const current = editing ? draft : selected;
+  const missing = current ? missingQuoteFields(current) : [];
+  const quoteCapable = missing.length === 0;
+
   return (
-    <div className="max-w-6xl mx-auto space-y-6">
+    <div className="max-w-6xl mx-auto space-y-4">
       <PageHeader
         icon={<MessageSquareText className="w-6 h-6 text-green-600" />}
         title="LINE 自定訊息流程"
-        description="管理系統自動發送的標準訊息：LINE 訂房對話的分步驟流程，以及報價確認／付款確認罐頭訊息。"
+        description="顧客傳訊息時，系統依關鍵字啟動對應流程，一步步問完資料後自動算價、回報價、收訂金。"
+        action={<Button onClick={startNewFlow} icon={<Plus className="w-4 h-4" />}>新增流程</Button>}
       />
 
-      {/* 動態流程管理 */}
-      <div className="bg-white rounded-xl shadow-sm border overflow-hidden">
-        <div className="p-6 border-b flex justify-between items-start gap-4">
-          <div>
-            <h3 className="text-lg font-bold text-gray-800">流程管理</h3>
-            <p className="text-sm text-gray-500 mt-1">
-              每組流程有自己的觸發關鍵字，最多 {MAX_STEPS} 個步驟。每個步驟送出一段自訂訊息給顧客，等顧客回覆後擷取最多 {MAX_FIELDS_PER_STEP} 個答案，
-              全部步驟做完後，若已收集齊「入住日期／退房日期／入住人數／是否包棟」，就會自動算價並進入確認流程；沒收集齊則轉真人客服處理。
-            </p>
+      {errorMsg && (
+        <div className="flex items-start gap-2 bg-red-50 border border-red-200 text-red-700 text-sm px-4 py-3 rounded-xl">
+          <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+          <span className="flex-1">{errorMsg}</span>
+          <button onClick={() => setErrorMsg('')} className="text-red-400 hover:text-red-600 text-xs">關閉</button>
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 lg:grid-cols-[260px_minmax(0,1fr)] gap-4 items-start">
+        {/* 左：流程清單 */}
+        <div className="bg-white rounded-xl shadow-sm border overflow-hidden">
+          <p className="px-4 pt-4 pb-2 text-xs text-gray-400">流程清單（{flows.length}）</p>
+          <div className="pb-2">
+            {flows.length === 0 && selectedId !== NEW_FLOW_ID ? (
+              <p className="px-4 py-8 text-center text-sm text-gray-400">還沒有任何流程</p>
+            ) : (
+              flows.map((flow) => {
+                const active = selectedId === flow.id;
+                return (
+                  <button
+                    key={flow.id}
+                    onClick={() => selectFlow(flow.id)}
+                    className={`w-full text-left px-4 py-3 border-l-2 transition-colors ${
+                      active ? 'border-green-600 bg-green-50' : 'border-transparent hover:bg-gray-50'
+                    }`}
+                  >
+                    <span className="flex items-center gap-2">
+                      <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${flow.is_active ? 'bg-green-500' : 'bg-gray-300'}`} />
+                      <span className={`text-sm truncate ${active ? 'font-semibold text-green-800' : 'text-gray-700'}`}>{flow.name}</span>
+                    </span>
+                    <span className="block pl-3.5 mt-0.5 text-xs text-gray-400">
+                      {flow.steps.length} 步驟 · {flow.trigger_rules.length} 關鍵字{flow.is_active ? '' : ' · 已停用'}
+                    </span>
+                  </button>
+                );
+              })
+            )}
+            {selectedId === NEW_FLOW_ID && (
+              <div className="px-4 py-3 border-l-2 border-green-600 bg-green-50">
+                <span className="text-sm font-semibold text-green-800">{draft?.name || '（未命名流程）'}</span>
+                <span className="block mt-0.5 text-xs text-green-600">新增中，尚未儲存</span>
+              </div>
+            )}
           </div>
-          <Button onClick={openNewFlow} icon={<Plus className="w-4 h-4" />} className="whitespace-nowrap">新增流程</Button>
         </div>
 
-        <div className="divide-y divide-gray-100">
-          {flows.length === 0 ? (
-            <p className="p-10 text-center text-gray-400">尚未設定任何流程，點右上角「新增流程」開始</p>
+        {/* 右：流程內容 */}
+        <div className="bg-white rounded-xl shadow-sm border">
+          {!current ? (
+            <EmptyState
+              icon={<MessageSquareText className="w-12 h-12 text-gray-200" />}
+              message="從左邊選一個流程來檢視內容，或點右上角「新增流程」"
+            />
           ) : (
-            flows.map((flow) => (
-              <div key={flow.id} className="p-6 flex items-center justify-between gap-4">
+            <>
+              {/* 標題列 */}
+              <div className="flex flex-wrap justify-between items-start gap-3 px-6 py-4 border-b">
                 <div className="min-w-0">
-                  <div className="flex items-center gap-2">
-                    <p className="font-medium text-gray-800">{flow.name}</p>
-                    <span className="text-xs text-gray-400">{flow.steps.length} 個步驟</span>
-                  </div>
-                  <p className="text-xs text-gray-400 mt-1">觸發關鍵字：{flow.trigger_keywords}</p>
+                  {editing ? (
+                    <input
+                      value={draft!.name}
+                      onChange={(e) => patchDraft({ name: e.target.value })}
+                      className="text-lg font-bold text-gray-800 px-2 py-1 -ml-2 border rounded-lg w-72 max-w-full"
+                      placeholder="流程名稱，例如：報價訂房"
+                      autoFocus
+                    />
+                  ) : (
+                    <h3 className="text-lg font-bold text-gray-800 truncate">{current.name}</h3>
+                  )}
+                  <p className="text-xs mt-1 text-gray-400">
+                    {editing ? (dirty ? '有未儲存的變更' : '編輯模式') : current.is_active ? '啟用中 · 檢視模式' : '已停用 · 檢視模式'}
+                  </p>
                 </div>
+
                 <div className="flex items-center gap-2 shrink-0">
-                  <Switch checked={flow.is_active} onChange={() => toggleFlowActive(flow)} title={flow.is_active ? '啟用中' : '已停用'} />
-                  <button onClick={() => openEditFlow(flow)} className="p-2 hover:bg-gray-100 rounded-lg" title="編輯"><Pencil className="w-4 h-4 text-gray-500" /></button>
-                  <button onClick={() => setDeleteTarget(flow)} className="p-2 hover:bg-red-50 rounded-lg" title="刪除"><Trash2 className="w-4 h-4 text-red-500" /></button>
-                </div>
-              </div>
-            ))
-          )}
-        </div>
-      </div>
-
-      <Modal
-        open={showFlowForm}
-        title={flowForm.id ? '編輯流程' : '新增流程'}
-        onClose={() => setShowFlowForm(false)}
-        maxWidth="max-w-3xl"
-        footer={
-          <>
-            <Button variant="secondary" onClick={() => setShowFlowForm(false)}>取消</Button>
-            <Button onClick={handleSaveFlow} loading={savingFlow}>{savingFlow ? '儲存中...' : '儲存流程'}</Button>
-          </>
-        }
-      >
-              <div className="space-y-6">
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs text-gray-500 mb-1">流程名稱</label>
-                  <input value={flowForm.name} onChange={(e) => setFlowForm({ ...flowForm, name: e.target.value })} className="w-full px-3 py-2 border rounded-lg" placeholder="例如：一般訂房詢問" />
-                </div>
-                <div>
-                  <label className="block text-xs text-gray-500 mb-1">觸發關鍵字（逗號分隔）</label>
-                  <input value={flowForm.trigger_keywords} onChange={(e) => setFlowForm({ ...flowForm, trigger_keywords: e.target.value })} className="w-full px-3 py-2 border rounded-lg" placeholder="我要訂房,訂房" />
+                  {editing ? (
+                    <>
+                      <Button variant="secondary" onClick={cancelEdit}>取消</Button>
+                      <Button onClick={handleSave} loading={saving}>{saving ? '儲存中...' : '儲存流程'}</Button>
+                    </>
+                  ) : (
+                    <>
+                      <Switch checked={current.is_active} onChange={() => toggleActive(current)} title={current.is_active ? '啟用中' : '已停用'} />
+                      <Button variant="secondary" onClick={startEdit} icon={<Pencil className="w-4 h-4" />}>編輯</Button>
+                      <button
+                        onClick={() => setDeleteTarget(current)}
+                        className="p-2 hover:bg-red-50 rounded-lg border border-transparent hover:border-red-200"
+                        title="刪除流程"
+                      >
+                        <Trash2 className="w-4 h-4 text-red-500" />
+                      </button>
+                    </>
+                  )}
                 </div>
               </div>
 
-              <div className="space-y-4">
-                {flowForm.steps.map((step, stepIndex) => (
-                  <div key={stepIndex} className="border rounded-lg overflow-hidden">
-                    <div className="flex items-center justify-between gap-2 bg-gray-50 px-4 py-2 border-b">
-                      <span className="flex items-center gap-2 text-sm font-semibold text-gray-700">
-                        <GripVertical className="w-4 h-4 text-gray-300" />
-                        步驟 {step.step_order}
-                      </span>
-                      {flowForm.steps.length > 1 && (
-                        <button onClick={() => removeStep(stepIndex)} className="p-1 text-red-500 hover:bg-red-50 rounded" title="刪除此步驟">
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      )}
-                    </div>
-                    <div className="p-4 space-y-3">
-                      <div>
-                        <label className="block text-xs text-gray-500 mb-1">送給顧客的訊息（AI 回答樣版）</label>
-                        <MessageTemplateEditor value={step.message_template} onChange={(v) => updateStepMessage(stepIndex, v)} placeholders={[]} rows={3} placeholder="例如：請問您預計入住與退房日期？" />
+              <div className="px-6">
+                {/* ① 觸發條件 */}
+                <Stage index={1} title="觸發條件" icon={<MessageCircleQuestion className="w-4 h-4" />}>
+                  {editing ? (
+                    <div className="space-y-3">
+                      <div className="space-y-2">
+                        {draft!.trigger_rules.map((rule, i) => (
+                          <div key={i} className="flex items-center gap-2">
+                            <select
+                              value={rule.match}
+                              onChange={(e) => updateKeyword(i, { match: e.target.value as KeywordMatch })}
+                              className="w-32 px-2 py-1.5 border rounded-lg text-sm bg-white shrink-0"
+                            >
+                              <option value="exact">等於</option>
+                              <option value="contains">相關</option>
+                            </select>
+                            <input
+                              value={rule.keyword}
+                              onChange={(e) => updateKeyword(i, { keyword: e.target.value })}
+                              className="flex-1 px-3 py-1.5 border rounded-lg text-sm"
+                              placeholder="關鍵字，例如：訂房"
+                            />
+                            <button
+                              onClick={() => removeKeyword(i)}
+                              className="p-1.5 text-red-500 hover:bg-red-50 rounded shrink-0"
+                              title="刪除這個關鍵字"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
+                        ))}
                       </div>
-                      <div>
-                        <div className="flex justify-between items-center mb-2">
-                          <label className="text-xs text-gray-500">預期顧客回答的欄位（最多 {MAX_FIELDS_PER_STEP} 個）</label>
-                          <button onClick={() => addField(stepIndex)} disabled={step.fields.length >= MAX_FIELDS_PER_STEP} className="text-xs flex items-center gap-1 text-green-600 hover:text-green-700 disabled:opacity-40 disabled:cursor-not-allowed">
-                            <Plus className="w-3.5 h-3.5" /> 新增欄位
-                          </button>
-                        </div>
-                        <div className="space-y-2">
-                          {step.fields.map((field, fieldIndex) => (
-                            <div key={field.key} className="flex items-center gap-2">
-                              <input
-                                value={field.label}
-                                onChange={(e) => updateField(stepIndex, fieldIndex, { label: e.target.value })}
-                                className="flex-1 px-2 py-1.5 border rounded text-sm"
-                                placeholder="欄位名稱，例如：入住日期"
-                              />
-                              <select
-                                value={field.quote_field}
-                                onChange={(e) => updateField(stepIndex, fieldIndex, { quote_field: e.target.value })}
-                                className="w-56 px-2 py-1.5 border rounded text-sm bg-white"
-                              >
-                                {QUOTE_FIELD_OPTIONS.map((o) => (
-                                  <option key={o.value} value={o.value}>{o.label}</option>
-                                ))}
-                              </select>
-                              {step.fields.length > 1 && (
-                                <button onClick={() => removeField(stepIndex, fieldIndex)} className="p-1.5 text-red-500 hover:bg-red-50 rounded">
-                                  <Trash2 className="w-4 h-4" />
-                                </button>
-                              )}
-                            </div>
+                      <button onClick={addKeyword} className="text-xs flex items-center gap-1 text-green-600 hover:text-green-700">
+                        <Plus className="w-3.5 h-3.5" /> 新增關鍵字（不限數量）
+                      </button>
+                      <p className="text-xs text-gray-400">
+                        「等於」＝顧客整句話就是這個關鍵字才觸發；「相關」＝句子裡出現這個關鍵字就觸發。
+                        短關鍵字建議用「等於」，否則很容易被無關的句子誤觸。
+                      </p>
+
+                      <div className="pt-3 border-t">
+                        <p className="text-xs text-gray-500 mb-2">顧客回覆的解讀方式</p>
+                        <div className="grid sm:grid-cols-2 gap-2">
+                          {([
+                            { value: 'ai', icon: <Sparkles className="w-4 h-4" />, title: 'AI 理解', desc: '讀得懂「下週五」「我們四大兩小」這類說法，每則回覆會呼叫一次 AI。' },
+                            { value: 'system', icon: <Cpu className="w-4 h-4" />, title: '系統自行比對', desc: '完全不呼叫 AI，省 token。只認得 7/30、2026-07-30、4 位、包棟這類標準寫法。' },
+                          ] as const).map((opt) => (
+                            <button
+                              key={opt.value}
+                              onClick={() => patchDraft({ reply_mode: opt.value })}
+                              className={`text-left p-3 rounded-lg border-2 transition-colors ${
+                                draft!.reply_mode === opt.value ? 'border-green-500 bg-green-50' : 'border-gray-200 hover:border-gray-300'
+                              }`}
+                            >
+                              <span className={`flex items-center gap-2 text-sm font-medium ${
+                                draft!.reply_mode === opt.value ? 'text-green-800' : 'text-gray-700'
+                              }`}>
+                                {opt.icon}{opt.title}
+                              </span>
+                              <span className="block mt-1 text-xs text-gray-500">{opt.desc}</span>
+                            </button>
                           ))}
                         </div>
                       </div>
                     </div>
+                  ) : (
+                    <div className="space-y-3">
+                      <div className="flex flex-wrap gap-2">
+                        {current.trigger_rules.length === 0 ? (
+                          <span className="text-sm text-gray-400 italic">尚未設定關鍵字，這個流程不會被觸發</span>
+                        ) : (
+                          current.trigger_rules.map((r, i) => <KeywordChip key={i} rule={r} />)
+                        )}
+                      </div>
+                      <ReplyModeSummary mode={current.reply_mode} />
+                    </div>
+                  )}
+                </Stage>
+
+                {/* ② 收集客戶資訊 */}
+                <Stage index={2} title="收集客戶資訊" icon={<MessageSquareText className="w-4 h-4" />}>
+                  {editing ? (
+                    <div className="space-y-3">
+                      {draft!.steps.map((step, si) => (
+                        <div key={si} className="border rounded-lg overflow-hidden">
+                          <div className="flex items-center justify-between gap-2 bg-gray-50 px-4 py-2 border-b">
+                            <span className="text-sm font-semibold text-gray-700">步驟 {step.step_order}</span>
+                            {draft!.steps.length > 1 && (
+                              <button onClick={() => removeStep(si)} className="p-1 text-red-500 hover:bg-red-100 rounded" title="刪除此步驟">
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            )}
+                          </div>
+                          <div className="p-4 space-y-4">
+                            <div>
+                              <label className="block text-xs text-gray-500 mb-1">送給顧客的訊息</label>
+                              <MessageTemplateEditor
+                                value={step.message_template}
+                                onChange={(v) => updateStep(si, { message_template: v })}
+                                placeholders={variables}
+                                rows={3}
+                                placeholder="例如：請問您預計的入住與退房日期？"
+                              />
+                            </div>
+                            <div>
+                              <div className="flex justify-between items-center mb-2">
+                                <label className="text-xs text-gray-500">要從顧客回覆取得的答案（最多 {MAX_FIELDS_PER_STEP} 個）</label>
+                                <button
+                                  onClick={() => addField(si)}
+                                  disabled={step.fields.length >= MAX_FIELDS_PER_STEP}
+                                  className="text-xs flex items-center gap-1 text-green-600 hover:text-green-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                                >
+                                  <Plus className="w-3.5 h-3.5" /> 新增答案欄位
+                                </button>
+                              </div>
+                              <div className="space-y-2">
+                                {step.fields.map((field, fi) => (
+                                  <div key={field.key} className="flex items-center gap-2">
+                                    <input
+                                      value={field.label}
+                                      onChange={(e) => updateField(si, fi, { label: e.target.value })}
+                                      className="flex-1 px-2 py-1.5 border rounded text-sm"
+                                      placeholder="答案名稱，例如：入住日期"
+                                    />
+                                    <ArrowRight className="w-3.5 h-3.5 text-gray-300 shrink-0" />
+                                    <select
+                                      value={field.quote_field}
+                                      onChange={(e) => updateField(si, fi, { quote_field: e.target.value })}
+                                      className="w-60 px-2 py-1.5 border rounded text-sm bg-white shrink-0"
+                                    >
+                                      {QUOTE_FIELD_OPTIONS.map((o) => (
+                                        <option key={o.value} value={o.value}>{o.label}</option>
+                                      ))}
+                                    </select>
+                                    {step.fields.length > 1 && (
+                                      <button onClick={() => removeField(si, fi)} className="p-1.5 text-red-500 hover:bg-red-50 rounded shrink-0">
+                                        <Trash2 className="w-4 h-4" />
+                                      </button>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                      <button
+                        onClick={addStep}
+                        disabled={draft!.steps.length >= MAX_STEPS}
+                        className="w-full flex items-center justify-center gap-2 border-2 border-dashed rounded-lg py-3 text-sm text-gray-500 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        <Plus className="w-4 h-4" /> 新增步驟（{draft!.steps.length}/{MAX_STEPS}）
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      {current.steps.length === 0 ? (
+                        <p className="text-sm text-gray-400 italic">尚未設定任何步驟</p>
+                      ) : (
+                        current.steps.map((step) => (
+                          <div key={step.step_order} className="bg-gray-50 rounded-lg p-3">
+                            <p className="text-xs text-gray-400 mb-1.5">步驟 {step.step_order} · 送出訊息</p>
+                            <VariableText value={step.message_template} knownVariables={variables} />
+                            {step.fields.length > 0 && (
+                              <p className="text-xs text-gray-500 mt-2 pt-2 border-t border-gray-200">
+                                要取得：
+                                {step.fields.map((f, i) => (
+                                  <span key={f.key}>
+                                    {i > 0 && ' · '}
+                                    {f.label || '（未命名）'}
+                                    {f.quote_field && <span className="text-gray-400">（算價）</span>}
+                                  </span>
+                                ))}
+                              </p>
+                            )}
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  )}
+                </Stage>
+
+                {/* ③ 系統試算 */}
+                <Stage index={3} title="系統試算" icon={<Calculator className="w-4 h-4" />} muted={!quoteCapable}>
+                  <div className={`rounded-lg p-3 text-xs leading-6 ${quoteCapable ? 'bg-gray-50 text-gray-600' : 'bg-amber-50 text-amber-800 border border-amber-200'}`}>
+                    {quoteCapable ? (
+                      <>
+                        自動執行、無法在這裡編輯。系統依「房型與報價」頁的設定算出金額，
+                        算不出價（例如該時段沒開放、超過可接待人數）就轉真人客服。
+                      </>
+                    ) : (
+                      <>
+                        <strong className="font-semibold">這個流程還算不出價格。</strong>
+                        缺少 {missing.join('、')}，收集完成後會直接轉真人客服，下面的報價確認與付款確認不會送出。
+                        若要自動報價，請在步驟裡把對應答案的下拉選單指到這些算價欄位。
+                      </>
+                    )}
                   </div>
-                ))}
+                </Stage>
+
+                {/* ④ 報價確認 */}
+                <Stage index={4} title="報價確認" icon={<CheckCircle2 className="w-4 h-4" />} muted={!quoteCapable}>
+                  {editing ? (
+                    <>
+                      <p className="text-xs text-gray-400 mb-2">算完金額後送出，接著等顧客回覆「是」繼續、「否」取消。</p>
+                      <MessageTemplateEditor
+                        value={draft!.quote_message}
+                        onChange={(v) => patchDraft({ quote_message: v })}
+                        placeholders={variables}
+                        rows={8}
+                      />
+                    </>
+                  ) : (
+                    <div className="bg-gray-50 rounded-lg p-3">
+                      <VariableText value={current.quote_message} knownVariables={variables} />
+                      <p className="text-xs text-gray-400 mt-2 pt-2 border-t border-gray-200">送出後等顧客回覆「是」繼續、「否」取消。</p>
+                    </div>
+                  )}
+                </Stage>
+
+                {/* ⑤ 付款確認 */}
+                <Stage index={5} title="付款確認" icon={<Wallet className="w-4 h-4" />} muted={!quoteCapable}>
+                  {editing ? (
+                    <>
+                      <p className="text-xs text-gray-400 mb-2">
+                        顧客回「是」之後送出，同時把訂單建成「待預定」並鎖房。
+                        [訂金] 會在這一刻重新讀一次訂房紀錄；[匯款日時間] 由系統自動算（18:00 前帶今天 21:00，之後帶明天 21:00）。
+                      </p>
+                      <MessageTemplateEditor
+                        value={draft!.confirm_message}
+                        onChange={(v) => patchDraft({ confirm_message: v })}
+                        placeholders={variables}
+                        rows={10}
+                      />
+                    </>
+                  ) : (
+                    <div className="bg-gray-50 rounded-lg p-3">
+                      <VariableText value={current.confirm_message} knownVariables={variables} />
+                      <p className="flex items-center gap-1.5 text-xs text-gray-400 mt-2 pt-2 border-t border-gray-200">
+                        <UserRound className="w-3.5 h-3.5" />
+                        訂單建立為「待預定」，實際入帳目前由人工在「訂單管理」核對後改成「已預定」。
+                      </p>
+                    </div>
+                  )}
+                </Stage>
               </div>
-
-              <button
-                onClick={addStep}
-                disabled={flowForm.steps.length >= MAX_STEPS}
-                className="w-full flex items-center justify-center gap-2 border-2 border-dashed rounded-lg py-3 text-sm text-gray-500 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
-              >
-                <Plus className="w-4 h-4" /> 新增步驟（{flowForm.steps.length}/{MAX_STEPS}）
-              </button>
-            </div>
-      </Modal>
-
-      <div className="bg-white p-6 rounded-xl shadow-sm border flex justify-end">
-        <Button onClick={handleSaveSettings} loading={saving} icon={<Save className="w-4 h-4" />} className="whitespace-nowrap">
-          {saving ? '儲存中...' : '儲存罐頭訊息'}
-        </Button>
+            </>
+          )}
+        </div>
       </div>
 
       <ConfirmDialog
         open={!!deleteTarget}
         title="刪除流程"
-        message={`確定要刪除流程「${deleteTarget?.name}」嗎？`}
+        message={`確定要刪除流程「${deleteTarget?.name}」嗎？這個流程的所有步驟、關鍵字與確認訊息都會一起刪除，無法復原。`}
         confirmLabel="刪除"
         danger
-        loading={deletingFlow}
-        onConfirm={confirmDeleteFlow}
+        loading={deleting}
+        onConfirm={confirmDelete}
         onCancel={() => setDeleteTarget(null)}
       />
 
-      <CollapsibleSection
-        title="報價確認／付款確認罐頭訊息"
-        icon={<MessageSquareText className="w-5 h-5 text-orange-600" />}
-        description="流程走完、成功算出價格後才會用到這兩段訊息，方括號 [欄位名稱] 是合併欄位。"
-        defaultOpen={true}
-      >
-        <div className="p-6 border-b">
-          <p className="text-sm font-medium text-gray-700 mb-1">① 報價確認（算完金額後送出）</p>
-          <p className="text-xs text-gray-400 mb-2">送出後會等顧客回覆「是」或「否」。</p>
-          <MessageTemplateEditor value={quoteMessage} onChange={setQuoteMessage} placeholders={QUOTE_MESSAGE_PLACEHOLDERS} rows={10} />
-        </div>
-
-        <div className="p-6">
-          <p className="text-sm font-medium text-gray-700 mb-1">② 付款確認（顧客回「是」之後）</p>
-          <p className="text-xs text-gray-400 mb-2">
-            [訂金] 讀自訂房紀錄（顧客回「是」的當下重新讀一次，讓您有時間先填好或用其他方式算好）；
-            [匯款日時間] 由系統自動算：目前時間 18:00 前帶入今天 21:00，18:00（含）以後帶入明天 21:00。
-          </p>
-          <MessageTemplateEditor value={confirmMessage} onChange={setConfirmMessage} placeholders={CONFIRM_MESSAGE_PLACEHOLDERS} rows={14} />
-        </div>
-      </CollapsibleSection>
+      <ConfirmDialog
+        open={!!pendingAction}
+        title="放棄未儲存的變更？"
+        message="這個流程有還沒儲存的修改，離開的話這些變更會消失。"
+        confirmLabel="放棄變更"
+        cancelLabel="繼續編輯"
+        danger
+        onConfirm={() => {
+          const action = pendingAction;
+          setPendingAction(null);
+          setEditing(false);
+          setDraft(null);
+          action?.();
+        }}
+        onCancel={() => setPendingAction(null)}
+      />
     </div>
   );
 }

@@ -5,7 +5,13 @@ import OpenAI from 'openai';
 import fetch from 'node-fetch';
 import crypto from 'crypto';
 import { computeMultiNightQuote } from '../../src/lib/bookingEngine';
-import { buildMergeFields, MessageVariable } from '../../src/lib/messageVariables';
+import {
+  buildMergeFields,
+  MessageVariable,
+  TriggerRule,
+  parseTriggerRules,
+  matchTriggerRules,
+} from '../../src/lib/messageVariables';
 import { bookingStatusLabel, OCCUPYING_STATUSES } from '../../src/lib/bookingStatus';
 
 const supabase = createClient(
@@ -29,6 +35,8 @@ function parseCsvKeywords(raw: string | null | undefined): string[] {
     .filter((k) => k.length > 0);
 }
 
+// 轉接規則（真人客服關鍵字）專用。訂房流程的關鍵字比對已改用 matchTriggerRules()——
+// 每個關鍵字各自設定等於／相關。兩邊不要合併：這個函式一改，轉接行為就會跟著變。
 function matchKeyword(userMessage: string, keywords: string[]): string | undefined {
   return keywords.find((k) => (k.length === 1 ? userMessage === k : userMessage.includes(k)));
 }
@@ -157,7 +165,7 @@ export const handler: Handler = async (event) => {
       if (settings.is_ai_enabled) {
         const existingSession = loadBookingSession(userState);
         const activeFlows = await fetchActiveFlows();
-        const matchedFlow = activeFlows.find((f) => matchKeyword(userMessage, parseCsvKeywords(f.triggerKeywords)));
+        const matchedFlow = activeFlows.find((f) => matchTriggerRules(userMessage, f.triggerRules));
 
         if (matchedFlow) {
           try {
@@ -223,8 +231,25 @@ interface FlowStepDef {
 interface FlowDef {
   id: string;
   name: string;
-  triggerKeywords: string;
+  triggerRules: TriggerRule[];
+  // 'ai'＝呼叫 AI 理解顧客回覆並擷取欄位；'system'＝完全不呼叫 AI，用純程式解析（省 token）
+  replyMode: 'ai' | 'system';
+  // 流程自己的報價／付款確認訊息。null＝這個流程還沒設定，webhook 會退回 settings 的舊值。
+  quoteMessage: string | null;
+  confirmMessage: string | null;
   steps: FlowStepDef[];
+}
+
+function mapFlowRow(row: any, stepRows: any[]): FlowDef {
+  return {
+    id: row.id,
+    name: row.name,
+    triggerRules: parseTriggerRules(row.trigger_rules, row.trigger_keywords),
+    replyMode: row.reply_mode === 'system' ? 'system' : 'ai',
+    quoteMessage: row.quote_message ?? null,
+    confirmMessage: row.confirm_message ?? null,
+    steps: stepRows.map((s: any) => ({ step_order: s.step_order, message_template: s.message_template, fields: s.fields || [] })),
+  };
 }
 
 interface BookingQuoteInfo {
@@ -274,24 +299,14 @@ async function fetchActiveFlows(): Promise<FlowDef[]> {
   const { data: flows } = await supabase.from('booking_flows').select('*').eq('is_active', true).order('display_order');
   if (!flows || !flows.length) return [];
   const { data: steps } = await supabase.from('booking_flow_steps').select('*').in('flow_id', flows.map((f: any) => f.id)).order('step_order');
-  return flows.map((f: any) => ({
-    id: f.id,
-    name: f.name,
-    triggerKeywords: f.trigger_keywords,
-    steps: (steps || []).filter((s: any) => s.flow_id === f.id).map((s: any) => ({ step_order: s.step_order, message_template: s.message_template, fields: s.fields || [] })),
-  }));
+  return flows.map((f: any) => mapFlowRow(f, (steps || []).filter((s: any) => s.flow_id === f.id)));
 }
 
 async function fetchFlowById(flowId: string): Promise<FlowDef | null> {
   const { data: flow } = await supabase.from('booking_flows').select('*').eq('id', flowId).single();
   if (!flow) return null;
   const { data: steps } = await supabase.from('booking_flow_steps').select('*').eq('flow_id', flowId).order('step_order');
-  return {
-    id: flow.id,
-    name: flow.name,
-    triggerKeywords: flow.trigger_keywords,
-    steps: (steps || []).map((s: any) => ({ step_order: s.step_order, message_template: s.message_template, fields: s.fields || [] })),
-  };
+  return mapFlowRow(flow, steps || []);
 }
 
 function buildStepExtractionPrompt(todayIso: string, fields: FlowFieldDef[]): string {
@@ -361,6 +376,135 @@ async function extractStepFields(settings: any, userMessage: string, fields: Flo
     raw = await callGemini(settings, userMessage, [], prompt);
   }
   return parseStepExtraction(raw, fields);
+}
+
+// ------------------------------------------------------------------------
+// 系統模式（reply_mode = 'system'）的欄位擷取：完全不呼叫 AI，用純程式解析顧客回覆。
+// 好處是每則訊息省下一次 LLM 呼叫；代價是只認得標準寫法，「下週五」這種相對日期讀不出來，
+// 讀不出來的欄位會留空，continueBookingFlow() 就會照原本的邏輯再問一次。
+// ------------------------------------------------------------------------
+
+// 依序比對：完整年月日 → 「7月30日」→ 「7/30」。最後一組用 (?<!\d)/(?!\d) 夾住，
+// 避免把 2026-07-30 的片段重複當成一個獨立日期。
+const DATE_SCAN_RE = /(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})|(\d{1,2})\s*月\s*(\d{1,2})\s*[日號]?|(?<!\d)(\d{1,2})[-/.](\d{1,2})(?!\d)/g;
+
+function taiwanToday(): Date {
+  const tw = new Date(Date.now() + 8 * 60 * 60 * 1000);
+  return new Date(tw.getUTCFullYear(), tw.getUTCMonth(), tw.getUTCDate());
+}
+
+// 顧客只寫月/日時，比照 AI 版提示詞的規則推算年份：日期還沒過就用今年，已經過了就用明年。
+function buildIsoDate(month: number, day: number, year?: number): string | null {
+  if (!(month >= 1 && month <= 12) || !(day >= 1 && day <= 31)) return null;
+  const today = taiwanToday();
+  let y = year ?? today.getFullYear();
+  let d = new Date(y, month - 1, day);
+  if (d.getMonth() !== month - 1) return null; // 例如 2/30：JS 會自動進位到 3 月，視為無效日期
+  if (year === undefined && d.getTime() < today.getTime()) {
+    y += 1;
+    d = new Date(y, month - 1, day);
+  }
+  return `${y}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+}
+
+function scanDates(message: string): string[] {
+  const found: string[] = [];
+  for (const m of message.matchAll(DATE_SCAN_RE)) {
+    let iso: string | null = null;
+    if (m[1]) iso = buildIsoDate(Number(m[2]), Number(m[3]), Number(m[1]));
+    else if (m[4]) iso = buildIsoDate(Number(m[4]), Number(m[5]));
+    else if (m[6]) iso = buildIsoDate(Number(m[6]), Number(m[7]));
+    if (iso && !found.includes(iso)) found.push(iso);
+  }
+  return found;
+}
+
+function scanHeadcount(message: string): string | undefined {
+  // 先把日期字樣挖掉，否則「7/30 入住」的 7 會被誤判成人數
+  const withoutDates = message.replace(DATE_SCAN_RE, ' ');
+  const m = withoutDates.match(/(\d{1,3})\s*(?:位|人|個人|大人)?/);
+  if (!m) return undefined;
+  const n = Number(m[1]);
+  return Number.isFinite(n) && n > 0 ? String(n) : undefined;
+}
+
+function scanWholeHouse(message: string): string | undefined {
+  const trimmed = message.trim();
+  // 否定要先判斷：「不包棟」裡面也含有「包棟」兩個字
+  if (/不\s*(用|要|需要)?\s*(包棟|包整棟|整棟)|沒有?\s*要?\s*包棟/.test(trimmed)) return 'false';
+  if (/包棟|包整棟|整棟/.test(trimmed)) return 'true';
+  if (/^(否|不要|不用|不需要|不|no)/i.test(trimmed)) return 'false';
+  if (/^(是|要|對|好|需要|沒問題|ok|yes)/i.test(trimmed)) return 'true';
+  return undefined;
+}
+
+function extractStepFieldsWithoutAi(userMessage: string, fields: FlowFieldDef[]): Record<string, string> {
+  const result: Record<string, string> = {};
+  const message = userMessage || '';
+
+  // 同一個步驟同時問入住與退房時，一句話裡會出現兩個日期：照欄位順序配對第一個、第二個。
+  const dateFields = fields.filter((f) => f.quote_field === 'checkin_date' || f.quote_field === 'checkout_date');
+  if (dateFields.length > 0) {
+    const dates = scanDates(message);
+    dateFields.forEach((f, i) => {
+      if (dates[i]) result[f.key] = dates[i];
+    });
+  }
+
+  for (const f of fields) {
+    if (result[f.key] !== undefined) continue;
+    if (f.quote_field === 'headcount') {
+      const v = scanHeadcount(message);
+      if (v !== undefined) result[f.key] = v;
+    } else if (f.quote_field === 'whole_house') {
+      const v = scanWholeHouse(message);
+      if (v !== undefined) result[f.key] = v;
+    }
+  }
+
+  // 自由文字欄位（quote_field 為 null，例如姓名、電話）沒有 AI 可以拆句子，
+  // 只有在整個步驟就問這一個欄位時才能安全地把整句話當答案；問兩個以上就留空再問一次。
+  const freeTextFields = fields.filter((f) => !f.quote_field);
+  if (freeTextFields.length === 1 && fields.length === 1 && message.trim()) {
+    result[freeTextFields[0].key] = message.trim();
+  }
+
+  return result;
+}
+
+// ------------------------------------------------------------------------
+// 流程訊息的變數替換：步驟訊息、報價確認、付款確認都會經過這裡，
+// 讓管理員在「訊息變數資料維護」設定的 [變數名稱] 真的換成實際資料。
+// 範本裡沒有方括號就直接原文回傳，不會多打資料庫。
+// ------------------------------------------------------------------------
+async function renderFlowMessage(
+  template: string,
+  settings: any,
+  userId: string,
+  nickname: string | null,
+  bookingId: string | null
+): Promise<string> {
+  if (!template || !template.includes('[')) return template;
+  try {
+    const variables = await fetchMessageVariables();
+    let booking: any = null;
+    if (bookingId) {
+      const { data } = await supabase.from('bookings').select('*').eq('id', bookingId).maybeSingle();
+      booking = data;
+    }
+    return mergeTemplate(
+      template,
+      buildMergeFields(variables, {
+        booking: booking || undefined,
+        customer: { nickname, line_user_id: userId },
+        settings,
+      })
+    );
+  } catch (e: any) {
+    // 替換失敗不能讓整個流程卡住，退回原文（顧客會看到 [變數名稱]，但對話能繼續）
+    console.error('[Booking] render message failed:', e.message);
+    return template;
+  }
 }
 
 function pickByLabelHeuristic(collected: Record<string, string>, allFields: FlowFieldDef[], keywords: string[]): string | null {
@@ -571,8 +715,9 @@ async function startBookingFlow(
   if (!firstStep) return; // 流程沒有設定任何步驟，視為設定異常，不處理
 
   await saveBookingSession(userId, { flowId: flow.id, stepIndex: 0, collected: {}, bookingId: bookingId as string, phase: 'in_flow', quote: null });
-  await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: firstStep.message_template });
-  await logConversation(userId, resolvedNickname, 'outbound', firstStep.message_template, 'system');
+  const firstMessage = await renderFlowMessage(firstStep.message_template, settings, userId, resolvedNickname, bookingId);
+  await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: firstMessage });
+  await logConversation(userId, resolvedNickname, 'outbound', firstMessage, 'system');
 }
 
 async function continueBookingFlow(
@@ -600,10 +745,14 @@ async function continueBookingFlow(
     return;
   }
 
-  const extracted = await extractStepFields(settings, userMessage, currentStep.fields).catch((e: any) => {
-    console.error('[Booking] step extraction failed:', e.message);
-    return {};
-  });
+  // 系統模式不呼叫 AI，直接用純程式解析顧客回覆（省 token）；AI 模式維持原本的 LLM 擷取。
+  const extracted =
+    flow.replyMode === 'system'
+      ? extractStepFieldsWithoutAi(userMessage, currentStep.fields)
+      : await extractStepFields(settings, userMessage, currentStep.fields).catch((e: any) => {
+          console.error('[Booking] step extraction failed:', e.message);
+          return {} as Record<string, string>;
+        });
   const collected = { ...session.collected, ...extracted };
 
   const missingFields = currentStep.fields.filter((f) => !collected[f.key]);
@@ -621,8 +770,9 @@ async function continueBookingFlow(
   const nextStep = flow.steps.find((s) => s.step_order === nextStepOrder);
   if (nextStep) {
     await saveBookingSession(userId, { ...session, stepIndex: session.stepIndex + 1, collected });
-    await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: nextStep.message_template });
-    await logConversation(userId, nickname, 'outbound', nextStep.message_template, 'system');
+    const nextMessage = await renderFlowMessage(nextStep.message_template, settings, userId, nickname, session.bookingId);
+    await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: nextMessage });
+    await logConversation(userId, nickname, 'outbound', nextMessage, 'system');
     return;
   }
 
@@ -769,8 +919,9 @@ async function finishBookingFlow(
     mirrorBookingToSheet(settings, updatedBooking).catch(() => {});
 
     const quoteVariables = await fetchMessageVariables();
+    // 優先用流程自己的報價確認訊息；還沒設定（例如剛升級、欄位是 NULL）就退回 settings 的舊值。
     const quoteMessage = mergeTemplate(
-      settings.booking_quote_message || '',
+      flow.quoteMessage ?? settings.booking_quote_message ?? '',
       buildMergeFields(quoteVariables, {
         booking: updatedBooking,
         customer: { nickname, line_user_id: userId },
@@ -921,7 +1072,9 @@ async function handleBookingConfirmation(
   // 不受「訊息變數資料維護」頁面的設定影響（就算被刪除或改名也一樣會生效）。
   confirmFields['匯款日時間'] = computePaymentDeadline();
 
-  const confirmMessage = mergeTemplate(settings.booking_confirm_message || '', confirmFields);
+  // 同報價確認：優先用流程自己的付款確認訊息，沒有才退回 settings 的舊值。
+  const flowForConfirm = await fetchFlowById(session.flowId).catch(() => null);
+  const confirmMessage = mergeTemplate(flowForConfirm?.confirmMessage ?? settings.booking_confirm_message ?? '', confirmFields);
 
   await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: confirmMessage });
   await logConversation(userId, nickname, 'outbound', confirmMessage, 'system');

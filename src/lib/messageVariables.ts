@@ -89,6 +89,88 @@ export const SOURCE_OPTIONS: { value: VariableSource; label: string; fields: { v
   { value: 'settings', label: '民宿設定', fields: SETTINGS_FIELD_OPTIONS },
 ];
 
+// 不在 message_variables 對照表裡、但 line-webhook.ts 一定會自己算出來帶入的變數。
+// 編輯器要認得它們，否則管理員會看到「這個變數沒有登記」的假警告。
+export const ALWAYS_AVAILABLE_VARIABLES = ['匯款日時間'];
+
+// ------------------------------------------------------------------------
+// 訊息範本切段：把 "您好 [姓名]" 切成 [文字, 變數]，
+// 供編輯器上色與檢視模式渲染綠色標籤共用，避免兩邊的判斷規則走鐘。
+// 方括號裡不允許換行或巢狀括號，才算是一個變數 token。
+// ------------------------------------------------------------------------
+export type TemplateSegment = { type: 'text'; value: string } | { type: 'variable'; name: string };
+
+const VARIABLE_TOKEN_RE = /\[([^[\]\n]+)\]/g;
+
+export function parseTemplateSegments(template: string): TemplateSegment[] {
+  const segments: TemplateSegment[] = [];
+  let lastIndex = 0;
+  for (const match of (template || '').matchAll(VARIABLE_TOKEN_RE)) {
+    const start = match.index ?? 0;
+    if (start > lastIndex) segments.push({ type: 'text', value: template.slice(lastIndex, start) });
+    segments.push({ type: 'variable', name: match[1] });
+    lastIndex = start + match[0].length;
+  }
+  if (lastIndex < (template || '').length) segments.push({ type: 'text', value: template.slice(lastIndex) });
+  return segments;
+}
+
+// 範本裡用到、但對照表查不到的變數名稱。編輯器用這份清單提醒管理員可能是打錯字，
+// 因為這種 token 送出去時不會被替換，會原封不動出現在顧客的訊息裡。
+export function findUnknownVariables(template: string, knownNames: string[]): string[] {
+  const known = new Set([...knownNames, ...ALWAYS_AVAILABLE_VARIABLES]);
+  const unknown = new Set<string>();
+  for (const seg of parseTemplateSegments(template)) {
+    if (seg.type === 'variable' && !known.has(seg.name)) unknown.add(seg.name);
+  }
+  return [...unknown];
+}
+
+// ------------------------------------------------------------------------
+// 流程觸發關鍵字
+// 「等於」＝顧客整句話就是這個關鍵字才算；「相關」＝句子裡有出現就算。
+// 舊資料是一個逗號字串、比對規則寫死在 line-webhook.ts（單字用等於、多字用包含），
+// 這裡把那份舊規則保留成轉換邏輯，既有流程升級後行為不變。
+// ------------------------------------------------------------------------
+export type KeywordMatch = 'exact' | 'contains';
+export interface TriggerRule {
+  keyword: string;
+  match: KeywordMatch;
+}
+
+export function parseCsvKeywords(raw: string | null | undefined): string[] {
+  return (raw || '')
+    .replace(/，/g, ',')
+    .split(',')
+    .map((k) => k.trim())
+    .filter((k) => k.length > 0);
+}
+
+export function parseTriggerRules(rulesJson: unknown, legacyCsv?: string | null): TriggerRule[] {
+  if (Array.isArray(rulesJson) && rulesJson.length > 0) {
+    return rulesJson
+      .map((r: any) => ({
+        keyword: String(r?.keyword ?? '').trim(),
+        match: r?.match === 'exact' ? ('exact' as const) : ('contains' as const),
+      }))
+      .filter((r) => r.keyword.length > 0);
+  }
+  return parseCsvKeywords(legacyCsv).map((keyword) => ({
+    keyword,
+    match: keyword.length === 1 ? ('exact' as const) : ('contains' as const),
+  }));
+}
+
+// 回填舊的 trigger_keywords 欄位，萬一要退版回舊程式仍讀得到關鍵字。
+export function serializeTriggerRules(rules: TriggerRule[]): string {
+  return rules.map((r) => r.keyword).join(',');
+}
+
+export function matchTriggerRules(userMessage: string, rules: TriggerRule[]): TriggerRule | undefined {
+  const trimmed = (userMessage || '').trim();
+  return rules.find((r) => (r.match === 'exact' ? trimmed === r.keyword : trimmed.includes(r.keyword)));
+}
+
 function toSlashDate(isoDate?: string | null): string {
   return (isoDate || '').replace(/-/g, '/');
 }

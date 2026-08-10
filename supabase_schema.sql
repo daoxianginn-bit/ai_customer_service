@@ -329,6 +329,55 @@ CREATE TABLE IF NOT EXISTS public.booking_flow_steps (
     UNIQUE (flow_id, step_order)
 );
 
+-- booking_flows 後來加的欄位（新專案 CREATE TABLE 時不含這些，靠這幾行 ALTER 補齊，既有專案升級也適用）
+--
+-- trigger_rules：每個關鍵字各自決定比對方式，[{ "keyword": "訂房", "match": "exact" }, ...]
+--   match = 'exact'  顧客整句話就是這個關鍵字才觸發
+--   match = 'contains' 顧客句子裡出現這個關鍵字就觸發
+--   舊的 trigger_keywords 欄位保留不刪，前端存檔時會同步寫入，萬一要退回舊版程式仍讀得到。
+-- reply_mode：'ai' 用 AI 理解顧客回覆並擷取欄位（預設，等同改版前的行為）；
+--   'system' 完全不呼叫 AI，改用純程式解析顧客回覆（省 token，但只認得標準寫法）。
+-- quote_message / confirm_message：流程走完、算出金額後的報價確認與付款確認訊息。
+--   改版前這兩段放在 settings 表、全站共用一份；現在每個流程各自一份，
+--   webhook 讀不到流程自己的內容時會退回 settings 的舊值，所以升級過程不會有空窗。
+ALTER TABLE public.booking_flows ADD COLUMN IF NOT EXISTS trigger_rules JSONB NOT NULL DEFAULT '[]';
+ALTER TABLE public.booking_flows ADD COLUMN IF NOT EXISTS reply_mode TEXT NOT NULL DEFAULT 'ai';
+ALTER TABLE public.booking_flows ADD COLUMN IF NOT EXISTS quote_message TEXT;
+ALTER TABLE public.booking_flows ADD COLUMN IF NOT EXISTS confirm_message TEXT;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'booking_flows_reply_mode_check') THEN
+    ALTER TABLE public.booking_flows ADD CONSTRAINT booking_flows_reply_mode_check CHECK (reply_mode IN ('ai', 'system'));
+  END IF;
+END $$;
+
+-- 既有流程的關鍵字回填：沿用改版前寫死在 line-webhook.ts 的規則——單字關鍵字太容易誤觸，
+-- 只在整句完全相同時才算（exact）；兩字以上用包含比對（contains）。這樣升級後行為完全不變。
+UPDATE public.booking_flows f
+SET trigger_rules = COALESCE(
+    (SELECT jsonb_agg(jsonb_build_object(
+        'keyword', kw,
+        'match', CASE WHEN char_length(kw) = 1 THEN 'exact' ELSE 'contains' END
+     ))
+     FROM (
+        SELECT btrim(k) AS kw
+        FROM unnest(string_to_array(replace(f.trigger_keywords, '，', ','), ',')) AS k
+     ) parts
+     WHERE kw <> ''),
+    '[]'::jsonb)
+WHERE f.trigger_rules = '[]'::jsonb AND COALESCE(f.trigger_keywords, '') <> '';
+
+-- 報價／付款確認訊息回填：把 settings 裡原本全站共用的那一份複製給每個既有流程當起點。
+-- settings 的欄位保留不刪，webhook 仍會在流程沒有自己的內容時拿它當備援。
+UPDATE public.booking_flows
+SET quote_message = (SELECT booking_quote_message FROM public.settings LIMIT 1)
+WHERE quote_message IS NULL;
+
+UPDATE public.booking_flows
+SET confirm_message = (SELECT booking_confirm_message FROM public.settings LIMIT 1)
+WHERE confirm_message IS NULL;
+
 -- 8.6 訂房紀錄（取代 Google「報價」試算表為主要資料來源；仍會盡力鏡射寫入試算表，寫入失敗不影響主流程）
 CREATE TABLE IF NOT EXISTS public.bookings (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
