@@ -198,18 +198,15 @@ export default function RoomSpaceManagement() {
       >
         <div>
           <label className="block text-xs text-gray-500 mb-1">類型</label>
-          <input
-            list="space-type-options"
+          <select
             value={form.type}
             onChange={(e) => setForm({ ...form, type: e.target.value })}
-            className="w-full px-3 py-2 border rounded-lg"
-            placeholder="房間"
-          />
-          <datalist id="space-type-options">
-            <option value="房間" />
-            <option value="空間" />
-          </datalist>
-          <p className="text-xs text-gray-400 mt-1">只有輸入「房間」的資料列，才會出現在「房型與報價」的訂價設定裡；其他類型（例如「空間」）純粹是設施紀錄，不能訂房、不需要價格。</p>
+            className="w-full px-3 py-2 border rounded-lg bg-white"
+          >
+            <option value="房間">房間</option>
+            <option value="空間">空間</option>
+          </select>
+          <p className="text-xs text-gray-400 mt-1">只有「房間」的資料列，才會出現在「房型與報價」的訂價設定裡；「空間」純粹是設施紀錄，不能訂房、不需要價格。</p>
         </div>
         <div>
           <label className="block text-xs text-gray-500 mb-1">名稱</label>
