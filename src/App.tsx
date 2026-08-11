@@ -17,6 +17,7 @@ import OrderManagement from './pages/OrderManagement';
 import RoomCalendar from './pages/RoomCalendar';
 import RoomSpaceManagement from './pages/RoomSpaceManagement';
 import ConsumablesManagement from './pages/ConsumablesManagement';
+import LinenManagement from './pages/LinenManagement';
 import CustomerDirectory from './pages/CustomerDirectory';
 import Layout from './components/Layout';
 
@@ -100,6 +101,7 @@ function App() {
           <Route path="/room-spaces" element={<RoomSpaceManagement />} />
           <Route path="/room-pricing" element={<BookingManagement />} />
           <Route path="/consumables" element={<ConsumablesManagement />} />
+          <Route path="/linens" element={<LinenManagement />} />
           <Route path="/customers" element={<CustomerDirectory />} />
           <Route path="/knowledge-base" element={<KnowledgeBase />} />
           <Route path="/ai-settings" element={<AiSettings />} />

@@ -1,8 +1,12 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { supabase } from '../lib/supabase';
-import { ClipboardList, Search, RotateCcw, Save, Plus, Trash2, AlertCircle } from 'lucide-react';
+import { ClipboardList, Search, RotateCcw, Save, Plus, Trash2, AlertCircle, Shirt, RefreshCw } from 'lucide-react';
 import { PageHeader, Button, Modal, StatusBadge, EmptyState, ConfirmDialog } from '../components/ui';
 import { BOOKING_STATUS_OPTIONS, SYSTEM_ONLY_STATUS, REQUIRES_REMIT_LAST5_STATUS } from '../lib/bookingStatus';
+import {
+  LinenItem, RoomLinenDefault, LinenUsageRow,
+  linenItemLabel, currency, nightsBetween, computeUsage, mergeUsage, usageTotal,
+} from '../lib/linenCost';
 
 const PAGE_SIZE = 15;
 
@@ -81,14 +85,73 @@ export default function OrderManagement() {
   const [deleteTarget, setDeleteTarget] = useState<any | null>(null);
   const [deleting, setDeleting] = useState(false);
 
+  // 布巾備品：實際開了哪幾間房決定送洗成本（「包棟」只是使用權名稱，不影響算法）
+  const [rooms, setRooms] = useState<{ id: string; name: string }[]>([]);
+  const [linenItems, setLinenItems] = useState<LinenItem[]>([]);
+  const [linenDefaults, setLinenDefaults] = useState<RoomLinenDefault[]>([]);
+  const [selectedRoomIds, setSelectedRoomIds] = useState<string[]>([]);
+  const [usageRows, setUsageRows] = useState<LinenUsageRow[]>([]);
+  // 打開表單載入既有資料時不要馬上重算，否則會把之前的人工調整蓋掉
+  const skipRecompute = useRef(true);
+
   useEffect(() => {
     fetchRoomTypeOptions();
+    fetchLinenSetup();
     runQuery(0);
   }, []);
 
+  // 換房間或改日期才重算；已手動調整過的品項由 mergeUsage 保留
+  useEffect(() => {
+    if (skipRecompute.current) { skipRecompute.current = false; return; }
+    const nights = nightsBetween(form.checkin_date, form.checkout_date);
+    setUsageRows((prev) => mergeUsage(prev, computeUsage(selectedRoomIds, linenDefaults, nights, linenItems)));
+  }, [selectedRoomIds, form.checkin_date, form.checkout_date, linenDefaults, linenItems]);
+
   const fetchRoomTypeOptions = async () => {
-    const { data } = await supabase.from('room_types').select('name').eq('type', '房間').order('display_order');
+    const { data } = await supabase.from('room_types').select('id, name').eq('type', '房間').order('display_order');
+    setRooms((data || []).map((r: any) => ({ id: r.id, name: r.name })));
     setRoomTypeOptions((data || []).map((r: any) => r.name));
+  };
+
+  // 布巾資料表可能還沒建立（schema 尚未執行），查不到就當作沒啟用這個功能，不擋訂單頁
+  const fetchLinenSetup = async () => {
+    const [itemRes, defRes] = await Promise.all([
+      supabase.from('linen_items').select('*').eq('is_active', true).order('display_order'),
+      supabase.from('room_type_linen_defaults').select('*'),
+    ]);
+    if (itemRes.error || defRes.error) return;
+    setLinenItems(itemRes.data || []);
+    setLinenDefaults(defRes.data || []);
+  };
+
+  const loadBookingLinen = async (bookingId: string) => {
+    const [roomRes, usageRes] = await Promise.all([
+      supabase.from('booking_rooms').select('room_type_id').eq('booking_id', bookingId),
+      supabase.from('booking_linen_usage').select('linen_item_id, quantity, unit_price, is_manual').eq('booking_id', bookingId),
+    ]);
+    skipRecompute.current = true;
+    setSelectedRoomIds((roomRes.data || []).map((r: any) => r.room_type_id));
+    setUsageRows((usageRes.data || []) as LinenUsageRow[]);
+  };
+
+  const toggleRoom = (roomId: string) => {
+    setSelectedRoomIds((prev) => (prev.includes(roomId) ? prev.filter((r) => r !== roomId) : [...prev, roomId]));
+  };
+
+  const setUsageQuantity = (linenItemId: string, quantity: number) => {
+    setUsageRows((prev) => {
+      const found = prev.find((r) => r.linen_item_id === linenItemId);
+      if (found) {
+        return prev.map((r) => (r.linen_item_id === linenItemId ? { ...r, quantity, is_manual: true } : r));
+      }
+      const price = linenItems.find((i) => i.id === linenItemId)?.unit_price ?? 0;
+      return [...prev, { linen_item_id: linenItemId, quantity, unit_price: price, is_manual: true }];
+    });
+  };
+
+  const resetUsageToDefaults = () => {
+    const nights = nightsBetween(form.checkin_date, form.checkout_date);
+    setUsageRows(computeUsage(selectedRoomIds, linenDefaults, nights, linenItems));
   };
 
   const runQuery = async (pageIndex: number) => {
@@ -130,12 +193,16 @@ export default function OrderManagement() {
   const openNew = () => {
     setEditingId(null);
     setForm(emptyForm());
+    skipRecompute.current = true;
+    setSelectedRoomIds([]);
+    setUsageRows([]);
     setFormError('');
     setShowForm(true);
   };
 
   const openEdit = (row: any) => {
     setEditingId(row.id);
+    loadBookingLinen(row.id);
     setForm({
       id: row.id,
       order_number: row.order_number || '',
@@ -201,25 +268,51 @@ export default function OrderManagement() {
         updated_at: new Date().toISOString(),
       };
 
+      let bookingId = editingId;
       if (editingId) {
         const { error } = await supabase.from('bookings').update(payload).eq('id', editingId);
         if (error) throw error;
       } else {
         let lastError: any = null;
         for (let attempt = 0; attempt < 3; attempt++) {
-          const { error } = await supabase.from('bookings').insert({ ...payload, order_number: generateOrderNumber() });
-          if (!error) { lastError = null; break; }
+          const { data, error } = await supabase
+            .from('bookings')
+            .insert({ ...payload, order_number: generateOrderNumber() })
+            .select('id')
+            .single();
+          if (!error) { lastError = null; bookingId = data.id; break; }
           lastError = error;
           if (!String(error.message || '').includes('order_number')) break;
         }
         if (lastError) throw lastError;
       }
+
+      if (bookingId) await saveLinen(bookingId);
+
       setShowForm(false);
       runQuery(page);
     } catch (err: any) {
       setFormError(`儲存失敗：${err.message}`);
     } finally {
       setSaving(false);
+    }
+  };
+
+  // 房間與布巾用量整批重寫（先刪後插）。布巾資料表還沒建立時靜靜跳過，不擋訂單儲存。
+  const saveLinen = async (bookingId: string) => {
+    if (!linenItems.length) return;
+    try {
+      await supabase.from('booking_rooms').delete().eq('booking_id', bookingId);
+      if (selectedRoomIds.length) {
+        await supabase.from('booking_rooms').insert(selectedRoomIds.map((room_type_id) => ({ booking_id: bookingId, room_type_id })));
+      }
+      await supabase.from('booking_linen_usage').delete().eq('booking_id', bookingId);
+      const rows = usageRows.filter((r) => r.quantity > 0);
+      if (rows.length) {
+        await supabase.from('booking_linen_usage').insert(rows.map((r) => ({ booking_id: bookingId, ...r })));
+      }
+    } catch (e: any) {
+      console.error('[Linen] save failed:', e.message);
     }
   };
 
@@ -428,6 +521,102 @@ export default function OrderManagement() {
             <textarea value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} rows={3} className="w-full px-3 py-2 border rounded-lg" placeholder="內部備註，客戶不會看到" />
           </div>
         </div>
+
+        {linenItems.length > 0 && (
+          <div className="border-t pt-4 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h4 className="flex items-center gap-2 text-sm font-semibold text-gray-800">
+                <Shirt className="w-4 h-4 text-green-600" />
+                布巾備品洗滌成本
+              </h4>
+              <span className="text-xs text-gray-400">
+                住 {nightsBetween(form.checkin_date, form.checkout_date) || '—'} 晚
+              </span>
+            </div>
+
+            <div>
+              <label className="block text-xs text-gray-500 mb-1.5">
+                實際開出去的房間（包棟也請照實勾選，成本是看開了幾間房算的）
+              </label>
+              {rooms.length === 0 ? (
+                <p className="text-xs text-gray-400">還沒有「房間」類型的資料，請先到「房型與空間維護」新增。</p>
+              ) : (
+                <div className="flex flex-wrap gap-2">
+                  {rooms.map((r) => {
+                    const on = selectedRoomIds.includes(r.id);
+                    return (
+                      <button
+                        key={r.id}
+                        type="button"
+                        onClick={() => toggleRoom(r.id)}
+                        className={`px-3 py-1.5 rounded-lg text-sm border transition-colors ${
+                          on ? 'bg-green-600 text-white border-green-600' : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'
+                        }`}
+                      >
+                        {r.name}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            {selectedRoomIds.length === 0 && usageRows.length === 0 ? (
+              <p className="text-xs text-gray-400">勾選房間後，會依「布巾備品」設定的預設組合自動帶出用量。</p>
+            ) : (
+              <div className="border rounded-lg overflow-hidden">
+                <table className="w-full text-sm">
+                  <thead className="bg-gray-50 border-b text-xs text-gray-500">
+                    <tr>
+                      <th className="py-2 px-3 text-left">品項</th>
+                      <th className="py-2 px-2 text-right w-20">單價</th>
+                      <th className="py-2 px-2 text-left w-24">件數</th>
+                      <th className="py-2 px-3 text-right w-24">小計</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100">
+                    {usageRows.filter((r) => r.quantity > 0).map((r) => {
+                      const item = linenItems.find((i) => i.id === r.linen_item_id);
+                      return (
+                        <tr key={r.linen_item_id}>
+                          <td className="py-1.5 px-3 text-gray-700">
+                            {item ? linenItemLabel(item) : '（已刪除的品項）'}
+                            {r.is_manual && <span className="ml-2 text-xs text-amber-600">已手動調整</span>}
+                          </td>
+                          <td className="py-1.5 px-2 text-right text-gray-500">{r.unit_price}</td>
+                          <td className="py-1.5 px-2">
+                            <input
+                              type="number" min={0}
+                              value={r.quantity}
+                              onChange={(e) => setUsageQuantity(r.linen_item_id, Math.max(0, Number(e.target.value) || 0))}
+                              className="w-20 px-2 py-1 border rounded text-sm"
+                            />
+                          </td>
+                          <td className="py-1.5 px-3 text-right text-gray-800">{currency(r.quantity * r.unit_price)}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                  <tfoot className="bg-gray-50 border-t">
+                    <tr>
+                      <td colSpan={3} className="py-2 px-3 text-right text-xs text-gray-500">布巾成本合計</td>
+                      <td className="py-2 px-3 text-right font-bold text-gray-800">{currency(usageTotal(usageRows))}</td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            )}
+
+            <button
+              type="button"
+              onClick={resetUsageToDefaults}
+              className="text-xs flex items-center gap-1 text-gray-500 hover:text-gray-700"
+            >
+              <RefreshCw className="w-3.5 h-3.5" /> 重新帶入預設組合（會清掉手動調整）
+            </button>
+          </div>
+        )}
+
         {formError && <p className="text-sm text-red-600">{formError}</p>}
       </Modal>
 

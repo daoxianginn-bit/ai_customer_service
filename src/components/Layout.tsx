@@ -21,6 +21,7 @@ import {
   Variable,
   DoorOpen,
   Package,
+  Shirt,
 } from 'lucide-react';
 
 const topItems = [
@@ -34,6 +35,7 @@ const topItems = [
   { to: '/room-spaces', label: '房型與空間維護', icon: DoorOpen },
   { to: '/room-pricing', label: '房型與報價', icon: Calculator },
   { to: '/consumables', label: '耗材維護', icon: Package },
+  { to: '/linens', label: '布巾備品', icon: Shirt },
   { to: '/customers', label: '客戶資料', icon: Users },
   { to: '/knowledge-base', label: 'AI知識庫', icon: BookOpen },
 ];

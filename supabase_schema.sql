@@ -459,6 +459,97 @@ CREATE TABLE IF NOT EXISTS public.booking_room_nights (
 );
 CREATE INDEX IF NOT EXISTS idx_booking_room_nights_lookup ON public.booking_room_nights(night_date, room_type_id);
 
+-- ========================================================================
+-- 8.8 布巾備品洗滌成本
+--
+-- 跟 consumables（耗材）分開：耗材是用掉就沒了、要補貨；布巾是重複使用、每次送洗算一次錢，
+-- 成本來自洗滌廠的每件單價，不需要庫存數量。
+--
+-- 成本怎麼算：
+--   某張訂單的用量 = Σ（這張訂單開的每一間房 × 該房型的預設組合數量 × 換洗次數）
+--   換洗次數 = ceil(住宿晚數 / change_every_nights)，例如毛巾天天換(1)、床包三天換(3)，
+--   住 5 晚就是毛巾 5 次、床包 2 次。
+--   「包棟」不特別處理——它只是使用權的名稱，實際成本一律看 booking_rooms 開了幾間房。
+-- ========================================================================
+
+-- 布巾品項與洗滌單價（初始資料為艾利租時代概念有限公司的報價單）
+CREATE TABLE IF NOT EXISTS public.linen_items (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    category TEXT NOT NULL,           -- 品項，例如：床包、被套、枕套
+    spec TEXT NOT NULL DEFAULT '',    -- 品名-規格，例如：平紋貢緞床包-5x6.2 尺-高 28cm 紅線
+    unit_price NUMERIC,               -- 每件洗滌單價；NULL＝另行報價（例如「其他布品」）
+    is_active BOOLEAN NOT NULL DEFAULT true,
+    display_order INTEGER NOT NULL DEFAULT 0,
+    notes TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now(),
+    UNIQUE (category, spec)
+);
+
+-- 每個房間的預設布巾組合：一間房整理一次要用哪些布巾、各幾件、幾晚換一次
+CREATE TABLE IF NOT EXISTS public.room_type_linen_defaults (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    room_type_id UUID NOT NULL REFERENCES public.room_types(id) ON DELETE CASCADE,
+    linen_item_id UUID NOT NULL REFERENCES public.linen_items(id) ON DELETE CASCADE,
+    quantity INTEGER NOT NULL DEFAULT 1,
+    change_every_nights INTEGER NOT NULL DEFAULT 1, -- 幾晚換一次；1＝每晚換
+    UNIQUE (room_type_id, linen_item_id)
+);
+
+-- 這張訂單實際開了哪幾間房。
+-- 既有的 booking_room_nights 不能拿來當唯一來源：它只有 LINE 流程的「個別租房」會寫入，
+-- 包棟不寫，訂單管理手動建立的訂單也不寫。這張表由訂單管理頁維護，涵蓋所有來源的訂單。
+CREATE TABLE IF NOT EXISTS public.booking_rooms (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    booking_id UUID NOT NULL REFERENCES public.bookings(id) ON DELETE CASCADE,
+    room_type_id UUID NOT NULL REFERENCES public.room_types(id) ON DELETE CASCADE,
+    UNIQUE (booking_id, room_type_id)
+);
+CREATE INDEX IF NOT EXISTS idx_booking_rooms_booking ON public.booking_rooms(booking_id);
+
+-- 這張訂單的布巾用量與成本。
+-- unit_price 是「當下的單價快照」，不是即時 join linen_items——洗滌廠調價之後，
+-- 歷史訂單的成本必須維持原樣，否則過去的月報表會憑空變動。
+CREATE TABLE IF NOT EXISTS public.booking_linen_usage (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    booking_id UUID NOT NULL REFERENCES public.bookings(id) ON DELETE CASCADE,
+    linen_item_id UUID NOT NULL REFERENCES public.linen_items(id) ON DELETE CASCADE,
+    quantity INTEGER NOT NULL DEFAULT 0,
+    unit_price NUMERIC NOT NULL DEFAULT 0,
+    is_manual BOOLEAN NOT NULL DEFAULT false, -- true＝管理員手動改過，重算預設組合時不覆蓋
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now(),
+    UNIQUE (booking_id, linen_item_id)
+);
+CREATE INDEX IF NOT EXISTS idx_booking_linen_usage_booking ON public.booking_linen_usage(booking_id);
+
+INSERT INTO public.linen_items (category, spec, unit_price, display_order) VALUES
+    ('床包', '平紋貢緞床包-3.5x6.2 尺-高 28cm 紫線', 45, 1),
+    ('床包', '平紋貢緞床包-5x6.2 尺-高 28cm 紅線', 45, 2),
+    ('床包', '平紋貢緞床包-6x6.2 尺-高 28cm 藍線', 45, 3),
+    ('床包', '平紋貢緞床包-6x7 尺-高 28cm 綠線', 45, 4),
+    ('被套', '平紋貢緞被套-150*(210+10)cm', 50, 5),
+    ('被套', 'CVC3cm 條紋被套-180x(210+10)cm', 50, 6),
+    ('被套', 'CVC0.6cm 條紋被套-210x(210+10)cm-紅線', 50, 7),
+    ('被套', 'CVC1cm 條紋被套-240x(210+10)cm', 50, 8),
+    ('枕套', '平紋貢緞枕套-50x7-cm-信封式-250TC', 8, 9),
+    ('大浴巾', '白色平織浴巾 16 兩-70*140 公分', 16, 10),
+    ('大浴巾', '白色平織浴巾 14 兩-70*140 公分', 16, 11),
+    ('中毛巾', '白色平織毛巾 4 兩-35*78 公分', 8, 12),
+    ('足布', '白色平織腳墊 10 兩-78*52 公分', 12, 13),
+    ('床單', '', 40, 14),
+    ('保潔墊', '', 60, 15),
+    ('枕頭', '', 70, 16),
+    ('羽絨(毛)被', '', 150, 17),
+    ('其他布品', '', NULL, 18)
+ON CONFLICT (category, spec) DO NOTHING;
+
+-- 既有訂單的房間紀錄回填：LINE 個別租房的訂單有 booking_room_nights，可以直接推出開了哪幾間房。
+-- 包棟與手動建立的訂單沒有任何房間資料，只能由管理員在訂單管理頁補選，這裡不亂猜。
+INSERT INTO public.booking_rooms (booking_id, room_type_id)
+SELECT DISTINCT booking_id, room_type_id FROM public.booking_room_nights
+ON CONFLICT (booking_id, room_type_id) DO NOTHING;
+
 -- 9. 啟用 RLS（僅限已登入使用者存取，用 DROP + CREATE 讓整份腳本可重複執行）
 ALTER TABLE public.settings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.user_states ENABLE ROW LEVEL SECURITY;
@@ -484,6 +575,10 @@ ALTER TABLE public.booking_flows ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.booking_flow_steps ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.bookings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.booking_room_nights ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.linen_items ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.room_type_linen_defaults ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.booking_rooms ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.booking_linen_usage ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS "Allow Auth Access" ON public.settings;
 CREATE POLICY "Allow Auth Access" ON public.settings FOR ALL USING (auth.role() = 'authenticated');
@@ -535,6 +630,14 @@ DROP POLICY IF EXISTS "Allow Auth Access Bookings" ON public.bookings;
 CREATE POLICY "Allow Auth Access Bookings" ON public.bookings FOR ALL USING (auth.role() = 'authenticated');
 DROP POLICY IF EXISTS "Allow Auth Access Booking Room Nights" ON public.booking_room_nights;
 CREATE POLICY "Allow Auth Access Booking Room Nights" ON public.booking_room_nights FOR ALL USING (auth.role() = 'authenticated');
+DROP POLICY IF EXISTS "Allow Auth Access Linen Items" ON public.linen_items;
+CREATE POLICY "Allow Auth Access Linen Items" ON public.linen_items FOR ALL USING (auth.role() = 'authenticated');
+DROP POLICY IF EXISTS "Allow Auth Access Room Type Linen Defaults" ON public.room_type_linen_defaults;
+CREATE POLICY "Allow Auth Access Room Type Linen Defaults" ON public.room_type_linen_defaults FOR ALL USING (auth.role() = 'authenticated');
+DROP POLICY IF EXISTS "Allow Auth Access Booking Rooms" ON public.booking_rooms;
+CREATE POLICY "Allow Auth Access Booking Rooms" ON public.booking_rooms FOR ALL USING (auth.role() = 'authenticated');
+DROP POLICY IF EXISTS "Allow Auth Access Booking Linen Usage" ON public.booking_linen_usage;
+CREATE POLICY "Allow Auth Access Booking Linen Usage" ON public.booking_linen_usage FOR ALL USING (auth.role() = 'authenticated');
 
 -- 10. 初始資料
 INSERT INTO public.settings (id) SELECT gen_random_uuid() WHERE NOT EXISTS (SELECT 1 FROM public.settings);
