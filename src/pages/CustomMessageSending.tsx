@@ -62,8 +62,10 @@ export default function CustomMessageSending() {
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
   const [status, setStatus] = useState('');
+  // 下拉選的是「房型與空間維護」裡的房間，值存 room_types.id；
+  // 送查詢時連名稱一起帶，好讓後端在 booking_rooms 還沒建立時退回舊的文字比對。
   const [roomType, setRoomType] = useState('');
-  const [roomTypeOptions, setRoomTypeOptions] = useState<string[]>([]);
+  const [roomTypeOptions, setRoomTypeOptions] = useState<{ id: string; name: string }[]>([]);
 
   const [querying, setQuerying] = useState(false);
   const [rows, setRows] = useState<OrderRow[]>([]);
@@ -95,8 +97,8 @@ export default function CustomMessageSending() {
   };
 
   const fetchRoomTypeOptions = async () => {
-    const { data } = await supabase.from('room_types').select('name').eq('type', '房間').order('display_order');
-    setRoomTypeOptions((data || []).map((r: any) => r.name));
+    const { data } = await supabase.from('room_types').select('id, name').eq('type', '房間').order('display_order');
+    setRoomTypeOptions((data || []).map((r: any) => ({ id: r.id, name: r.name })));
   };
 
   const fetchQuota = async () => {
@@ -121,7 +123,8 @@ export default function CustomMessageSending() {
         startDate,
         endDate,
         status: overrideStatus !== undefined ? overrideStatus : status,
-        roomType,
+        roomId: roomType === '包棟' ? '' : roomType,
+        roomType: roomType === '包棟' ? '包棟' : roomTypeOptions.find((r) => r.id === roomType)?.name || '',
       });
       setRows(result.rows || []);
       setVariables(result.variables || []);
@@ -337,7 +340,7 @@ export default function CustomMessageSending() {
                     <option value="">全部房型</option>
                     <option value="包棟">包棟</option>
                     {roomTypeOptions.map((r) => (
-                      <option key={r} value={r}>{r}</option>
+                      <option key={r.id} value={r.id}>{r.name}</option>
                     ))}
                   </select>
                 </div>
@@ -398,7 +401,13 @@ export default function CustomMessageSending() {
                   })}
                   {pagedRows.length === 0 && (
                     <tr>
-                      <td colSpan={7} className="py-16 text-center text-gray-400">{querying ? '查詢中...' : '查無符合條件的訂單'}</td>
+                      <td colSpan={7} className="py-16 text-center text-gray-400">
+                        {querying
+                          ? '查詢中...'
+                          : roomType && roomType !== '包棟'
+                            ? '這間房目前沒有訂單。房型是依訂單管理裡連結的房間篩選的，舊訂單要先在訂單管理打開、勾選實際開出去的房間才會出現。'
+                            : '查無符合條件的訂單'}
+                      </td>
                     </tr>
                   )}
                 </tbody>

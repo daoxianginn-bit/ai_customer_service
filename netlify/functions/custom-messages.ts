@@ -52,6 +52,7 @@ export const handler: Handler = async (event) => {
         endDate: body.endDate,
         status: body.status,
         roomType: body.roomType,
+        roomId: body.roomId,
       });
       return { statusCode: 200, body: JSON.stringify({ variables, rows }) };
     }
@@ -112,7 +113,38 @@ interface OrderFilters {
   startDate?: string;
   endDate?: string;
   status?: string;
-  roomType?: string;
+  roomType?: string; // 房間名稱；booking_rooms 還沒建立時的舊比對方式，以及「包棟」這個特殊值
+  roomId?: string;   // room_types.id，正式的房間關聯
+}
+
+/**
+ * 這個房間對應到哪些訂單。
+ * booking_rooms 才是「這張訂單開了哪幾間房」的正式關聯；bookings.room_type_label 只是
+ * 給人看的文字（訂單管理可以手打），拿來比對會因為打錯字或改名就篩不到。
+ * 資料表還不存在（schema 尚未執行）時回傳 null，呼叫端會退回舊的文字比對，頁面不會壞掉。
+ */
+async function bookingIdsForRoom(roomId: string): Promise<string[] | null> {
+  const { data, error } = await supabase.from('booking_rooms').select('booking_id').eq('room_type_id', roomId);
+  if (error) return null;
+  return Array.from(new Set((data || []).map((r: any) => r.booking_id)));
+}
+
+/** 每張訂單實際連結到的房間名稱，供列表的「房型」欄顯示。 */
+async function roomLabelsByBooking(bookingIds: string[]): Promise<Record<string, string[]>> {
+  if (!bookingIds.length) return {};
+  const { data, error } = await supabase.from('booking_rooms').select('booking_id, room_type_id').in('booking_id', bookingIds);
+  if (error || !data?.length) return {};
+  const roomIds = Array.from(new Set(data.map((r: any) => r.room_type_id)));
+  const { data: rooms } = await supabase.from('room_types').select('id, name').in('id', roomIds);
+  const nameById = new Map((rooms || []).map((r: any) => [r.id, r.name]));
+  const map: Record<string, string[]> = {};
+  for (const link of data) {
+    const name = nameById.get(link.room_type_id);
+    if (!name) continue;
+    if (!map[link.booking_id]) map[link.booking_id] = [];
+    map[link.booking_id].push(name);
+  }
+  return map;
 }
 
 async function fetchMessageVariables(): Promise<MessageVariable[]> {
@@ -126,8 +158,21 @@ async function listOrders(settings: any, filters: OrderFilters): Promise<{ varia
   if (filters.startDate) query = query.gte('checkin_date', filters.startDate);
   if (filters.endDate) query = query.lte('checkin_date', filters.endDate);
   if (filters.status) query = query.eq('status', filters.status);
-  if (filters.roomType === '包棟') query = query.eq('whole_house', true);
-  else if (filters.roomType) query = query.ilike('room_type_label', `%${filters.roomType}%`);
+  if (filters.roomType === '包棟') {
+    query = query.eq('whole_house', true);
+  } else if (filters.roomId) {
+    const ids = await bookingIdsForRoom(filters.roomId);
+    if (ids === null) {
+      // booking_rooms 還沒建立，退回舊的文字比對，功能照舊
+      if (filters.roomType) query = query.ilike('room_type_label', `%${filters.roomType}%`);
+    } else if (ids.length === 0) {
+      return { variables: [], rows: [] };
+    } else {
+      query = query.in('id', ids);
+    }
+  } else if (filters.roomType) {
+    query = query.ilike('room_type_label', `%${filters.roomType}%`);
+  }
   if (filters.keyword && filters.keyword.trim()) {
     const kw = filters.keyword.trim().replace(/[%,()]/g, '');
     query = query.or(`name.ilike.%${kw}%,nickname.ilike.%${kw}%,phone.ilike.%${kw}%,order_number.ilike.%${kw}%`);
@@ -138,6 +183,7 @@ async function listOrders(settings: any, filters: OrderFilters): Promise<{ varia
 
   const bookings = data || [];
   const variables = await fetchMessageVariables();
+  const linkedRooms = await roomLabelsByBooking(bookings.map((b: any) => b.id));
 
   const userIds = Array.from(new Set(bookings.map((b: any) => b.line_user_id).filter(Boolean)));
   let customerByUser: Record<string, any> = {};
@@ -161,7 +207,8 @@ async function listOrders(settings: any, filters: OrderFilters): Promise<{ varia
       checkin_date: b.checkin_date ? String(b.checkin_date).replace(/-/g, '/') : '',
       checkout_date: b.checkout_date ? String(b.checkout_date).replace(/-/g, '/') : '',
       headcount: b.headcount != null ? String(b.headcount) : '',
-      room_type_label: b.room_type_label || (b.whole_house ? '包棟' : ''),
+      // 有連結房間就顯示實際房間名稱；還沒連結的舊訂單才退回手打的文字
+      room_type_label: linkedRooms[b.id]?.join('、') || b.room_type_label || (b.whole_house ? '包棟' : ''),
       status: b.status,
       total_amount: b.total_amount != null ? String(b.total_amount) : '',
       deposit: b.deposit != null ? String(b.deposit) : '',
