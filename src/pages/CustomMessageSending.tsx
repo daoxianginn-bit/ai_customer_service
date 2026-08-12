@@ -82,7 +82,10 @@ export default function CustomMessageSending() {
 
   const [showConfirm, setShowConfirm] = useState(false);
   const [sending, setSending] = useState(false);
-  const [sendResult, setSendResult] = useState<{ ok: number; fail: number } | null>(null);
+  const [sendResult, setSendResult] = useState<{ ok: number; fail: number; statusUpdated: number; statusSkipped: number } | null>(null);
+  // 「發送後改狀態」是給【訂房成功通知】這類確認訊息用的，不是每次廣播都要——
+  // 一般公告、活動訊息發出去不該動到訂單狀態，所以預設關閉，管理員自己決定要不要開。
+  const [markReserved, setMarkReserved] = useState(false);
 
   useEffect(() => {
     fetchTemplates();
@@ -267,11 +270,14 @@ export default function CustomMessageSending() {
     try {
       const recipients = selectedRows
         .filter((r) => r.line_user_id)
-        .map((r) => ({ lineUserId: r.line_user_id, fields: r.fields }));
-      const result = await callCustomMessagesFunction('send', { recipients, template: draftBody });
-      const ok = (result.results || []).filter((r: any) => r.ok).length;
-      const fail = (result.results || []).length - ok;
-      setSendResult({ ok, fail });
+        .map((r) => ({ lineUserId: r.line_user_id, fields: r.fields, bookingId: r.id }));
+      const result = await callCustomMessagesFunction('send', { recipients, template: draftBody, markReserved });
+      const rows: any[] = result.results || [];
+      const ok = rows.filter((r) => r.ok).length;
+      const fail = rows.length - ok;
+      const statusUpdated = rows.filter((r) => r.statusUpdated).length;
+      const statusSkipped = rows.filter((r) => r.ok && r.statusUpdated === false).length;
+      setSendResult({ ok, fail, statusUpdated, statusSkipped });
       setShowConfirm(false);
       await fetchQuota();
     } catch (e: any) {
@@ -495,11 +501,29 @@ export default function CustomMessageSending() {
             <p className="text-xs text-gray-500 pt-2 border-t">
               已勾選 <strong className={selectedRows.length > MAX_BATCH_SEND ? 'text-red-600' : ''}>{selectedRows.length}</strong> 位（單次上限 {MAX_BATCH_SEND} 位）
             </p>
+
+            <label className="flex items-start gap-2 text-xs text-gray-600 cursor-pointer">
+              <input type="checkbox" checked={markReserved} onChange={(e) => setMarkReserved(e.target.checked)} className="mt-0.5" />
+              <span>
+                發送後將這些訂單狀態改為「已預定」
+                <span className="block text-gray-400 mt-0.5">只適用於【訂房成功通知】這類確認訊息；訂單要已經有匯款末五碼才會改，沒有的會跳過並在結果裡列出。</span>
+              </span>
+            </label>
+
             <Button onClick={handleSendClick} icon={<Send className="w-4 h-4" />} fullWidth>發送給已勾選顧客</Button>
 
             {sendResult && (
-              <div className="text-xs bg-gray-50 border rounded-lg p-3">
-                發送完成：成功 <strong className="text-green-600">{sendResult.ok}</strong> 則，失敗 <strong className="text-red-600">{sendResult.fail}</strong> 則。
+              <div className="text-xs bg-gray-50 border rounded-lg p-3 space-y-1">
+                <p>發送完成：成功 <strong className="text-green-600">{sendResult.ok}</strong> 則，失敗 <strong className="text-red-600">{sendResult.fail}</strong> 則。</p>
+                {markReserved && (
+                  <p>
+                    狀態已改為已預定 <strong className="text-green-600">{sendResult.statusUpdated}</strong> 筆
+                    {sendResult.statusSkipped > 0 && (
+                      <>，缺匯款末五碼跳過 <strong className="text-amber-600">{sendResult.statusSkipped}</strong> 筆（請到訂單管理補填後手動改狀態）</>
+                    )}
+                    。
+                  </p>
+                )}
               </div>
             )}
           </div>
@@ -567,6 +591,7 @@ export default function CustomMessageSending() {
               <p>✅ 已套用範本：{selectedTemplate?.title || '（自訂內容）'}</p>
               <p>✅ 發送對象：{selectedRows.length} 位顧客</p>
               <p>✅ 發送方式：LINE 訊息</p>
+              {markReserved && <p>✅ 發送後會將已填匯款末五碼的訂單改為「已預定」</p>}
             </div>
             <div className="max-h-40 overflow-y-auto border rounded-lg p-3 space-y-1">
               {selectedRows.map((r, i) => (

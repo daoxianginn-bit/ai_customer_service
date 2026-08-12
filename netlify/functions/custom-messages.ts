@@ -58,8 +58,9 @@ export const handler: Handler = async (event) => {
     }
 
     if (body.action === 'send') {
-      const recipients: { lineUserId: string; fields: Record<string, string> }[] = Array.isArray(body.recipients) ? body.recipients : [];
+      const recipients: { lineUserId: string; fields: Record<string, string>; bookingId?: string }[] = Array.isArray(body.recipients) ? body.recipients : [];
       const template: string = body.template || '';
+      const markReserved: boolean = !!body.markReserved;
       if (!recipients.length) return { statusCode: 400, body: JSON.stringify({ error: '沒有選擇收件人' }) };
       if (!template.trim()) return { statusCode: 400, body: JSON.stringify({ error: '訊息內容是空的' }) };
       if (recipients.length > MAX_BATCH_SEND) {
@@ -71,12 +72,41 @@ export const handler: Handler = async (event) => {
         channelSecret: settings.line_channel_secret,
       });
 
-      const results: { lineUserId: string; ok: boolean; error?: string }[] = [];
+      // 「發送後改狀態」要用的匯款末五碼，一次查完，發送迴圈裡就不用逐筆打資料庫。
+      // 沒有匯款末五碼的訂單不能改成「已預定」（訂單管理頁的既有規則），這裡也照同一條規則走，
+      // 不然會做出訂單管理不允許手動建立的資料狀態。
+      const remitLast5ByBookingId = new Map<string, string | null>();
+      if (markReserved) {
+        const bookingIds = recipients.map((r) => r.bookingId).filter((id): id is string => !!id);
+        if (bookingIds.length) {
+          const { data } = await supabase.from('bookings').select('id, remit_last5').in('id', bookingIds);
+          for (const row of data || []) remitLast5ByBookingId.set(row.id, row.remit_last5 || null);
+        }
+      }
+
+      const results: { lineUserId: string; ok: boolean; error?: string; statusUpdated?: boolean; statusSkippedReason?: string }[] = [];
       for (const r of recipients) {
         const message = mergeTemplate(template, r.fields || {});
         try {
           await lineClient.pushMessage(r.lineUserId, { type: 'text', text: message });
-          results.push({ lineUserId: r.lineUserId, ok: true });
+          const result: (typeof results)[number] = { lineUserId: r.lineUserId, ok: true };
+
+          if (markReserved && r.bookingId) {
+            const remitLast5 = remitLast5ByBookingId.get(r.bookingId);
+            if (!remitLast5) {
+              result.statusUpdated = false;
+              result.statusSkippedReason = '缺少匯款末五碼，請先到訂單管理填寫';
+            } else {
+              const { error: updateError } = await supabase
+                .from('bookings')
+                .update({ status: 'reserved', updated_at: new Date().toISOString() })
+                .eq('id', r.bookingId);
+              result.statusUpdated = !updateError;
+              if (updateError) result.statusSkippedReason = updateError.message;
+            }
+          }
+
+          results.push(result);
         } catch (e: any) {
           results.push({ lineUserId: r.lineUserId, ok: false, error: e.message });
         }
