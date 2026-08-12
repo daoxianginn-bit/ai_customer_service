@@ -6,9 +6,7 @@ import {
   LogOut,
   Settings,
   UserCheck,
-  Bot,
   ClipboardList,
-  MessageCircle,
   Users,
   UserCog,
   ChevronDown,
@@ -20,9 +18,9 @@ import {
   BookOpen,
   Variable,
   DoorOpen,
-  Package,
   Shirt,
   Clock,
+  SlidersHorizontal,
 } from 'lucide-react';
 
 const topItems = [
@@ -35,16 +33,13 @@ const topItems = [
   { to: '/room-calendar', label: '房況/行事曆', icon: CalendarDays },
   { to: '/room-spaces', label: '房型與空間維護', icon: DoorOpen },
   { to: '/room-pricing', label: '房型與報價', icon: Calculator },
-  { to: '/consumables', label: '耗材維護', icon: Package },
-  { to: '/linens', label: '布巾備品', icon: Shirt },
+  { to: '/linens', label: '備品管理', icon: Shirt },
   { to: '/customers', label: '客戶資料', icon: Users },
   { to: '/knowledge-base', label: 'AI知識庫', icon: BookOpen },
 ];
 
 const settingsItems = [
-  { to: '/ai-settings', label: 'AI 引擎設定', icon: Bot },
-  { to: '/line-settings', label: 'LINE 串接設定', icon: MessageCircle },
-  { to: '/handover-rules', label: '轉接規則', icon: UserCheck },
+  { to: '/system-settings', label: '基本設定', icon: SlidersHorizontal },
   { to: '/scheduled-tasks', label: '排程管理', icon: Clock },
   { to: '/accounts', label: '帳號管理', icon: UserCog },
 ];

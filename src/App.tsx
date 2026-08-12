@@ -3,10 +3,8 @@ import { useEffect, useState } from 'react';
 import { supabase } from './lib/supabase';
 import Login from './pages/Login';
 import Overview from './pages/Overview';
-import AiSettings from './pages/AiSettings';
+import SystemSettings from './pages/SystemSettings';
 import KnowledgeBase from './pages/KnowledgeBase';
-import LineSettings from './pages/LineSettings';
-import HandoverRules from './pages/HandoverRules';
 import AiServiceCenter from './pages/AiServiceCenter';
 import AdminAccounts from './pages/AdminAccounts';
 import BookingManagement from './pages/BookingManagement';
@@ -16,7 +14,6 @@ import CustomMessageSending from './pages/CustomMessageSending';
 import OrderManagement from './pages/OrderManagement';
 import RoomCalendar from './pages/RoomCalendar';
 import RoomSpaceManagement from './pages/RoomSpaceManagement';
-import ConsumablesManagement from './pages/ConsumablesManagement';
 import LinenManagement from './pages/LinenManagement';
 import ScheduledTasks from './pages/ScheduledTasks';
 import CustomerDirectory from './pages/CustomerDirectory';
@@ -101,14 +98,17 @@ function App() {
           <Route path="/room-calendar" element={<RoomCalendar />} />
           <Route path="/room-spaces" element={<RoomSpaceManagement />} />
           <Route path="/room-pricing" element={<BookingManagement />} />
-          <Route path="/consumables" element={<ConsumablesManagement />} />
           <Route path="/linens" element={<LinenManagement />} />
+          {/* 舊路徑（改版前「耗材維護」獨立頁面）保留轉址，避免書籤失效 */}
+          <Route path="/consumables" element={<Navigate to="/linens" replace />} />
           <Route path="/scheduled-tasks" element={<ScheduledTasks />} />
           <Route path="/customers" element={<CustomerDirectory />} />
           <Route path="/knowledge-base" element={<KnowledgeBase />} />
-          <Route path="/ai-settings" element={<AiSettings />} />
-          <Route path="/line-settings" element={<LineSettings />} />
-          <Route path="/handover-rules" element={<HandoverRules />} />
+          <Route path="/system-settings" element={<SystemSettings />} />
+          {/* 舊路徑（改版前 AI 引擎設定／LINE 串接設定／轉接規則三個獨立頁面）保留轉址，避免書籤失效 */}
+          <Route path="/ai-settings" element={<Navigate to="/system-settings" replace />} />
+          <Route path="/line-settings" element={<Navigate to="/system-settings" replace />} />
+          <Route path="/handover-rules" element={<Navigate to="/system-settings" replace />} />
           <Route path="/accounts" element={<AdminAccounts />} />
         </Route>
         <Route path="*" element={<Navigate to="/" />} />

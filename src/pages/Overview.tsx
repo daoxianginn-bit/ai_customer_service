@@ -95,9 +95,9 @@ export default function Overview() {
           <BookOpen className="w-5 h-5 text-green-600" />
           <span className="font-medium text-gray-700">AI知識庫</span>
         </Link>
-        <Link to="/ai-settings" className="bg-white p-5 rounded-xl shadow-sm border hover:border-green-400 hover:bg-green-50 transition-colors flex items-center gap-3">
+        <Link to="/system-settings" className="bg-white p-5 rounded-xl shadow-sm border hover:border-green-400 hover:bg-green-50 transition-colors flex items-center gap-3">
           <Bot className="w-5 h-5 text-green-600" />
-          <span className="font-medium text-gray-700">AI 引擎設定</span>
+          <span className="font-medium text-gray-700">基本設定</span>
         </Link>
         <Link to="/accounts" className="bg-white p-5 rounded-xl shadow-sm border hover:border-green-400 hover:bg-green-50 transition-colors flex items-center gap-3">
           <Settings className="w-5 h-5 text-green-600" />

@@ -136,8 +136,10 @@ CREATE TABLE IF NOT EXISTS public.room_extra_person_pricing (
     UNIQUE (room_type_id, tier)
 );
 
--- 耗材維護：會被用掉、需要補貨的消耗品（例如沐浴乳、衛生紙），跟床單/毛巾這類重複使用的
--- 布巾備品分開管理（布巾備品直接寫在 room_types.equipment 說明文字裡即可，不需要庫存數量）。
+-- 耗材維護：會被用掉、需要補貨的消耗品（例如沐浴乳、衛生紙）。跟床單/毛巾這類重複使用、
+-- 每次送洗依件計價的布巾備品是不同的資料模型（耗材看庫存量，布巾看洗滌成本），
+-- 各自有獨立的資料表（布巾備品見後面 8.8 節的 linen_items 等表），
+-- 但前端「備品管理」頁面把兩者放在同一頁的不同分頁，方便管理員一次維護完。
 CREATE TABLE IF NOT EXISTS public.consumables (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name TEXT NOT NULL,

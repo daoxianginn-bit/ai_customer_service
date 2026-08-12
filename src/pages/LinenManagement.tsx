@@ -1,21 +1,35 @@
 import { useEffect, useMemo, useState } from 'react';
 import { supabase } from '../lib/supabase';
-import { Shirt, Plus, Pencil, Trash2, AlertTriangle, BedDouble, BarChart3, RefreshCw } from 'lucide-react';
+import { Shirt, Plus, Pencil, Trash2, AlertTriangle, BedDouble, BarChart3, RefreshCw, Package } from 'lucide-react';
 import { PageHeader, Button, Modal, ConfirmDialog, EmptyState } from '../components/ui';
 import {
   LinenItem, RoomLinenDefault, linenItemLabel, currency, nightsBetween, computeUsage, usageTotal,
 } from '../lib/linenCost';
 import { roomLabel } from '../lib/rooms';
 
-type Tab = 'items' | 'defaults' | 'report';
+// 原本是「耗材維護」跟「布巾備品」兩個獨立頁面，都是「某個補給品項目 ↔ 對應到哪些房型/空間」
+// 的同一套關聯結構（consumable_spaces 對 room_type_linen_defaults），合成一頁四個分頁。
+type Tab = 'consumables' | 'items' | 'defaults' | 'report';
 
 const TABS: { key: Tab; label: string; icon: JSX.Element }[] = [
-  { key: 'items', label: '品項與單價', icon: <Shirt className="w-4 h-4" /> },
+  { key: 'consumables', label: '耗材維護', icon: <Package className="w-4 h-4" /> },
+  { key: 'items', label: '布巾品項與單價', icon: <Shirt className="w-4 h-4" /> },
   { key: 'defaults', label: '房間預設組合', icon: <BedDouble className="w-4 h-4" /> },
-  { key: 'report', label: '成本統計', icon: <BarChart3 className="w-4 h-4" /> },
+  { key: 'report', label: '布巾成本統計', icon: <BarChart3 className="w-4 h-4" /> },
 ];
 
-interface RoomOption { id: string; name: string; type: string; floor: string | null; capacity: number | null }
+// 耗材可以套用在任何房型/空間類型（例如公共空間也要放衛生紙），布巾只套用在「房間」類型
+// （空間不能訂房，不需要布巾）。兩邊共用同一次 room_types 查詢，各自在前端依 type 篩選。
+interface RoomTypeOption { id: string; name: string; type: string; floor: string | null; capacity: number | null }
+
+interface Consumable {
+  id: string;
+  name: string;
+  unit: string;
+  stock_quantity: number;
+  restock_threshold: number;
+  notes: string;
+}
 
 interface UsageRow {
   booking_id: string;
@@ -35,25 +49,37 @@ interface BookingRow {
 }
 
 const emptyItemForm = () => ({ category: '', spec: '', unit_price: '', notes: '', is_active: true });
+const emptyConsumableForm = () => ({ name: '', unit: '', stock_quantity: 0, restock_threshold: 0, notes: '', spaceIds: [] as string[] });
 
 function monthKey(iso: string | null): string {
   return iso ? iso.slice(0, 7) : '未設定日期';
 }
 
 export default function LinenManagement() {
-  const [tab, setTab] = useState<Tab>('items');
+  const [tab, setTab] = useState<Tab>('consumables');
   const [loading, setLoading] = useState(true);
   const [errorMsg, setErrorMsg] = useState('');
 
-  const [items, setItems] = useState<LinenItem[]>([]);
-  const [rooms, setRooms] = useState<RoomOption[]>([]);
-  const [defaults, setDefaults] = useState<RoomLinenDefault[]>([]);
+  const [allRoomTypes, setAllRoomTypes] = useState<RoomTypeOption[]>([]);
+  const rooms = useMemo(() => allRoomTypes.filter((r) => r.type === '房間'), [allRoomTypes]);
 
+  // ---------- 耗材維護 ----------
+  const [consumables, setConsumables] = useState<Consumable[]>([]);
+  const [spacesByConsumable, setSpacesByConsumable] = useState<Record<string, string[]>>({});
+  const [showConsumableForm, setShowConsumableForm] = useState(false);
+  const [editingConsumableId, setEditingConsumableId] = useState<string | null>(null);
+  const [consumableForm, setConsumableForm] = useState(emptyConsumableForm());
+  const [savingConsumable, setSavingConsumable] = useState(false);
+  const [deleteConsumableTarget, setDeleteConsumableTarget] = useState<Consumable | null>(null);
+  const [deletingConsumable, setDeletingConsumable] = useState(false);
+
+  // ---------- 布巾品項與單價 ----------
+  const [items, setItems] = useState<LinenItem[]>([]);
+  const [defaults, setDefaults] = useState<RoomLinenDefault[]>([]);
   const [usage, setUsage] = useState<UsageRow[]>([]);
   const [bookings, setBookings] = useState<BookingRow[]>([]);
   const [bookingRooms, setBookingRooms] = useState<{ booking_id: string; room_type_id: string }[]>([]);
 
-  // 品項表單
   const [showItemForm, setShowItemForm] = useState(false);
   const [editingItem, setEditingItem] = useState<LinenItem | null>(null);
   const [itemForm, setItemForm] = useState(emptyItemForm());
@@ -74,33 +100,133 @@ export default function LinenManagement() {
   const fetchAll = async () => {
     setLoading(true);
     setErrorMsg('');
-    const [itemRes, roomRes, defRes, usageRes, bookingRes, brRes] = await Promise.all([
+    const [roomRes, consumableRes, consumableSpaceRes, itemRes, defRes, usageRes, bookingRes, brRes] = await Promise.all([
+      supabase.from('room_types').select('id, name, type, floor, capacity').order('display_order'),
+      supabase.from('consumables').select('*').order('name'),
+      supabase.from('consumable_spaces').select('consumable_id, room_type_id'),
       supabase.from('linen_items').select('*').order('display_order'),
-      supabase.from('room_types').select('id, name, type, floor, capacity').eq('type', '房間').order('display_order'),
       supabase.from('room_type_linen_defaults').select('*'),
       supabase.from('booking_linen_usage').select('booking_id, linen_item_id, quantity, unit_price'),
       supabase.from('bookings').select('id, order_number, name, nickname, checkin_date, checkout_date, status').order('checkin_date', { ascending: false }),
       supabase.from('booking_rooms').select('booking_id, room_type_id'),
     ]);
 
-    const err = itemRes.error || roomRes.error || defRes.error || usageRes.error || bookingRes.error || brRes.error;
+    const err = roomRes.error || consumableRes.error || consumableSpaceRes.error || itemRes.error || defRes.error || usageRes.error || bookingRes.error || brRes.error;
     if (err) {
       setErrorMsg(`查詢失敗：${err.message}（新資料表可能還沒建立，請先在 Supabase 執行 supabase_schema.sql）`);
       setLoading(false);
       return;
     }
 
+    setAllRoomTypes(roomRes.data || []);
+    setConsumables(consumableRes.data || []);
+    const spaceMap: Record<string, string[]> = {};
+    for (const link of consumableSpaceRes.data || []) {
+      if (!spaceMap[link.consumable_id]) spaceMap[link.consumable_id] = [];
+      spaceMap[link.consumable_id].push(link.room_type_id);
+    }
+    setSpacesByConsumable(spaceMap);
+
     setItems(itemRes.data || []);
-    setRooms(roomRes.data || []);
     setDefaults(defRes.data || []);
     setUsage(usageRes.data || []);
     setBookings(bookingRes.data || []);
     setBookingRooms(brRes.data || []);
-    setSelectedRoomId((prev) => prev || roomRes.data?.[0]?.id || '');
+    setSelectedRoomId((prev) => prev || (roomRes.data || []).find((r: any) => r.type === '房間')?.id || '');
     setLoading(false);
   };
 
-  // ---------- 品項與單價 ----------
+  // ---------- 耗材維護 ----------
+  const consumableSpaceNames = (consumableId: string): string => {
+    const ids = spacesByConsumable[consumableId] || [];
+    return allRoomTypes.filter((s) => ids.includes(s.id)).map((s) => s.name).join('、') || '（未指定）';
+  };
+
+  const openNewConsumable = () => {
+    setEditingConsumableId(null);
+    setConsumableForm(emptyConsumableForm());
+    setShowConsumableForm(true);
+  };
+
+  const openEditConsumable = (row: Consumable) => {
+    setEditingConsumableId(row.id);
+    setConsumableForm({
+      name: row.name,
+      unit: row.unit || '',
+      stock_quantity: row.stock_quantity ?? 0,
+      restock_threshold: row.restock_threshold ?? 0,
+      notes: row.notes || '',
+      spaceIds: spacesByConsumable[row.id] || [],
+    });
+    setShowConsumableForm(true);
+  };
+
+  const toggleConsumableSpace = (id: string) => {
+    setConsumableForm((prev) => ({
+      ...prev,
+      spaceIds: prev.spaceIds.includes(id) ? prev.spaceIds.filter((s) => s !== id) : [...prev.spaceIds, id],
+    }));
+  };
+
+  const saveConsumable = async () => {
+    if (!consumableForm.name.trim()) { setErrorMsg('請輸入耗材名稱'); return; }
+    setSavingConsumable(true);
+    setErrorMsg('');
+    try {
+      const payload = {
+        name: consumableForm.name.trim(),
+        unit: consumableForm.unit,
+        stock_quantity: Number(consumableForm.stock_quantity) || 0,
+        restock_threshold: Number(consumableForm.restock_threshold) || 0,
+        notes: consumableForm.notes,
+        updated_at: new Date().toISOString(),
+      };
+
+      let consumableId = editingConsumableId;
+      if (consumableId) {
+        const { error } = await supabase.from('consumables').update(payload).eq('id', consumableId);
+        if (error) throw error;
+        await supabase.from('consumable_spaces').delete().eq('consumable_id', consumableId);
+      } else {
+        const { data, error } = await supabase.from('consumables').insert(payload).select('id').single();
+        if (error) throw error;
+        consumableId = data.id;
+      }
+
+      if (consumableForm.spaceIds.length) {
+        const { error: linkError } = await supabase
+          .from('consumable_spaces')
+          .insert(consumableForm.spaceIds.map((roomTypeId) => ({ consumable_id: consumableId, room_type_id: roomTypeId })));
+        if (linkError) throw linkError;
+      }
+
+      setShowConsumableForm(false);
+      await fetchAll();
+    } catch (e: any) {
+      setErrorMsg(`儲存失敗：${e.message}`);
+    } finally {
+      setSavingConsumable(false);
+    }
+  };
+
+  const confirmDeleteConsumable = async () => {
+    if (!deleteConsumableTarget) return;
+    setDeletingConsumable(true);
+    try {
+      const { error } = await supabase.from('consumables').delete().eq('id', deleteConsumableTarget.id);
+      if (error) throw error;
+      setDeleteConsumableTarget(null);
+      await fetchAll();
+    } catch (e: any) {
+      setErrorMsg(`刪除失敗：${e.message}`);
+    } finally {
+      setDeletingConsumable(false);
+    }
+  };
+
+  const isLowStock = (row: Consumable) => row.stock_quantity <= row.restock_threshold;
+
+  // ---------- 布巾品項與單價 ----------
   const openNewItem = () => { setEditingItem(null); setItemForm(emptyItemForm()); setShowItemForm(true); };
   const openEditItem = (item: LinenItem) => {
     setEditingItem(item);
@@ -208,7 +334,7 @@ export default function LinenManagement() {
     ]);
   };
 
-  // ---------- 統計 ----------
+  // ---------- 布巾成本統計 ----------
   const itemById = useMemo(() => new Map(items.map((i) => [i.id, i])), [items]);
   const bookingById = useMemo(() => new Map(bookings.map((b) => [b.id, b])), [bookings]);
 
@@ -289,8 +415,8 @@ export default function LinenManagement() {
     <div className="max-w-6xl mx-auto space-y-4">
       <PageHeader
         icon={<Shirt className="w-6 h-6 text-green-600" />}
-        title="布巾備品洗滌成本"
-        description="床包、被套、毛巾這類重複使用的布巾，每次送洗依件計價。設定好每間房的預設組合後，訂單會自動帶出用量與成本。"
+        title="備品管理"
+        description="會被用掉、需要補貨的耗材（沐浴乳、衛生紙），以及重複使用、每次送洗依件計價的布巾（床包、毛巾）。"
         action={<Button variant="secondary" onClick={fetchAll} icon={<RefreshCw className="w-4 h-4" />}>重新整理</Button>}
       />
 
@@ -317,7 +443,55 @@ export default function LinenManagement() {
           ))}
         </div>
 
-        {/* ---------- 品項與單價 ---------- */}
+        {/* ---------- 耗材維護 ---------- */}
+        {tab === 'consumables' && (
+          <div>
+            <div className="flex justify-between items-center gap-4 px-6 py-4 border-b">
+              <p className="text-sm text-gray-500">會被用掉、需要補貨的消耗品庫存（例如沐浴乳、衛生紙）。</p>
+              <Button onClick={openNewConsumable} icon={<Plus className="w-4 h-4" />} className="whitespace-nowrap">新增耗材</Button>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-sm">
+                <thead className="bg-gray-50 border-b text-gray-600">
+                  <tr>
+                    <th className="py-3 px-4">名稱</th>
+                    <th className="py-3 px-4">庫存數量</th>
+                    <th className="py-3 px-4">補貨門檻</th>
+                    <th className="py-3 px-4">適用房型/空間</th>
+                    <th className="py-3 px-4"></th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {consumables.length === 0 ? (
+                    <tr><td colSpan={5}><EmptyState icon={<Package className="w-12 h-12 text-gray-200" />} message="尚未設定任何耗材，點右上角「新增耗材」開始" /></td></tr>
+                  ) : (
+                    consumables.map((row) => (
+                      <tr key={row.id} onClick={() => openEditConsumable(row)} className="hover:bg-green-50 transition-colors cursor-pointer">
+                        <td className="py-3 px-4 font-medium text-gray-800">{row.name}</td>
+                        <td className="py-3 px-4">
+                          <span className={`inline-flex items-center gap-1 ${isLowStock(row) ? 'text-red-600 font-medium' : 'text-gray-700'}`}>
+                            {isLowStock(row) && <AlertTriangle className="w-3.5 h-3.5" />}
+                            {row.stock_quantity} {row.unit}
+                          </span>
+                        </td>
+                        <td className="py-3 px-4 text-gray-500">{row.restock_threshold} {row.unit}</td>
+                        <td className="py-3 px-4 text-gray-500">{consumableSpaceNames(row.id)}</td>
+                        <td className="py-3 px-4 text-right">
+                          <div className="flex items-center justify-end gap-1">
+                            <button onClick={(e) => { e.stopPropagation(); openEditConsumable(row); }} className="p-2 hover:bg-gray-100 rounded-lg" title="編輯"><Pencil className="w-4 h-4 text-gray-500" /></button>
+                            <button onClick={(e) => { e.stopPropagation(); setDeleteConsumableTarget(row); }} className="p-2 hover:bg-red-50 rounded-lg" title="刪除"><Trash2 className="w-4 h-4 text-red-500" /></button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* ---------- 布巾品項與單價 ---------- */}
         {tab === 'items' && (
           <div>
             <div className="flex justify-between items-center gap-4 px-6 py-4 border-b">
@@ -440,7 +614,7 @@ export default function LinenManagement() {
           </div>
         )}
 
-        {/* ---------- 成本統計 ---------- */}
+        {/* ---------- 布巾成本統計 ---------- */}
         {tab === 'report' && (
           <div className="p-6 space-y-6">
             <div className="flex flex-wrap items-end gap-3">
@@ -524,6 +698,72 @@ export default function LinenManagement() {
         )}
       </div>
 
+      {/* ---------- 耗材表單／刪除確認 ---------- */}
+      <Modal
+        open={showConsumableForm}
+        title={editingConsumableId ? '編輯耗材' : '新增耗材'}
+        onClose={() => setShowConsumableForm(false)}
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setShowConsumableForm(false)}>取消</Button>
+            <Button onClick={saveConsumable} loading={savingConsumable}>{savingConsumable ? '儲存中...' : '儲存'}</Button>
+          </>
+        }
+      >
+        <div>
+          <label className="block text-xs text-gray-500 mb-1">名稱</label>
+          <input value={consumableForm.name} onChange={(e) => setConsumableForm({ ...consumableForm, name: e.target.value })} className="w-full px-3 py-2 border rounded-lg" placeholder="例如：沐浴乳" />
+        </div>
+        <div className="grid grid-cols-3 gap-3">
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">單位</label>
+            <input value={consumableForm.unit} onChange={(e) => setConsumableForm({ ...consumableForm, unit: e.target.value })} className="w-full px-3 py-2 border rounded-lg" placeholder="瓶" />
+          </div>
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">庫存數量</label>
+            <input type="number" value={consumableForm.stock_quantity} onChange={(e) => setConsumableForm({ ...consumableForm, stock_quantity: Number(e.target.value) })} className="w-full px-3 py-2 border rounded-lg" />
+          </div>
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">補貨門檻</label>
+            <input type="number" value={consumableForm.restock_threshold} onChange={(e) => setConsumableForm({ ...consumableForm, restock_threshold: Number(e.target.value) })} className="w-full px-3 py-2 border rounded-lg" title="庫存低於等於這個數字時，畫面會標示提醒" />
+          </div>
+        </div>
+        <div>
+          <label className="block text-xs text-gray-500 mb-2">適用房型/空間</label>
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 max-h-40 overflow-y-auto border rounded-lg p-3">
+            {allRoomTypes.length === 0 ? (
+              <p className="text-xs text-gray-400 col-span-full">尚未設定任何房型/空間，請先到「房型與空間維護」新增</p>
+            ) : (
+              allRoomTypes.map((s) => {
+                const checked = consumableForm.spaceIds.includes(s.id);
+                return (
+                  <label key={s.id} className={`flex items-center gap-2 px-2 py-1.5 border rounded-lg text-sm cursor-pointer ${checked ? 'bg-green-50 border-green-300' : 'border-gray-200'}`}>
+                    <input type="checkbox" checked={checked} onChange={() => toggleConsumableSpace(s.id)} />
+                    {s.name}
+                  </label>
+                );
+              })
+            )}
+          </div>
+        </div>
+        <div>
+          <label className="block text-xs text-gray-500 mb-1">備註</label>
+          <textarea value={consumableForm.notes} onChange={(e) => setConsumableForm({ ...consumableForm, notes: e.target.value })} rows={2} className="w-full px-3 py-2 border rounded-lg" />
+        </div>
+      </Modal>
+
+      <ConfirmDialog
+        open={!!deleteConsumableTarget}
+        title="刪除耗材"
+        message={`確定要刪除「${deleteConsumableTarget?.name}」嗎？`}
+        confirmLabel="刪除"
+        danger
+        loading={deletingConsumable}
+        onConfirm={confirmDeleteConsumable}
+        onCancel={() => setDeleteConsumableTarget(null)}
+      />
+
+      {/* ---------- 布巾品項表單／刪除確認 ---------- */}
       <Modal
         open={showItemForm}
         title={editingItem ? '編輯品項' : '新增品項'}
