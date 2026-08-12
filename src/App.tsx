@@ -18,6 +18,7 @@ import RoomCalendar from './pages/RoomCalendar';
 import RoomSpaceManagement from './pages/RoomSpaceManagement';
 import ConsumablesManagement from './pages/ConsumablesManagement';
 import LinenManagement from './pages/LinenManagement';
+import ScheduledTasks from './pages/ScheduledTasks';
 import CustomerDirectory from './pages/CustomerDirectory';
 import Layout from './components/Layout';
 
@@ -102,6 +103,7 @@ function App() {
           <Route path="/room-pricing" element={<BookingManagement />} />
           <Route path="/consumables" element={<ConsumablesManagement />} />
           <Route path="/linens" element={<LinenManagement />} />
+          <Route path="/scheduled-tasks" element={<ScheduledTasks />} />
           <Route path="/customers" element={<CustomerDirectory />} />
           <Route path="/knowledge-base" element={<KnowledgeBase />} />
           <Route path="/ai-settings" element={<AiSettings />} />

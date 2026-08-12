@@ -22,6 +22,7 @@ import {
   DoorOpen,
   Package,
   Shirt,
+  Clock,
 } from 'lucide-react';
 
 const topItems = [
@@ -44,6 +45,7 @@ const settingsItems = [
   { to: '/ai-settings', label: 'AI 引擎設定', icon: Bot },
   { to: '/line-settings', label: 'LINE 串接設定', icon: MessageCircle },
   { to: '/handover-rules', label: '轉接規則', icon: UserCheck },
+  { to: '/scheduled-tasks', label: '排程管理', icon: Clock },
   { to: '/accounts', label: '帳號管理', icon: UserCog },
 ];
 

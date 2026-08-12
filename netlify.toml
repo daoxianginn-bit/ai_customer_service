@@ -9,6 +9,12 @@
 [functions."cleanup-conversations"]
   schedule = "@daily"
 
+# 排程管理頁的執行器：固定每 15 分鐘檢查一次有哪些排程到期了。
+# 排程實際的時間（每天幾點、每週幾等）是後台在 scheduled_tasks 表裡動態設定的，
+# 這裡的 15 分鐘只是檢查頻率，不是排程本身的時間——見 netlify/functions/scheduled-tasks-run.ts。
+[functions."scheduled-tasks-run"]
+  schedule = "*/15 * * * *"
+
 [[redirects]]
   from = "/*"
   to = "/index.html"
