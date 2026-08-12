@@ -358,6 +358,35 @@ BEGIN
   END IF;
 END $$;
 
+-- flow_type：走完所有步驟之後要做什麼，三種類型互斥。
+--   'quote'（預設，等同改版前的唯一行為）：算價欄位收集齊才進報價引擎，跑報價確認／付款確認；
+--     沒收集齊就送 incomplete_message 給顧客並轉真人，不進報價引擎、不建立房間/布巾成本紀錄。
+--   'collect'：純問答/收集資訊用，不管有沒有算價欄位，走完最後一步直接送 completion_message 結束，
+--     完全不碰 bookings 表——不建立訂單紀錄，因為這類流程本來就不是訂房（例如常見問題、需求登記），
+--     硬塞進 bookings 只會在「訂單管理」留下一堆沒有入住日期的空白列。
+--   'query'：純查詢既有訂單，只讀不寫。用顧客提供的訂單編號查 bookings，同時比對 line_user_id
+--     （只有訂單本人的 LINE 帳號能查到自己的訂單，避免拿到別人的訂單編號就能看到別人的訂房資料）。
+--     查到就用查到的那筆訂單資料組 found_message；查不到就回 not_found_message。跟 collect 一樣
+--     不建立新的 bookings 紀錄，差別是這個類型會去讀既有資料、回覆內容依查詢結果動態變化。
+-- incomplete_message：quote 型專用，算價欄位沒收集齊時的回覆；NULL 用程式內建的預設文字。
+-- completion_message：collect 型專用，走完步驟後送給顧客的完成訊息；NULL 用程式內建的預設文字。
+-- notify_agent_on_complete：collect 型專用，完成後要不要推播通知 agent_user_ids（每個流程各自決定，
+--   不是全站一個開關——像「特殊需求登記」會想馬上知道，「入住須知查詢」通常不用驚動真人）。
+-- found_message / not_found_message：query 型專用，查到/查無訂單時的回覆；NULL 用程式內建的預設文字。
+ALTER TABLE public.booking_flows ADD COLUMN IF NOT EXISTS flow_type TEXT NOT NULL DEFAULT 'quote';
+ALTER TABLE public.booking_flows ADD COLUMN IF NOT EXISTS incomplete_message TEXT;
+ALTER TABLE public.booking_flows ADD COLUMN IF NOT EXISTS completion_message TEXT;
+ALTER TABLE public.booking_flows ADD COLUMN IF NOT EXISTS notify_agent_on_complete BOOLEAN NOT NULL DEFAULT true;
+ALTER TABLE public.booking_flows ADD COLUMN IF NOT EXISTS found_message TEXT;
+ALTER TABLE public.booking_flows ADD COLUMN IF NOT EXISTS not_found_message TEXT;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'booking_flows_flow_type_check') THEN
+    ALTER TABLE public.booking_flows ADD CONSTRAINT booking_flows_flow_type_check CHECK (flow_type IN ('quote', 'collect', 'query'));
+  END IF;
+END $$;
+
 -- 既有流程的關鍵字回填：沿用改版前寫死在 line-webhook.ts 的規則——單字關鍵字太容易誤觸，
 -- 只在整句完全相同時才算（exact）；兩字以上用包含比對（contains）。這樣升級後行為完全不變。
 UPDATE public.booking_flows f

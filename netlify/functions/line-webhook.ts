@@ -235,7 +235,7 @@ function bookingSessionTtlMs(phase: BookingSession['phase']): number {
 interface FlowFieldDef {
   key: string;
   label: string;
-  quote_field: 'checkin_date' | 'checkout_date' | 'headcount' | 'whole_house' | 'room_count' | null;
+  quote_field: 'checkin_date' | 'checkout_date' | 'headcount' | 'whole_house' | 'room_count' | 'order_number' | null;
   // quote_field='room_count' 時代表這是「幾人房」的間數，例如 2 就是 2 人房要開幾間。
   // 這個值不影響價格（價格仍由 bookingEngine 決定），只用來決定實際開哪幾間房。
   room_capacity?: number | null;
@@ -251,9 +251,22 @@ interface FlowDef {
   triggerRules: TriggerRule[];
   // 'ai'＝呼叫 AI 理解顧客回覆並擷取欄位；'system'＝完全不呼叫 AI，用純程式解析（省 token）
   replyMode: 'ai' | 'system';
+  // 'quote'＝走完步驟後嘗試算價、跑報價確認/付款確認（既有行為）；
+  // 'collect'＝純問答/收集資訊，走完步驟直接送完成訊息結束，不碰 bookings 表；
+  // 'query'＝純查詢既有訂單，只讀不寫，回覆內容依查詢結果動態變化。
+  flowType: 'quote' | 'collect' | 'query';
   // 流程自己的報價／付款確認訊息。null＝這個流程還沒設定，webhook 會退回 settings 的舊值。
   quoteMessage: string | null;
   confirmMessage: string | null;
+  // quote 型專用：算價欄位沒收集齊時的回覆。null＝用內建預設文字。
+  incompleteMessage: string | null;
+  // collect 型專用：走完步驟後的完成訊息。null＝用內建預設文字。
+  completionMessage: string | null;
+  // collect 型專用：完成後要不要推播通知 agent_user_ids。
+  notifyAgentOnComplete: boolean;
+  // query 型專用：查到／查無訂單時的回覆。null＝用內建預設文字。
+  foundMessage: string | null;
+  notFoundMessage: string | null;
   steps: FlowStepDef[];
 }
 
@@ -263,8 +276,14 @@ function mapFlowRow(row: any, stepRows: any[]): FlowDef {
     name: row.name,
     triggerRules: parseTriggerRules(row.trigger_rules, row.trigger_keywords),
     replyMode: row.reply_mode === 'system' ? 'system' : 'ai',
+    flowType: row.flow_type === 'collect' ? 'collect' : row.flow_type === 'query' ? 'query' : 'quote',
     quoteMessage: row.quote_message ?? null,
     confirmMessage: row.confirm_message ?? null,
+    incompleteMessage: row.incomplete_message ?? null,
+    completionMessage: row.completion_message ?? null,
+    notifyAgentOnComplete: row.notify_agent_on_complete !== false,
+    foundMessage: row.found_message ?? null,
+    notFoundMessage: row.not_found_message ?? null,
     steps: stepRows.map((s: any) => ({ step_order: s.step_order, message_template: s.message_template, fields: s.fields || [] })),
   };
 }
@@ -280,7 +299,10 @@ interface BookingSession {
   flowId: string;
   stepIndex: number; // 目前等待回答的步驟（0-based）；awaiting_confirmation／awaiting_remittance 階段不再使用
   collected: Record<string, string>;
-  bookingId: string;
+  // collect 型流程完全不建立 bookings 紀錄，這裡是 null；quote 型流程一律非 null。
+  // awaiting_confirmation／awaiting_remittance 這兩個階段只有 quote 型流程會進入，
+  // 進到那兩個階段時 bookingId 保證非 null（collect 型走完步驟就直接結束，不會經過這兩階段）。
+  bookingId: string | null;
   // in_flow：還在逐步收集資料
   // awaiting_confirmation：報價已送出，等顧客回「是」或「否」
   // awaiting_remittance：顧客已回「是」、預訂單已送出，等顧客回報匯款
@@ -825,6 +847,18 @@ async function startBookingFlow(
   nickname: string | null,
   flow: FlowDef
 ) {
+  // collect／query 型流程都不碰 bookings 表——不判斷接續舊訂單、不建立訂單紀錄。
+  // 這條路徑走完就直接回第一步訊息，session 的 bookingId 是 null。
+  if (flow.flowType === 'collect' || flow.flowType === 'query') {
+    const firstStep = flow.steps.find((s) => s.step_order === 1);
+    if (!firstStep) return; // 流程沒有設定任何步驟，視為設定異常，不處理
+    await saveBookingSession(userId, { flowId: flow.id, stepIndex: 0, collected: {}, bookingId: null, phase: 'in_flow', quote: null });
+    const firstMessage = await renderFlowMessage(firstStep.message_template, settings, userId, nickname, null);
+    await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: firstMessage });
+    await logConversation(userId, nickname, 'outbound', firstMessage, 'system');
+    return;
+  }
+
   // 用資料庫的實際訂單狀態判斷是否接續舊訂單，不能只看 session——
   // session 30 分鐘沒回覆就會過期消失，但客人的舊訂單可能還卡在
   // inquiring/quoted，這時若客人重新輸入關鍵字，
@@ -911,7 +945,10 @@ async function continueBookingFlow(
     return;
   }
 
-  await supabase.from('bookings').update({ collected_answers: collected, updated_at: new Date().toISOString() }).eq('id', session.bookingId);
+  // collect 型流程沒有 bookingId 可以更新——這類流程完全不碰 bookings 表。
+  if (session.bookingId) {
+    await supabase.from('bookings').update({ collected_answers: collected, updated_at: new Date().toISOString() }).eq('id', session.bookingId);
+  }
 
   const nextStepOrder = session.stepIndex + 2;
   const nextStep = flow.steps.find((s) => s.step_order === nextStepOrder);
@@ -923,7 +960,87 @@ async function continueBookingFlow(
     return;
   }
 
-  await finishBookingFlow(lineClient, lineEvent, settings, userId, nickname, flow, collected, session.bookingId);
+  if (flow.flowType === 'collect') {
+    await finishCollectFlow(lineClient, lineEvent, settings, userId, nickname, flow, collected);
+    return;
+  }
+  if (flow.flowType === 'query') {
+    await finishQueryFlow(lineClient, lineEvent, settings, userId, nickname, flow, collected);
+    return;
+  }
+  // quote 型流程走到這裡，session.bookingId 一定存在——startBookingFlow() 的 quote 分支
+  // 一律先建立/接續一筆 bookings 才會進到收集步驟，不會有 quote 型流程沒有 bookingId 的情況。
+  await finishBookingFlow(lineClient, lineEvent, settings, userId, nickname, flow, collected, session.bookingId!);
+}
+
+// collect 型流程的結尾：不管有沒有收集到什麼，走完最後一步就直接送完成訊息結束。
+// 完全不碰 bookings 表——這類流程本來就不是訂房，硬塞進 bookings 只會在「訂單管理」
+// 留下一堆沒有入住日期的空白列。要不要通知真人客服由 flow.notifyAgentOnComplete 這個
+// 每個流程各自的開關決定，不是全站統一行為（「特殊需求登記」想馬上知道，
+// 「入住須知查詢」通常不用驚動真人）。
+async function finishCollectFlow(
+  lineClient: Client,
+  lineEvent: any,
+  settings: any,
+  userId: string,
+  nickname: string | null,
+  flow: FlowDef,
+  collected: Record<string, string>
+) {
+  const DEFAULT_COMPLETION_MESSAGE = '感謝您提供的資訊，我們已經收到了！';
+  const replyText = await renderFlowMessage(flow.completionMessage || DEFAULT_COMPLETION_MESSAGE, settings, userId, nickname, null);
+  await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
+  await logConversation(userId, nickname, 'outbound', replyText, 'system');
+
+  if (flow.notifyAgentOnComplete) {
+    const allFields = flow.steps.flatMap((s) => s.fields);
+    const summary = allFields.map((f) => `${f.label}: ${collected[f.key] || ''}`).join('\n') || '（這個流程沒有設定要收集的答案欄位）';
+    for (const id of parseCsvKeywords(settings.agent_user_ids)) {
+      try {
+        await lineClient.pushMessage(id, {
+          type: 'text',
+          text: `📋 ${flow.name} 已完成：【${nickname || '匿名用戶'}】\n${summary}`,
+        });
+      } catch {}
+    }
+  }
+
+  await clearBookingSession(userId);
+}
+
+// query 型流程的結尾：純查詢既有訂單，只讀不寫。用顧客提供的訂單編號去 bookings 查，
+// 同時比對 line_user_id——只有訂單本人的 LINE 帳號能查到自己的訂單，避免顧客拿到
+// 別人的訂單編號（親友轉發、猜號碼）就能看到別人的訂房資料。查到就用那筆訂單的實際
+// 資料組回覆（沿用既有的 [狀態]/[入住日期]/[訂單總額] 等變數）；查不到就回 not_found_message。
+async function finishQueryFlow(
+  lineClient: Client,
+  lineEvent: any,
+  settings: any,
+  userId: string,
+  nickname: string | null,
+  flow: FlowDef,
+  collected: Record<string, string>
+) {
+  const allFields = flow.steps.flatMap((s) => s.fields);
+  const orderNumberField = allFields.find((f) => f.quote_field === 'order_number');
+  const orderNumber = orderNumberField ? (collected[orderNumberField.key] || '').trim() : '';
+
+  let booking: any = null;
+  if (orderNumber) {
+    const { data } = await supabase.from('bookings').select('*').eq('order_number', orderNumber).eq('line_user_id', userId).maybeSingle();
+    booking = data;
+  }
+
+  const DEFAULT_FOUND_MESSAGE = '您的訂單狀態：[訂單狀態]\n入住日期：[入住日期]\n退房日期：[退房日期]\n總金額：[總金額]';
+  const DEFAULT_NOT_FOUND_MESSAGE = '不好意思，查無這筆訂單資料，請確認訂單編號是否正確，或點選「真人客服」協助查詢。';
+
+  const replyText = booking
+    ? await renderFlowMessage(flow.foundMessage || DEFAULT_FOUND_MESSAGE, settings, userId, nickname, booking.id)
+    : await renderFlowMessage(flow.notFoundMessage || DEFAULT_NOT_FOUND_MESSAGE, settings, userId, nickname, null);
+
+  await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
+  await logConversation(userId, nickname, 'outbound', replyText, 'system');
+  await clearBookingSession(userId);
 }
 
 async function finishBookingFlow(
@@ -955,7 +1072,8 @@ async function finishBookingFlow(
       .single();
     if (booking) mirrorBookingToSheet(settings, booking).catch(() => {});
 
-    const replyText = '感謝您提供的資訊！我們已經收到，將由客服人員盡快為您確認詳細報價，謝謝您的耐心等候 🙏';
+    const DEFAULT_INCOMPLETE_MESSAGE = '感謝您提供的資訊！我們已經收到，將由客服人員盡快為您確認詳細報價，謝謝您的耐心等候 🙏';
+    const replyText = await renderFlowMessage(flow.incompleteMessage || DEFAULT_INCOMPLETE_MESSAGE, settings, userId, nickname, bookingId);
     await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
     await logConversation(userId, nickname, 'outbound', replyText, 'system');
 

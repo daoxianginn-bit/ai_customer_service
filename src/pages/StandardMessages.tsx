@@ -2,20 +2,37 @@ import { useState, useEffect, useMemo, useCallback } from 'react';
 import { supabase } from '../lib/supabase';
 import {
   MessageSquareText, Plus, Trash2, Pencil, Calculator, CheckCircle2, Wallet,
-  MessageCircleQuestion, Sparkles, Cpu, AlertTriangle, UserRound, ArrowRight,
+  MessageCircleQuestion, Sparkles, Cpu, AlertTriangle, UserRound, ArrowRight, Search,
 } from 'lucide-react';
 import MessageTemplateEditor from '../components/MessageTemplateEditor';
 import VariableText from '../components/VariableText';
 import { PageHeader, Button, ConfirmDialog, Switch, EmptyState } from '../components/ui';
 import { TriggerRule, KeywordMatch, parseTriggerRules, serializeTriggerRules } from '../lib/messageVariables';
 
+const NO_PURPOSE_OPTION = { value: '', label: '無（純收集資訊）' };
+
 const BASE_QUOTE_FIELD_OPTIONS = [
-  { value: '', label: '無（純收集資訊）' },
+  NO_PURPOSE_OPTION,
   { value: 'checkin_date', label: '算價：入住日期' },
   { value: 'checkout_date', label: '算價：退房日期' },
   { value: 'headcount', label: '算價：入住人數' },
   { value: 'whole_house', label: '算價：是否包棟' },
 ];
+
+// query 型流程只需要一種特殊用途：標記哪個答案是查詢用的訂單編號。
+const QUERY_FIELD_OPTIONS = [NO_PURPOSE_OPTION, { value: 'order_number', label: '查詢依據：訂單編號' }];
+
+// 三種流程類型共用的顯示資訊（圖示/標題/說明），選擇器跟各處的類型標籤都從這裡取，
+// 才不會三個地方各寫一份、之後改一個忘了改另一個。
+const FLOW_TYPE_OPTIONS: { value: FlowType; icon: JSX.Element; title: string; desc: string }[] = [
+  { value: 'quote', icon: <Calculator className="w-4 h-4" />, title: '報價訂房', desc: '算價欄位收集齊後自動試算，走報價確認與付款確認，會建立訂單紀錄。' },
+  { value: 'collect', icon: <MessageSquareText className="w-4 h-4" />, title: '一般收集', desc: '純問答/收集資訊，走完步驟直接送出完成訊息結束，不算價、不建立訂單紀錄。' },
+  { value: 'query', icon: <Search className="w-4 h-4" />, title: '查詢訂單', desc: '用訂單編號查既有訂單狀態，只讀不寫，不會建立新的訂單紀錄。' },
+];
+
+function flowTypeMeta(type: FlowType) {
+  return FLOW_TYPE_OPTIONS.find((o) => o.value === type) || FLOW_TYPE_OPTIONS[0];
+}
 
 // 「幾人房要開幾間」的選項是資料驅動的：讀「房型與空間維護」裡實際存在的房間人數，
 // 新增一種人數的房間就會自動出現在這裡，不用改程式。
@@ -52,13 +69,22 @@ function newId(): string {
 
 type FlowField = { key: string; label: string; quote_field: string };
 type FlowStep = { step_order: number; message_template: string; fields: FlowField[] };
+type FlowType = 'quote' | 'collect' | 'query';
 type Flow = {
   id: string;
   name: string;
   trigger_rules: TriggerRule[];
   reply_mode: 'ai' | 'system';
+  // 'quote'＝走完步驟後嘗試算價、跑報價確認/付款確認；'collect'＝純問答/收集資訊，
+  // 走完步驟直接送完成訊息結束，不算價、不建立訂單紀錄；'query'＝純查詢既有訂單，只讀不寫。
+  flow_type: FlowType;
   quote_message: string;
   confirm_message: string;
+  incomplete_message: string; // quote 型：算價欄位沒收集齊時的回覆，空字串＝用內建預設文字
+  completion_message: string; // collect 型：走完步驟後的完成訊息，空字串＝用內建預設文字
+  notify_agent_on_complete: boolean; // collect 型：完成後要不要推播通知真人客服
+  found_message: string; // query 型：查到訂單時的回覆，空字串＝用內建預設文字
+  not_found_message: string; // query 型：查無訂單時的回覆，空字串＝用內建預設文字
   is_active: boolean;
   display_order: number;
   steps: FlowStep[];
@@ -69,8 +95,14 @@ const emptyFlow = (displayOrder: number): Flow => ({
   name: '',
   trigger_rules: [{ keyword: '', match: 'contains' }],
   reply_mode: 'ai',
+  flow_type: 'quote',
   quote_message: '',
   confirm_message: '',
+  incomplete_message: '',
+  completion_message: '',
+  notify_agent_on_complete: true,
+  found_message: '',
+  not_found_message: '',
   is_active: true,
   display_order: displayOrder,
   steps: [{ step_order: 1, message_template: '', fields: [{ key: newId(), label: '', quote_field: '' }] }],
@@ -153,14 +185,17 @@ export default function StandardMessages() {
   const [roomCapacities, setRoomCapacities] = useState<number[]>([]);
   const [errorMsg, setErrorMsg] = useState('');
 
-  const quoteFieldOptions = useMemo(
-    () => [...BASE_QUOTE_FIELD_OPTIONS, ...roomCountOptions(roomCapacities)],
-    [roomCapacities]
-  );
-
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<Flow | null>(null);
+
+  // 答案欄位的「用途」下拉選項依流程類型而不同：quote 型才需要算價/開房這些選項，
+  // query 型只需要標記「這是查詢用的訂單編號」，collect 型完全不需要（純收集，沒有下游用途）。
+  const fieldPurposeOptions = useMemo(() => {
+    if (draft?.flow_type === 'query') return QUERY_FIELD_OPTIONS;
+    if (draft?.flow_type === 'collect') return [NO_PURPOSE_OPTION];
+    return [...BASE_QUOTE_FIELD_OPTIONS, ...roomCountOptions(roomCapacities)];
+  }, [draft?.flow_type, roomCapacities]);
   const [baseline, setBaseline] = useState<string>('');
   const [saving, setSaving] = useState(false);
 
@@ -211,8 +246,14 @@ export default function StandardMessages() {
       name: f.name,
       trigger_rules: parseTriggerRules(f.trigger_rules, f.trigger_keywords),
       reply_mode: f.reply_mode === 'system' ? 'system' : 'ai',
+      flow_type: f.flow_type === 'collect' ? 'collect' : f.flow_type === 'query' ? 'query' : 'quote',
       quote_message: f.quote_message ?? '',
       confirm_message: f.confirm_message ?? '',
+      incomplete_message: f.incomplete_message ?? '',
+      completion_message: f.completion_message ?? '',
+      notify_agent_on_complete: f.notify_agent_on_complete !== false,
+      found_message: f.found_message ?? '',
+      not_found_message: f.not_found_message ?? '',
       is_active: f.is_active,
       display_order: f.display_order,
       steps: (stepRes.data || [])
@@ -325,8 +366,14 @@ export default function StandardMessages() {
         // 舊欄位同步寫入，萬一要退回改版前的程式仍讀得到關鍵字
         trigger_keywords: serializeTriggerRules(rules),
         reply_mode: draft.reply_mode,
+        flow_type: draft.flow_type,
         quote_message: draft.quote_message,
         confirm_message: draft.confirm_message,
+        incomplete_message: draft.incomplete_message || null,
+        completion_message: draft.completion_message || null,
+        notify_agent_on_complete: draft.notify_agent_on_complete,
+        found_message: draft.found_message || null,
+        not_found_message: draft.not_found_message || null,
         is_active: draft.is_active,
         display_order: draft.display_order,
         updated_at: new Date().toISOString(),
@@ -393,7 +440,8 @@ export default function StandardMessages() {
   if (loading) return <div className="p-8 text-center text-gray-500">載入中...</div>;
 
   const current = editing ? draft : selected;
-  const missing = current ? missingQuoteFields(current) : [];
+  const flowType = current?.flow_type ?? 'quote';
+  const missing = current && flowType === 'quote' ? missingQuoteFields(current) : [];
   const quoteCapable = missing.length === 0;
 
   return (
@@ -436,7 +484,7 @@ export default function StandardMessages() {
                       <span className={`text-sm truncate ${active ? 'font-semibold text-green-800' : 'text-gray-700'}`}>{flow.name}</span>
                     </span>
                     <span className="block pl-3.5 mt-0.5 text-xs text-gray-400">
-                      {flow.steps.length} 步驟 · {flow.trigger_rules.length} 關鍵字{flow.is_active ? '' : ' · 已停用'}
+                      {flowTypeMeta(flow.flow_type).title} · {flow.steps.length} 步驟 · {flow.trigger_rules.length} 關鍵字{flow.is_active ? '' : ' · 已停用'}
                     </span>
                   </button>
                 );
@@ -502,6 +550,36 @@ export default function StandardMessages() {
               </div>
 
               <div className="px-6">
+                {/* 流程類型：決定走完步驟後要做什麼，也決定下面會顯示哪些階段 */}
+                <div className="py-4 border-b">
+                  <p className="text-xs text-gray-500 mb-2">流程類型</p>
+                  {editing ? (
+                    <div className="grid sm:grid-cols-3 gap-2">
+                      {FLOW_TYPE_OPTIONS.map((opt) => (
+                        <button
+                          key={opt.value}
+                          onClick={() => patchDraft({ flow_type: opt.value })}
+                          className={`text-left p-3 rounded-lg border-2 transition-colors ${
+                            draft!.flow_type === opt.value ? 'border-green-500 bg-green-50' : 'border-gray-200 hover:border-gray-300'
+                          }`}
+                        >
+                          <span className={`flex items-center gap-2 text-sm font-medium ${
+                            draft!.flow_type === opt.value ? 'text-green-800' : 'text-gray-700'
+                          }`}>
+                            {opt.icon}{opt.title}
+                          </span>
+                          <span className="block mt-1 text-xs text-gray-500">{opt.desc}</span>
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <span className="inline-flex items-center gap-1.5 text-sm text-gray-700">
+                      <span className="text-green-600">{flowTypeMeta(flowType).icon}</span>
+                      {flowTypeMeta(flowType).title}
+                    </span>
+                  )}
+                </div>
+
                 {/* ① 觸發條件 */}
                 <Stage index={1} title="觸發條件" icon={<MessageCircleQuestion className="w-4 h-4" />}>
                   {editing ? (
@@ -625,16 +703,21 @@ export default function StandardMessages() {
                                       className="flex-1 px-2 py-1.5 border rounded text-sm"
                                       placeholder="答案名稱，例如：入住日期"
                                     />
-                                    <ArrowRight className="w-3.5 h-3.5 text-gray-300 shrink-0" />
-                                    <select
-                                      value={field.quote_field}
-                                      onChange={(e) => updateField(si, fi, { quote_field: e.target.value })}
-                                      className="w-60 px-2 py-1.5 border rounded text-sm bg-white shrink-0"
-                                    >
-                                      {quoteFieldOptions.map((o) => (
-                                        <option key={o.value} value={o.value}>{o.label}</option>
-                                      ))}
-                                    </select>
+                                    {/* 一般收集型沒有下游用途可選（純收集），不顯示用途下拉，讓畫面單純一點 */}
+                                    {draft!.flow_type !== 'collect' && (
+                                      <>
+                                        <ArrowRight className="w-3.5 h-3.5 text-gray-300 shrink-0" />
+                                        <select
+                                          value={field.quote_field}
+                                          onChange={(e) => updateField(si, fi, { quote_field: e.target.value })}
+                                          className="w-60 px-2 py-1.5 border rounded text-sm bg-white shrink-0"
+                                        >
+                                          {fieldPurposeOptions.map((o) => (
+                                            <option key={o.value} value={o.value}>{o.label}</option>
+                                          ))}
+                                        </select>
+                                      </>
+                                    )}
                                     {step.fields.length > 1 && (
                                       <button onClick={() => removeField(si, fi)} className="p-1.5 text-red-500 hover:bg-red-50 rounded shrink-0">
                                         <Trash2 className="w-4 h-4" />
@@ -673,7 +756,7 @@ export default function StandardMessages() {
                                     {f.label || '（未命名）'}
                                     {f.quote_field && (
                                       <span className="text-gray-400">
-                                        （{f.quote_field.startsWith('room_count:') ? '決定開房' : '算價'}）
+                                        （{f.quote_field.startsWith('room_count:') ? '決定開房' : f.quote_field === 'order_number' ? '查詢依據' : '算價'}）
                                       </span>
                                     )}
                                   </span>
@@ -687,69 +770,162 @@ export default function StandardMessages() {
                   )}
                 </Stage>
 
-                {/* ③ 系統試算 */}
-                <Stage index={3} title="系統試算" icon={<Calculator className="w-4 h-4" />} muted={!quoteCapable}>
-                  <div className={`rounded-lg p-3 text-xs leading-6 ${quoteCapable ? 'bg-gray-50 text-gray-600' : 'bg-amber-50 text-amber-800 border border-amber-200'}`}>
-                    {quoteCapable ? (
+                {flowType === 'quote' ? (
+                  <>
+                    {/* ③ 系統試算 */}
+                    <Stage index={3} title="系統試算" icon={<Calculator className="w-4 h-4" />} muted={!quoteCapable}>
+                      <div className="space-y-3">
+                        {!quoteCapable && (
+                          <div className="rounded-lg p-3 text-xs leading-6 bg-amber-50 text-amber-800 border border-amber-200">
+                            <strong className="font-semibold">這個流程還算不出價格。</strong>
+                            缺少 {missing.join('、')}，收集完成後會直接轉真人客服，下面的報價確認與付款確認不會送出。
+                            若要自動報價，請在步驟裡把對應答案的下拉選單指到這些算價欄位。
+                          </div>
+                        )}
+                        <div className="rounded-lg p-3 text-xs leading-6 bg-gray-50 text-gray-600">
+                          算價本身自動執行、無法在這裡編輯，系統依「房型與報價」頁的設定算出金額。
+                        </div>
+                        <div>
+                          <label className="block text-xs text-gray-500 mb-1">
+                            算價欄位沒收集齊、或算不出價時的回覆
+                          </label>
+                          {editing ? (
+                            <MessageTemplateEditor
+                              value={draft!.incomplete_message}
+                              onChange={(v) => patchDraft({ incomplete_message: v })}
+                              placeholders={variables}
+                              rows={4}
+                              placeholder="感謝您提供的資訊！我們已經收到，將由客服人員盡快為您確認詳細報價，謝謝您的耐心等候 🙏"
+                            />
+                          ) : (
+                            <div className="bg-gray-50 rounded-lg p-3">
+                              <VariableText value={current.incomplete_message || '（未設定，會用內建預設文字）'} knownVariables={variables} />
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </Stage>
+
+                    {/* ④ 報價確認 */}
+                    <Stage index={4} title="報價確認" icon={<CheckCircle2 className="w-4 h-4" />} muted={!quoteCapable}>
+                      {editing ? (
+                        <>
+                          <p className="text-xs text-gray-400 mb-2">算完金額後送出，接著等顧客回覆「是」繼續、「否」取消。</p>
+                          <MessageTemplateEditor
+                            value={draft!.quote_message}
+                            onChange={(v) => patchDraft({ quote_message: v })}
+                            placeholders={variables}
+                            rows={8}
+                          />
+                        </>
+                      ) : (
+                        <div className="bg-gray-50 rounded-lg p-3">
+                          <VariableText value={current.quote_message} knownVariables={variables} />
+                          <p className="text-xs text-gray-400 mt-2 pt-2 border-t border-gray-200">送出後等顧客回覆「是」繼續、「否」取消。</p>
+                        </div>
+                      )}
+                    </Stage>
+
+                    {/* ⑤ 付款確認 */}
+                    <Stage index={5} title="付款確認" icon={<Wallet className="w-4 h-4" />} muted={!quoteCapable}>
+                      {editing ? (
+                        <>
+                          <p className="text-xs text-gray-400 mb-2">
+                            顧客回「是」之後送出，同時把訂單建成「待預定」並鎖房。
+                            [訂金] 會在這一刻重新讀一次訂房紀錄；[匯款日時間] 由系統自動算（18:00 前帶今天 21:00，之後帶明天 21:00）。
+                          </p>
+                          <MessageTemplateEditor
+                            value={draft!.confirm_message}
+                            onChange={(v) => patchDraft({ confirm_message: v })}
+                            placeholders={variables}
+                            rows={10}
+                          />
+                        </>
+                      ) : (
+                        <div className="bg-gray-50 rounded-lg p-3">
+                          <VariableText value={current.confirm_message} knownVariables={variables} />
+                          <p className="flex items-center gap-1.5 text-xs text-gray-400 mt-2 pt-2 border-t border-gray-200">
+                            <UserRound className="w-3.5 h-3.5" />
+                            訂單建立為「待預定」，實際入帳目前由人工在「訂單管理」核對後改成「已預定」。
+                          </p>
+                        </div>
+                      )}
+                    </Stage>
+                  </>
+                ) : flowType === 'query' ? (
+                  /* ③ 查詢結果（查詢訂單型專用，取代系統試算/報價確認/付款確認） */
+                  <Stage index={3} title="查詢結果" icon={<Search className="w-4 h-4" />}>
+                    <div className="space-y-4">
+                      <p className="text-xs text-gray-400">
+                        走完步驟後，系統用步驟裡標記「查詢依據：訂單編號」的答案去查訂單，
+                        而且只認顧客自己 LINE 帳號底下的訂單——不會查到別人的訂房資料。
+                      </p>
+                      <div>
+                        <label className="block text-xs text-gray-500 mb-1">查到訂單時的回覆</label>
+                        {editing ? (
+                          <MessageTemplateEditor
+                            value={draft!.found_message}
+                            onChange={(v) => patchDraft({ found_message: v })}
+                            placeholders={variables}
+                            rows={5}
+                            placeholder={'您的訂單狀態：[訂單狀態]\n入住日期：[入住日期]\n退房日期：[退房日期]\n總金額：[總金額]'}
+                          />
+                        ) : (
+                          <div className="bg-gray-50 rounded-lg p-3">
+                            <VariableText value={current.found_message || '（未設定，會用內建預設文字）'} knownVariables={variables} />
+                          </div>
+                        )}
+                      </div>
+                      <div>
+                        <label className="block text-xs text-gray-500 mb-1">查無訂單時的回覆</label>
+                        {editing ? (
+                          <MessageTemplateEditor
+                            value={draft!.not_found_message}
+                            onChange={(v) => patchDraft({ not_found_message: v })}
+                            placeholders={variables}
+                            rows={3}
+                            placeholder="不好意思，查無這筆訂單資料，請確認訂單編號是否正確，或點選「真人客服」協助查詢。"
+                          />
+                        ) : (
+                          <div className="bg-gray-50 rounded-lg p-3">
+                            <VariableText value={current.not_found_message || '（未設定，會用內建預設文字）'} knownVariables={variables} />
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </Stage>
+                ) : (
+                  /* ③ 完成訊息（一般收集型專用，取代系統試算/報價確認/付款確認） */
+                  <Stage index={3} title="完成訊息" icon={<CheckCircle2 className="w-4 h-4" />}>
+                    {editing ? (
                       <>
-                        自動執行、無法在這裡編輯。系統依「房型與報價」頁的設定算出金額，
-                        算不出價（例如該時段沒開放、超過可接待人數）就轉真人客服。
+                        <p className="text-xs text-gray-400 mb-2">走完最後一步後直接送出，流程結束。不算價、不建立訂單紀錄。</p>
+                        <MessageTemplateEditor
+                          value={draft!.completion_message}
+                          onChange={(v) => patchDraft({ completion_message: v })}
+                          placeholders={variables}
+                          rows={6}
+                          placeholder="感謝您提供的資訊，我們已經收到了！"
+                        />
+                        <label className="flex items-center gap-2 text-sm text-gray-700 mt-3">
+                          <input
+                            type="checkbox"
+                            checked={draft!.notify_agent_on_complete}
+                            onChange={(e) => patchDraft({ notify_agent_on_complete: e.target.checked })}
+                          />
+                          完成後推播通知真人客服（LINE 串接設定裡的客服 LINE IDs）
+                        </label>
                       </>
                     ) : (
-                      <>
-                        <strong className="font-semibold">這個流程還算不出價格。</strong>
-                        缺少 {missing.join('、')}，收集完成後會直接轉真人客服，下面的報價確認與付款確認不會送出。
-                        若要自動報價，請在步驟裡把對應答案的下拉選單指到這些算價欄位。
-                      </>
+                      <div className="bg-gray-50 rounded-lg p-3">
+                        <VariableText value={current.completion_message || '（未設定，會用內建預設文字）'} knownVariables={variables} />
+                        <p className="text-xs text-gray-400 mt-2 pt-2 border-t border-gray-200">
+                          {current.notify_agent_on_complete ? '完成後會通知真人客服' : '完成後不會通知真人客服'}
+                        </p>
+                      </div>
                     )}
-                  </div>
-                </Stage>
-
-                {/* ④ 報價確認 */}
-                <Stage index={4} title="報價確認" icon={<CheckCircle2 className="w-4 h-4" />} muted={!quoteCapable}>
-                  {editing ? (
-                    <>
-                      <p className="text-xs text-gray-400 mb-2">算完金額後送出，接著等顧客回覆「是」繼續、「否」取消。</p>
-                      <MessageTemplateEditor
-                        value={draft!.quote_message}
-                        onChange={(v) => patchDraft({ quote_message: v })}
-                        placeholders={variables}
-                        rows={8}
-                      />
-                    </>
-                  ) : (
-                    <div className="bg-gray-50 rounded-lg p-3">
-                      <VariableText value={current.quote_message} knownVariables={variables} />
-                      <p className="text-xs text-gray-400 mt-2 pt-2 border-t border-gray-200">送出後等顧客回覆「是」繼續、「否」取消。</p>
-                    </div>
-                  )}
-                </Stage>
-
-                {/* ⑤ 付款確認 */}
-                <Stage index={5} title="付款確認" icon={<Wallet className="w-4 h-4" />} muted={!quoteCapable}>
-                  {editing ? (
-                    <>
-                      <p className="text-xs text-gray-400 mb-2">
-                        顧客回「是」之後送出，同時把訂單建成「待預定」並鎖房。
-                        [訂金] 會在這一刻重新讀一次訂房紀錄；[匯款日時間] 由系統自動算（18:00 前帶今天 21:00，之後帶明天 21:00）。
-                      </p>
-                      <MessageTemplateEditor
-                        value={draft!.confirm_message}
-                        onChange={(v) => patchDraft({ confirm_message: v })}
-                        placeholders={variables}
-                        rows={10}
-                      />
-                    </>
-                  ) : (
-                    <div className="bg-gray-50 rounded-lg p-3">
-                      <VariableText value={current.confirm_message} knownVariables={variables} />
-                      <p className="flex items-center gap-1.5 text-xs text-gray-400 mt-2 pt-2 border-t border-gray-200">
-                        <UserRound className="w-3.5 h-3.5" />
-                        訂單建立為「待預定」，實際入帳目前由人工在「訂單管理」核對後改成「已預定」。
-                      </p>
-                    </div>
-                  )}
-                </Stage>
+                  </Stage>
+                )}
               </div>
             </>
           )}
