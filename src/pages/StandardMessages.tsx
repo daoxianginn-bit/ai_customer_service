@@ -9,13 +9,33 @@ import VariableText from '../components/VariableText';
 import { PageHeader, Button, ConfirmDialog, Switch, EmptyState } from '../components/ui';
 import { TriggerRule, KeywordMatch, parseTriggerRules, serializeTriggerRules } from '../lib/messageVariables';
 
-const QUOTE_FIELD_OPTIONS = [
-  { value: '', label: '無（純收集資訊，不影響算價）' },
-  { value: 'checkin_date', label: '入住日期' },
-  { value: 'checkout_date', label: '退房日期' },
-  { value: 'headcount', label: '入住人數' },
-  { value: 'whole_house', label: '是否包棟' },
+const BASE_QUOTE_FIELD_OPTIONS = [
+  { value: '', label: '無（純收集資訊）' },
+  { value: 'checkin_date', label: '算價：入住日期' },
+  { value: 'checkout_date', label: '算價：退房日期' },
+  { value: 'headcount', label: '算價：入住人數' },
+  { value: 'whole_house', label: '算價：是否包棟' },
 ];
+
+// 「幾人房要開幾間」的選項是資料驅動的：讀「房型與空間維護」裡實際存在的房間人數，
+// 新增一種人數的房間就會自動出現在這裡，不用改程式。
+// 這類欄位不影響價格（價格仍由報價引擎決定），只決定實際開哪幾間房。
+function roomCountOptions(capacities: number[]) {
+  return capacities.map((c) => ({ value: `room_count:${c}`, label: `開房：${c} 人房間數` }));
+}
+
+// UI 用一個字串表示，存進資料庫時拆成 quote_field + room_capacity
+function encodeQuoteField(quoteField: string | null, roomCapacity: number | null | undefined): string {
+  if (quoteField === 'room_count' && roomCapacity != null) return `room_count:${roomCapacity}`;
+  return quoteField || '';
+}
+
+function decodeQuoteField(value: string): { quote_field: string | null; room_capacity: number | null } {
+  if (value.startsWith('room_count:')) {
+    return { quote_field: 'room_count', room_capacity: Number(value.slice('room_count:'.length)) };
+  }
+  return { quote_field: value || null, room_capacity: null };
+}
 
 // 這四個算價欄位全部收集齊，流程走完才算得出金額、才會進到報價確認與付款確認；
 // 少任何一個都會轉真人客服，那兩段訊息永遠不會送出。
@@ -63,7 +83,7 @@ function collectedQuoteFields(flow: Flow): Set<string> {
 function missingQuoteFields(flow: Flow): string[] {
   const have = collectedQuoteFields(flow);
   return QUOTE_REQUIRED_FIELDS.filter((k) => !have.has(k)).map(
-    (k) => QUOTE_FIELD_OPTIONS.find((o) => o.value === k)?.label || k
+    (k) => BASE_QUOTE_FIELD_OPTIONS.find((o) => o.value === k)?.label.replace('算價：', '') || k
   );
 }
 
@@ -130,7 +150,13 @@ export default function StandardMessages() {
   const [loading, setLoading] = useState(true);
   const [flows, setFlows] = useState<Flow[]>([]);
   const [variables, setVariables] = useState<string[]>([]);
+  const [roomCapacities, setRoomCapacities] = useState<number[]>([]);
   const [errorMsg, setErrorMsg] = useState('');
+
+  const quoteFieldOptions = useMemo(
+    () => [...BASE_QUOTE_FIELD_OPTIONS, ...roomCountOptions(roomCapacities)],
+    [roomCapacities]
+  );
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
@@ -167,10 +193,11 @@ export default function StandardMessages() {
   const fetchAll = async () => {
     setLoading(true);
     setErrorMsg('');
-    const [flowRes, stepRes, varRes] = await Promise.all([
+    const [flowRes, stepRes, varRes, roomRes] = await Promise.all([
       supabase.from('booking_flows').select('*').order('display_order'),
       supabase.from('booking_flow_steps').select('*').order('step_order'),
       supabase.from('message_variables').select('variable_name').order('display_order'),
+      supabase.from('room_types').select('capacity').eq('type', '房間').eq('is_active', true),
     ]);
 
     if (flowRes.error) {
@@ -190,11 +217,22 @@ export default function StandardMessages() {
       display_order: f.display_order,
       steps: (stepRes.data || [])
         .filter((s: any) => s.flow_id === f.id)
-        .map((s: any) => ({ step_order: s.step_order, message_template: s.message_template, fields: s.fields || [] })),
+        .map((s: any) => ({
+          step_order: s.step_order,
+          message_template: s.message_template,
+          fields: (s.fields || []).map((f: any) => ({
+            key: f.key,
+            label: f.label,
+            quote_field: encodeQuoteField(f.quote_field, f.room_capacity),
+          })),
+        })),
     }));
 
     setFlows(list);
     setVariables((varRes.data || []).map((v: any) => v.variable_name));
+    setRoomCapacities(
+      Array.from(new Set((roomRes.data || []).map((r: any) => r.capacity).filter((c: any) => Number.isFinite(c)))).sort((a: any, b: any) => a - b)
+    );
     setSelectedId((prev) => (prev && prev !== NEW_FLOW_ID && list.some((f) => f.id === prev) ? prev : list[0]?.id ?? null));
     setLoading(false);
   };
@@ -309,7 +347,7 @@ export default function StandardMessages() {
         flow_id: flowId,
         step_order: s.step_order,
         message_template: s.message_template,
-        fields: s.fields.map((f) => ({ key: f.key, label: f.label.trim(), quote_field: f.quote_field || null })),
+        fields: s.fields.map((f) => ({ key: f.key, label: f.label.trim(), ...decodeQuoteField(f.quote_field) })),
       }));
       const { error: stepsError } = await supabase.from('booking_flow_steps').insert(stepRows);
       if (stepsError) throw stepsError;
@@ -593,7 +631,7 @@ export default function StandardMessages() {
                                       onChange={(e) => updateField(si, fi, { quote_field: e.target.value })}
                                       className="w-60 px-2 py-1.5 border rounded text-sm bg-white shrink-0"
                                     >
-                                      {QUOTE_FIELD_OPTIONS.map((o) => (
+                                      {quoteFieldOptions.map((o) => (
                                         <option key={o.value} value={o.value}>{o.label}</option>
                                       ))}
                                     </select>
@@ -633,7 +671,11 @@ export default function StandardMessages() {
                                   <span key={f.key}>
                                     {i > 0 && ' · '}
                                     {f.label || '（未命名）'}
-                                    {f.quote_field && <span className="text-gray-400">（算價）</span>}
+                                    {f.quote_field && (
+                                      <span className="text-gray-400">
+                                        （{f.quote_field.startsWith('room_count:') ? '決定開房' : '算價'}）
+                                      </span>
+                                    )}
                                   </span>
                                 ))}
                               </p>

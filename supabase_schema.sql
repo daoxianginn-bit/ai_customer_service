@@ -249,6 +249,10 @@ ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS booking_confirm_message TEX
 匯款完成後，請回傳「帳號後五碼」或「轉帳明細截圖」，我們查帳無誤後會立即傳送【訂房成功確認信】給您！';
 -- 目前生效中的促銷方案：後台選定後，LINE 訂房對話流程會自動套用同一個。放在 promotions 表格之後（要參照其 id）。
 ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS active_promotion_id UUID REFERENCES public.promotions(id) ON DELETE SET NULL;
+-- 押金：每筆訂單固定收取的可退款保證金，不參與房價計算，只加在訂單總額上。
+ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS security_deposit_amount NUMERIC NOT NULL DEFAULT 3000;
+-- 訂金比例：以「房價」為基數，不含押金。30 代表房價的 30%。
+ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS deposit_percent NUMERIC NOT NULL DEFAULT 30;
 
 -- user_states 後來加的欄位（新專案 CREATE TABLE 時不含這些，靠這幾行 ALTER 補齊，既有專案升級也適用）
 ALTER TABLE public.user_states ADD COLUMN IF NOT EXISTS last_event_id TEXT;
@@ -406,10 +410,36 @@ CREATE TABLE IF NOT EXISTS public.bookings (
 );
 
 -- bookings 後來加的欄位（新專案 CREATE TABLE 時不含這些，靠這幾行 ALTER 補齊，既有專案升級也適用）
-ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS order_number TEXT UNIQUE; -- 建立訂單時產生，格式 YYYYMMDD-XXXX，供客服人員與顧客溝通時使用的可讀編號
+-- 建立訂單時產生，供客服人員與顧客溝通時使用的可讀編號。
+-- 6 碼大寫英數混和（見 src/lib/orderNumber.ts）；改版前是 YYYYMMDD-XXXX 格式，
+-- 舊訂單的編號不會被改動，新舊格式並存。
+ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS order_number TEXT UNIQUE;
 ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS room_type_label TEXT; -- 算完報價時寫入的人類可讀房型摘要（包棟＝「包棟」，個別租房＝房型名稱組合），列表顯示用，不用每次 join booking_room_nights
 ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS notes TEXT; -- 訂單管理頁的管理員備註，系統不會自動寫入
 ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS remit_last5 TEXT; -- 匯款末5碼，狀態改成「已預定」時訂單管理頁會要求填寫（僅前端表單驗證，不是資料庫層級限制，避免擋到 LINE 自動流程寫入）
+-- 這趟住宿的布巾換洗次數。預設 1＝整趟只在退房後洗一次（最常見）；客人中途想再洗就填 2。
+-- 放在訂單而不是房間設定，因為這是每趟住宿的實際狀況，事先決定不了。
+ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS linen_change_count INTEGER NOT NULL DEFAULT 1;
+
+-- 金額結構（四個欄位的關係，改動任何一個都要維持這個等式）：
+--   room_amount      房價，報價引擎算出來的住宿費用
+--   security_deposit 押金，每筆固定（settings.security_deposit_amount），可退款、不算房價
+--   total_amount     訂單總額 ＝ room_amount + security_deposit
+--   deposit          本次需匯訂金 ＝ room_amount × settings.deposit_percent%（以房價為基數，不含押金）
+--   尾款             ＝ total_amount − deposit（沿用既有的 balance_due 算法）
+--
+-- 改版前 total_amount 存的是「房價」、deposit 要人工到 Google 試算表填。
+-- 既有資料回填：把原本的 total_amount 當成房價，押金補 0（不是 3000——過去這些訂單
+-- 實際上沒收押金，硬填會讓歷史金額對不上帳），total_amount 維持原值不動。
+ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS room_amount NUMERIC;
+ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS security_deposit NUMERIC NOT NULL DEFAULT 0;
+
+-- 這筆訂單的匯款截止時間（真實時間戳，不是給人看的字串）。訂房確認當下寫入
+-- （見 line-webhook.ts 的 computePaymentDeadlineDate()），供「排程管理」的自動取消逾期
+-- 未匯款訂單使用。改版前這個期限只算出來塞進訊息文字就丟掉、沒有存下來，所以沒辦法回填舊訂單。
+ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS payment_deadline_at TIMESTAMPTZ;
+
+UPDATE public.bookings SET room_amount = total_amount WHERE room_amount IS NULL AND total_amount IS NOT NULL;
 
 -- 訂單狀態改版（10 種狀態，取代原本 5 種）：
 -- 待報價 inquiring／已報價 quoted／待預定 awaiting_deposit／已預定 reserved／待收尾款 awaiting_balance／
@@ -466,9 +496,12 @@ CREATE INDEX IF NOT EXISTS idx_booking_room_nights_lookup ON public.booking_room
 -- 成本來自洗滌廠的每件單價，不需要庫存數量。
 --
 -- 成本怎麼算：
---   某張訂單的用量 = Σ（這張訂單開的每一間房 × 該房型的預設組合數量 × 換洗次數）
---   換洗次數 = ceil(住宿晚數 / change_every_nights)，例如毛巾天天換(1)、床包三天換(3)，
---   住 5 晚就是毛巾 5 次、床包 2 次。
+--   某張訂單的用量 = Σ（這張訂單開的每一間房 × 該房間的預設組合數量）× 這張訂單的換洗次數
+--
+--   換洗次數存在訂單上（bookings.linen_change_count），不是房間的固定屬性：
+--   同樣住 3 晚，有的客人整趟只在退房後洗一次，有的中途想再洗一次，這是每趟住宿的實際
+--   狀況，沒辦法在房間設定裡事先決定。
+--
 --   「包棟」不特別處理——它只是使用權的名稱，實際成本一律看 booking_rooms 開了幾間房。
 -- ========================================================================
 
@@ -486,15 +519,19 @@ CREATE TABLE IF NOT EXISTS public.linen_items (
     UNIQUE (category, spec)
 );
 
--- 每個房間的預設布巾組合：一間房整理一次要用哪些布巾、各幾件、幾晚換一次
+-- 每個房間的預設布巾組合：一間房整理一次要用哪些布巾、各幾件
 CREATE TABLE IF NOT EXISTS public.room_type_linen_defaults (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     room_type_id UUID NOT NULL REFERENCES public.room_types(id) ON DELETE CASCADE,
     linen_item_id UUID NOT NULL REFERENCES public.linen_items(id) ON DELETE CASCADE,
     quantity INTEGER NOT NULL DEFAULT 1,
-    change_every_nights INTEGER NOT NULL DEFAULT 1, -- 幾晚換一次；1＝每晚換
     UNIQUE (room_type_id, linen_item_id)
 );
+
+-- 換洗次數原本設計在這張表（幾晚換一次），後來改放到訂單上——同樣住 3 晚，有人只在
+-- 退房後洗一次、有人中途想再洗一次，這是每趟住宿的狀況，不是房間的固定屬性。
+-- 已經建過舊版欄位的資料庫用這行移除，沒建過的不受影響。
+ALTER TABLE public.room_type_linen_defaults DROP COLUMN IF EXISTS change_every_nights;
 
 -- 這張訂單實際開了哪幾間房。
 -- 既有的 booking_room_nights 不能拿來當唯一來源：它只有 LINE 流程的「個別租房」會寫入，
@@ -550,6 +587,39 @@ INSERT INTO public.booking_rooms (booking_id, room_type_id)
 SELECT DISTINCT booking_id, room_type_id FROM public.booking_room_nights
 ON CONFLICT (booking_id, room_type_id) DO NOTHING;
 
+-- ========================================================================
+-- 8.9 排程管理
+--
+-- Netlify 排程函式的執行間隔是部署時寫死在 netlify.toml、後台無法動態改，所以做法是：
+-- netlify/functions/scheduled-tasks-run.ts 每 15 分鐘固定跑一次（見 netlify.toml），
+-- 檢查 next_run_at 到期的排程、依 task_type 執行對應邏輯，執行完再算出下一次時間。
+-- 執行時間的計算邏輯見 src/lib/scheduleRecurrence.ts，後台編輯畫面跟 ticker 共用同一份，
+-- 才不會兩邊算出不同答案。
+--
+-- task_type 目前只有 'cancel_unpaid_bookings'（取消逾期未匯款的訂單），
+-- 之後新增排程類型（例如定時寄信、到期通知、LINE 分眾發送）都是多一個 task_type，
+-- 不需要改這張表的結構——各類型專屬的參數放在 config JSONB 裡。
+-- ========================================================================
+CREATE TABLE IF NOT EXISTS public.scheduled_tasks (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL,
+    task_type TEXT NOT NULL,
+    config JSONB NOT NULL DEFAULT '{}',
+    recurrence TEXT NOT NULL DEFAULT 'daily' CHECK (recurrence IN ('once', 'daily', 'weekly', 'monthly')),
+    run_at_time TEXT NOT NULL DEFAULT '09:00', -- 'HH:MM'，24 小時制，台灣時間
+    run_at_date DATE,     -- recurrence='once' 專用
+    weekday INTEGER,      -- recurrence='weekly' 專用，0=週日...6=週六
+    day_of_month INTEGER, -- recurrence='monthly' 專用，1-31；當月天數不足時自動用該月最後一天
+    is_active BOOLEAN NOT NULL DEFAULT true,
+    next_run_at TIMESTAMPTZ, -- ticker 查詢到期排程用這個欄位；單次排程執行後 is_active 會自動關閉
+    last_run_at TIMESTAMPTZ,
+    last_run_status TEXT, -- 'success' | 'failed'，還沒執行過是 NULL
+    last_run_summary TEXT, -- 執行結果摘要，例如「取消了 3 筆逾期未匯款訂單」
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_due ON public.scheduled_tasks(next_run_at) WHERE is_active = true;
+
 -- 9. 啟用 RLS（僅限已登入使用者存取，用 DROP + CREATE 讓整份腳本可重複執行）
 ALTER TABLE public.settings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.user_states ENABLE ROW LEVEL SECURITY;
@@ -579,6 +649,7 @@ ALTER TABLE public.linen_items ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.room_type_linen_defaults ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.booking_rooms ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.booking_linen_usage ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.scheduled_tasks ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS "Allow Auth Access" ON public.settings;
 CREATE POLICY "Allow Auth Access" ON public.settings FOR ALL USING (auth.role() = 'authenticated');
@@ -638,6 +709,10 @@ DROP POLICY IF EXISTS "Allow Auth Access Booking Rooms" ON public.booking_rooms;
 CREATE POLICY "Allow Auth Access Booking Rooms" ON public.booking_rooms FOR ALL USING (auth.role() = 'authenticated');
 DROP POLICY IF EXISTS "Allow Auth Access Booking Linen Usage" ON public.booking_linen_usage;
 CREATE POLICY "Allow Auth Access Booking Linen Usage" ON public.booking_linen_usage FOR ALL USING (auth.role() = 'authenticated');
+-- scheduled-tasks-run.ts 用 service role key 讀寫（略過 RLS），這裡開 RLS 只是不讓 anon key 直接存取，
+-- 前端排程管理頁的存取要靠已登入的管理員 session。
+DROP POLICY IF EXISTS "Allow Auth Access Scheduled Tasks" ON public.scheduled_tasks;
+CREATE POLICY "Allow Auth Access Scheduled Tasks" ON public.scheduled_tasks FOR ALL USING (auth.role() = 'authenticated');
 
 -- 10. 初始資料
 INSERT INTO public.settings (id) SELECT gen_random_uuid() WHERE NOT EXISTS (SELECT 1 FROM public.settings);

@@ -55,6 +55,8 @@ export default function BookingManagement() {
   const [saving, setSaving] = useState(false);
 
   const [settingsId, setSettingsId] = useState<string | null>(null);
+  const [securityDepositAmount, setSecurityDepositAmount] = useState(3000);
+  const [depositPercent, setDepositPercent] = useState(30);
   const [wholeHouseEnabled, setWholeHouseEnabled] = useState(true);
   const [discountCleaning, setDiscountCleaning] = useState(0);
   const [discountNoCleaning, setDiscountNoCleaning] = useState(0);
@@ -112,7 +114,7 @@ export default function BookingManagement() {
       supabase
         .from('settings')
         .select(
-          'id, booking_whole_house_enabled, consecutive_stay_discount_cleaning, consecutive_stay_discount_no_cleaning, consecutive_stay_default_option, peak_season_weekday_tier, active_promotion_id'
+          'id, booking_whole_house_enabled, consecutive_stay_discount_cleaning, consecutive_stay_discount_no_cleaning, consecutive_stay_default_option, peak_season_weekday_tier, active_promotion_id, security_deposit_amount, deposit_percent'
         )
         .single(),
       // 房型與定價只處理「房間」類型的資料（可訂房、可訂價），其他類型（例如公共空間）在
@@ -134,6 +136,8 @@ export default function BookingManagement() {
     setConsecutiveStayDefaultOption(st.data?.consecutive_stay_default_option ?? 'no_cleaning');
     setPeakSeasonWeekdayTier(st.data?.peak_season_weekday_tier ?? 'peak');
     setActivePromotionId(st.data?.active_promotion_id ?? '');
+    setSecurityDepositAmount(st.data?.security_deposit_amount ?? 3000);
+    setDepositPercent(st.data?.deposit_percent ?? 30);
     // 試算報價的預設值跟著「目前生效中」的設定走，這樣一打開頁面直接按試算，算出來的金額
     // 就會跟 LINE 顧客實際拿到的一致；仍可手動改去測試其他假設情境。
     setQuotePromotionId(st.data?.active_promotion_id ?? '');
@@ -169,6 +173,8 @@ export default function BookingManagement() {
             consecutive_stay_default_option: consecutiveStayDefaultOption,
             peak_season_weekday_tier: peakSeasonWeekdayTier,
             active_promotion_id: activePromotionId || null,
+            security_deposit_amount: securityDepositAmount,
+            deposit_percent: depositPercent,
           })
           .eq('id', settingsId);
       }
@@ -680,6 +686,28 @@ export default function BookingManagement() {
             </div>
           </div>
           <p className="text-xs text-gray-400 mt-2">連住折扣是民宿自訂政策、不是詢問顧客的選項，LINE 對話流程會自動套用這裡選的類型，不會另外問顧客。</p>
+        </div>
+
+        <div className="p-6 border-t">
+          <p className="text-sm font-medium text-gray-700 mb-1">押金與訂金</p>
+          <p className="text-xs text-gray-500 mb-3">
+            訂單總額 ＝ 房價 ＋ 押金；本次需匯訂金 ＝ <strong>房價</strong>的固定比例（不含押金）。
+            LINE 自動報價會照這裡的設定算好，不需要人工填。
+          </p>
+          <div className="flex flex-wrap gap-4 items-end">
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">押金（每筆固定，可退款）</label>
+              <input type="number" min={0} value={securityDepositAmount} onChange={(e) => setSecurityDepositAmount(Number(e.target.value))} className="w-32 px-3 py-2 border rounded-lg" />
+            </div>
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">訂金比例（房價的 %）</label>
+              <input type="number" min={0} max={100} value={depositPercent} onChange={(e) => setDepositPercent(Number(e.target.value))} className="w-32 px-3 py-2 border rounded-lg" />
+            </div>
+            <p className="text-xs text-gray-500 pb-2.5">
+              例：房價 NT$ 19,950 → 訂單總額 NT$ {(19950 + securityDepositAmount).toLocaleString()}、
+              訂金 NT$ {Math.round((19950 * depositPercent) / 100).toLocaleString()}
+            </p>
+          </div>
         </div>
       </CollapsibleSection>
 

@@ -3,10 +3,13 @@ import { supabase } from '../lib/supabase';
 import { ClipboardList, Search, RotateCcw, Save, Plus, Trash2, AlertCircle, Shirt, RefreshCw } from 'lucide-react';
 import { PageHeader, Button, Modal, StatusBadge, EmptyState, ConfirmDialog } from '../components/ui';
 import { BOOKING_STATUS_OPTIONS, SYSTEM_ONLY_STATUS, REQUIRES_REMIT_LAST5_STATUS } from '../lib/bookingStatus';
+import { computeOrderAmounts } from '../lib/messageVariables';
+import { generateOrderNumber } from '../lib/orderNumber';
 import {
   LinenItem, RoomLinenDefault, LinenUsageRow,
-  linenItemLabel, currency, nightsBetween, computeUsage, mergeUsage, usageTotal,
+  linenItemLabel, currency, nightsBetween, computeUsage, mergeUsage, usageTotal, normalizeChangeCount,
 } from '../lib/linenCost';
+import { RoomOption, roomLabel } from '../lib/rooms';
 
 const PAGE_SIZE = 15;
 
@@ -27,28 +30,22 @@ interface OrderForm {
   infants: string;
   whole_house: boolean;
   room_type_label: string;
+  room_amount: string;
+  security_deposit: string;
   total_amount: string;
   deposit: string;
   remit_last5: string;
   status: string;
   notes: string;
+  linen_change_count: string;
 }
 
 const emptyForm = (): OrderForm => ({
   name: '', nickname: '', line_user_id: '', phone: '',
   checkin_date: '', checkout_date: '', headcount: '', adults: '', kids: '', infants: '',
-  whole_house: false, room_type_label: '', total_amount: '', deposit: '', remit_last5: '',
-  status: 'inquiring', notes: '',
+  whole_house: false, room_type_label: '', room_amount: '', security_deposit: '', total_amount: '', deposit: '', remit_last5: '',
+  status: 'inquiring', notes: '', linen_change_count: '1',
 });
-
-function generateOrderNumber(): string {
-  const d = new Date();
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  const rand = String(Math.floor(Math.random() * 10000)).padStart(4, '0');
-  return `${y}${m}${day}-${rand}`;
-}
 
 function StatusHelpIcon() {
   return (
@@ -85,8 +82,12 @@ export default function OrderManagement() {
   const [deleteTarget, setDeleteTarget] = useState<any | null>(null);
   const [deleting, setDeleting] = useState(false);
 
+  // 押金與訂金比例的預設值來自「房型與報價」的設定，人工建單時按「重算」就會套用同一套算法，
+  // 跟 LINE 自動報價算出來的金額一致。
+  const [moneyDefaults, setMoneyDefaults] = useState({ security: 3000, percent: 30 });
+
   // 布巾備品：實際開了哪幾間房決定送洗成本（「包棟」只是使用權名稱，不影響算法）
-  const [rooms, setRooms] = useState<{ id: string; name: string }[]>([]);
+  const [rooms, setRooms] = useState<RoomOption[]>([]);
   const [linenItems, setLinenItems] = useState<LinenItem[]>([]);
   const [linenDefaults, setLinenDefaults] = useState<RoomLinenDefault[]>([]);
   const [selectedRoomIds, setSelectedRoomIds] = useState<string[]>([]);
@@ -97,20 +98,49 @@ export default function OrderManagement() {
   useEffect(() => {
     fetchRoomTypeOptions();
     fetchLinenSetup();
+    fetchMoneyDefaults();
     runQuery(0);
   }, []);
 
-  // 換房間或改日期才重算；已手動調整過的品項由 mergeUsage 保留
+  // 換房間或改換洗次數才重算；已手動調整過的品項由 mergeUsage 保留。
+  // 日期不在依賴裡：換洗次數改由使用者自己填，晚數只是給他參考的提示。
   useEffect(() => {
     if (skipRecompute.current) { skipRecompute.current = false; return; }
-    const nights = nightsBetween(form.checkin_date, form.checkout_date);
-    setUsageRows((prev) => mergeUsage(prev, computeUsage(selectedRoomIds, linenDefaults, nights, linenItems)));
-  }, [selectedRoomIds, form.checkin_date, form.checkout_date, linenDefaults, linenItems]);
+    const times = normalizeChangeCount(Number(form.linen_change_count));
+    setUsageRows((prev) => mergeUsage(prev, computeUsage(selectedRoomIds, linenDefaults, times, linenItems)));
+  }, [selectedRoomIds, form.linen_change_count, linenDefaults, linenItems]);
 
   const fetchRoomTypeOptions = async () => {
-    const { data } = await supabase.from('room_types').select('id, name').eq('type', '房間').order('display_order');
-    setRooms((data || []).map((r: any) => ({ id: r.id, name: r.name })));
+    const { data } = await supabase.from('room_types').select('id, name, floor, capacity').eq('type', '房間').order('display_order');
+    setRooms((data || []) as RoomOption[]);
     setRoomTypeOptions((data || []).map((r: any) => r.name));
+  };
+
+  const fetchMoneyDefaults = async () => {
+    const { data } = await supabase.from('settings').select('security_deposit_amount, deposit_percent').single();
+    if (!data) return;
+    setMoneyDefaults({
+      security: Number(data.security_deposit_amount ?? 3000),
+      percent: Number(data.deposit_percent ?? 30),
+    });
+  };
+
+  // 依房價重算其餘三個金額，用的是跟 LINE 自動報價同一個函式，人工建單才不會算出不同的數字
+  const recalcAmounts = () => {
+    const room = Number(form.room_amount);
+    if (!Number.isFinite(room) || room <= 0) {
+      setFormError('請先填房價，才能重算訂單總額與訂金。');
+      return;
+    }
+    const security = form.security_deposit === '' ? moneyDefaults.security : Number(form.security_deposit);
+    const amounts = computeOrderAmounts(room, security, moneyDefaults.percent);
+    setFormError('');
+    setForm((f) => ({
+      ...f,
+      security_deposit: String(amounts.security_deposit),
+      total_amount: String(amounts.total_amount),
+      deposit: String(amounts.deposit),
+    }));
   };
 
   // 布巾資料表可能還沒建立（schema 尚未執行），查不到就當作沒啟用這個功能，不擋訂單頁
@@ -150,8 +180,7 @@ export default function OrderManagement() {
   };
 
   const resetUsageToDefaults = () => {
-    const nights = nightsBetween(form.checkin_date, form.checkout_date);
-    setUsageRows(computeUsage(selectedRoomIds, linenDefaults, nights, linenItems));
+    setUsageRows(computeUsage(selectedRoomIds, linenDefaults, normalizeChangeCount(Number(form.linen_change_count)), linenItems));
   };
 
   const runQuery = async (pageIndex: number) => {
@@ -218,11 +247,15 @@ export default function OrderManagement() {
       infants: row.infants != null ? String(row.infants) : '',
       whole_house: !!row.whole_house,
       room_type_label: row.room_type_label || '',
+      // 舊訂單沒有 room_amount，改版前 total_amount 存的就是房價，直接沿用當房價
+      room_amount: String(row.room_amount ?? row.total_amount ?? ''),
+      security_deposit: String(row.security_deposit ?? ''),
       total_amount: row.total_amount != null ? String(row.total_amount) : '',
       deposit: row.deposit != null ? String(row.deposit) : '',
       remit_last5: row.remit_last5 || '',
       status: row.status,
       notes: row.notes || '',
+      linen_change_count: String(row.linen_change_count ?? 1),
     });
     setFormError('');
     setShowForm(true);
@@ -259,7 +292,14 @@ export default function OrderManagement() {
         kids: form.kids === '' ? null : Number(form.kids),
         infants: form.infants === '' ? null : Number(form.infants),
         whole_house: form.whole_house,
-        room_type_label: form.room_type_label || null,
+        // 房型改由勾選房間決定，這個欄位變成顯示用的摘要（列表、篩選、訊息變數都還在用）。
+        // 一間房都沒選時保留原本手打的文字，避免舊訂單的房型資訊被清空。
+        room_type_label: selectedRoomIds.length
+          ? rooms.filter((r) => selectedRoomIds.includes(r.id)).map(roomLabel).join('、')
+          : form.room_type_label || null,
+        linen_change_count: normalizeChangeCount(Number(form.linen_change_count)),
+        room_amount: form.room_amount === '' ? null : Number(form.room_amount),
+        security_deposit: form.security_deposit === '' ? 0 : Number(form.security_deposit),
         total_amount: form.total_amount === '' ? null : Number(form.total_amount),
         deposit: form.deposit === '' ? null : Number(form.deposit),
         remit_last5: form.remit_last5 || null,
@@ -462,9 +502,36 @@ export default function OrderManagement() {
             <label className="block text-xs text-gray-500 mb-1">電話</label>
             <input value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} className="w-full px-3 py-2 border rounded-lg" />
           </div>
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">房型</label>
-            <input value={form.room_type_label} onChange={(e) => setForm({ ...form, room_type_label: e.target.value })} className="w-full px-3 py-2 border rounded-lg" placeholder="例如：2F-暖木(2人)" />
+          <div className="col-span-2">
+            <label className="block text-xs text-gray-500 mb-1">
+              房型（可複選，選的是「房型與空間維護」裡的房間）
+            </label>
+            {rooms.length === 0 ? (
+              <p className="text-xs text-gray-400 py-2">還沒有「房間」類型的資料，請先到「房型與空間維護」新增。</p>
+            ) : (
+              <div className="flex flex-wrap gap-2">
+                {rooms.map((r) => {
+                  const on = selectedRoomIds.includes(r.id);
+                  return (
+                    <button
+                      key={r.id}
+                      type="button"
+                      onClick={() => toggleRoom(r.id)}
+                      className={`px-3 py-1.5 rounded-lg text-sm border transition-colors ${
+                        on ? 'bg-green-600 text-white border-green-600' : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'
+                      }`}
+                    >
+                      {roomLabel(r)}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+            {selectedRoomIds.length === 0 && form.room_type_label && (
+              <p className="text-xs text-amber-700 mt-1.5">
+                這張訂單目前只有文字房型「{form.room_type_label}」。勾選實際房間之後，布巾成本與房間篩選才算得到它。
+              </p>
+            )}
           </div>
           <div>
             <label className="block text-xs text-gray-500 mb-1">入住日期</label>
@@ -497,12 +564,29 @@ export default function OrderManagement() {
             <input type="number" value={form.infants} onChange={(e) => setForm({ ...form, infants: e.target.value })} className="w-full px-3 py-2 border rounded-lg" />
           </div>
           <div>
-            <label className="block text-xs text-gray-500 mb-1">總金額</label>
+            <label className="block text-xs text-gray-500 mb-1">房價（不含押金）</label>
+            <input type="number" value={form.room_amount} onChange={(e) => setForm({ ...form, room_amount: e.target.value })} className="w-full px-3 py-2 border rounded-lg" />
+          </div>
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">押金</label>
+            <input type="number" value={form.security_deposit} onChange={(e) => setForm({ ...form, security_deposit: e.target.value })} className="w-full px-3 py-2 border rounded-lg" placeholder={String(moneyDefaults.security)} />
+          </div>
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">訂單總額（房價＋押金）</label>
             <input type="number" value={form.total_amount} onChange={(e) => setForm({ ...form, total_amount: e.target.value })} className="w-full px-3 py-2 border rounded-lg" />
           </div>
           <div>
-            <label className="block text-xs text-gray-500 mb-1">訂金</label>
+            <label className="block text-xs text-gray-500 mb-1">訂金（房價 {moneyDefaults.percent}%）</label>
             <input type="number" value={form.deposit} onChange={(e) => setForm({ ...form, deposit: e.target.value })} className="w-full px-3 py-2 border rounded-lg" />
+          </div>
+          <div className="col-span-2 -mt-1">
+            <button
+              type="button"
+              onClick={recalcAmounts}
+              className="text-xs flex items-center gap-1 text-green-600 hover:text-green-700"
+            >
+              <RefreshCw className="w-3.5 h-3.5" /> 依房價重算：訂單總額 ＝ 房價＋押金 {moneyDefaults.security}，訂金 ＝ 房價 {moneyDefaults.percent}%
+            </button>
           </div>
           <div>
             <label className="block text-xs text-gray-500 mb-1">
@@ -530,39 +614,28 @@ export default function OrderManagement() {
                 布巾備品洗滌成本
               </h4>
               <span className="text-xs text-gray-400">
-                住 {nightsBetween(form.checkin_date, form.checkout_date) || '—'} 晚
+                依上方勾選的 {selectedRoomIds.length} 間房計算
               </span>
             </div>
 
-            <div>
-              <label className="block text-xs text-gray-500 mb-1.5">
-                實際開出去的房間（包棟也請照實勾選，成本是看開了幾間房算的）
-              </label>
-              {rooms.length === 0 ? (
-                <p className="text-xs text-gray-400">還沒有「房間」類型的資料，請先到「房型與空間維護」新增。</p>
-              ) : (
-                <div className="flex flex-wrap gap-2">
-                  {rooms.map((r) => {
-                    const on = selectedRoomIds.includes(r.id);
-                    return (
-                      <button
-                        key={r.id}
-                        type="button"
-                        onClick={() => toggleRoom(r.id)}
-                        className={`px-3 py-1.5 rounded-lg text-sm border transition-colors ${
-                          on ? 'bg-green-600 text-white border-green-600' : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'
-                        }`}
-                      >
-                        {r.name}
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
+            <div className="flex flex-wrap items-end gap-3">
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">整趟住宿換洗幾次</label>
+                <input
+                  type="number" min={1}
+                  value={form.linen_change_count}
+                  onChange={(e) => setForm({ ...form, linen_change_count: e.target.value })}
+                  className="w-24 px-3 py-2 border rounded-lg"
+                />
+              </div>
+              <p className="text-xs text-gray-400 pb-2.5 flex-1 min-w-[240px]">
+                住 {nightsBetween(form.checkin_date, form.checkout_date) || '—'} 晚。
+                1＝整趟只在退房後洗一次；客人中途要求換洗就往上加。
+              </p>
             </div>
 
             {selectedRoomIds.length === 0 && usageRows.length === 0 ? (
-              <p className="text-xs text-gray-400">勾選房間後，會依「布巾備品」設定的預設組合自動帶出用量。</p>
+              <p className="text-xs text-gray-400">在上方勾選房型後，會依「布巾備品」設定的預設組合自動帶出用量。</p>
             ) : (
               <div className="border rounded-lg overflow-hidden">
                 <table className="w-full text-sm">

@@ -3,8 +3,9 @@ import { supabase } from '../lib/supabase';
 import { Shirt, Plus, Pencil, Trash2, AlertTriangle, BedDouble, BarChart3, RefreshCw } from 'lucide-react';
 import { PageHeader, Button, Modal, ConfirmDialog, EmptyState } from '../components/ui';
 import {
-  LinenItem, RoomLinenDefault, linenItemLabel, currency, changeCount, nightsBetween, computeUsage, usageTotal,
+  LinenItem, RoomLinenDefault, linenItemLabel, currency, nightsBetween, computeUsage, usageTotal,
 } from '../lib/linenCost';
+import { roomLabel } from '../lib/rooms';
 
 type Tab = 'items' | 'defaults' | 'report';
 
@@ -14,7 +15,7 @@ const TABS: { key: Tab; label: string; icon: JSX.Element }[] = [
   { key: 'report', label: '成本統計', icon: <BarChart3 className="w-4 h-4" /> },
 ];
 
-interface RoomOption { id: string; name: string; type: string }
+interface RoomOption { id: string; name: string; type: string; floor: string | null; capacity: number | null }
 
 interface UsageRow {
   booking_id: string;
@@ -75,7 +76,7 @@ export default function LinenManagement() {
     setErrorMsg('');
     const [itemRes, roomRes, defRes, usageRes, bookingRes, brRes] = await Promise.all([
       supabase.from('linen_items').select('*').order('display_order'),
-      supabase.from('room_types').select('id, name, type').eq('type', '房間').order('display_order'),
+      supabase.from('room_types').select('id, name, type, floor, capacity').eq('type', '房間').order('display_order'),
       supabase.from('room_type_linen_defaults').select('*'),
       supabase.from('booking_linen_usage').select('booking_id, linen_item_id, quantity, unit_price'),
       supabase.from('bookings').select('id, order_number, name, nickname, checkin_date, checkout_date, status').order('checkin_date', { ascending: false }),
@@ -168,7 +169,7 @@ export default function LinenManagement() {
     setDefaults((prev) => {
       const idx = prev.findIndex((d) => d.room_type_id === selectedRoomId && d.linen_item_id === linenItemId);
       if (idx === -1) {
-        return [...prev, { room_type_id: selectedRoomId, linen_item_id: linenItemId, quantity: 0, change_every_nights: 1, ...patch }];
+        return [...prev, { room_type_id: selectedRoomId, linen_item_id: linenItemId, quantity: 0, ...patch }];
       }
       return prev.map((d, i) => (i === idx ? { ...d, ...patch } : d));
     });
@@ -183,7 +184,6 @@ export default function LinenManagement() {
         room_type_id: d.room_type_id,
         linen_item_id: d.linen_item_id,
         quantity: d.quantity,
-        change_every_nights: d.change_every_nights > 0 ? d.change_every_nights : 1,
       }));
       // 整間房重寫：數量被改成 0 的品項要真的消失，不是留一列 0
       const { error: delErr } = await supabase.from('room_type_linen_defaults').delete().eq('room_type_id', selectedRoomId);
@@ -259,7 +259,10 @@ export default function LinenManagement() {
       for (const r of rs) map.set(r, (map.get(r) || 0) + amount / rs.length);
     }
     const list = [...map.entries()]
-      .map(([id, amount]) => ({ name: rooms.find((r) => r.id === id)?.name || '（已刪除的房間）', amount }))
+      .map(([id, amount]) => {
+        const room = rooms.find((r) => r.id === id);
+        return { name: room ? roomLabel(room) : '（已刪除的房間）', amount };
+      })
       .sort((a, b) => b.amount - a.amount);
     return { list, unassigned };
   }, [filteredUsage, bookingRooms, rooms]);
@@ -274,11 +277,10 @@ export default function LinenManagement() {
 
   const grandTotal = useMemo(() => filteredUsage.reduce((s, u) => s + u.quantity * u.unit_price, 0), [filteredUsage]);
 
-  // 預設組合的預覽：讓管理員在設定時就看到「這間房住 N 晚會花多少」
-  const previewNights = 2;
+  // 預設組合的預覽：這間房「洗一次」要多少錢。整趟住宿洗幾次由訂單決定，這裡不預設。
   const previewCost = useMemo(() => {
     if (!selectedRoomId) return 0;
-    return usageTotal(computeUsage([selectedRoomId], roomDefaults, previewNights, items));
+    return usageTotal(computeUsage([selectedRoomId], roomDefaults, 1, items));
   }, [selectedRoomId, roomDefaults, items]);
 
   if (loading) return <div className="p-8 text-center text-gray-500">載入中...</div>;
@@ -372,7 +374,7 @@ export default function LinenManagement() {
                   <div>
                     <label className="block text-xs text-gray-500 mb-1">房間</label>
                     <select value={selectedRoomId} onChange={(e) => setSelectedRoomId(e.target.value)} className="px-3 py-2 border rounded-lg bg-white text-sm min-w-52">
-                      {rooms.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+                      {rooms.map((r) => <option key={r.id} value={r.id}>{roomLabel(r)}</option>)}
                     </select>
                   </div>
                   <div>
@@ -383,19 +385,20 @@ export default function LinenManagement() {
                       className="px-3 py-2 border rounded-lg bg-white text-sm min-w-40"
                     >
                       <option value="">選擇來源房間…</option>
-                      {rooms.filter((r) => r.id !== selectedRoomId).map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+                      {rooms.filter((r) => r.id !== selectedRoomId).map((r) => <option key={r.id} value={r.id}>{roomLabel(r)}</option>)}
                     </select>
                   </div>
                   <div className="ml-auto text-right">
-                    <p className="text-xs text-gray-400">住 {previewNights} 晚的布巾成本</p>
+                    <p className="text-xs text-gray-400">這間房洗一次的成本</p>
                     <p className="text-lg font-bold text-gray-800">{currency(previewCost)}</p>
                   </div>
                   <Button onClick={saveDefaults} loading={savingDefaults}>{savingDefaults ? '儲存中...' : '儲存這間房的組合'}</Button>
                 </div>
 
                 <p className="text-xs text-gray-400">
-                  數量填 0 代表這間房不用這個品項。「幾晚換一次」填 1 就是每晚換；填 3 就是住 5 晚算 2 次
-                  （毛巾天天換、床包三天換這種需求就是在這裡設定）。
+                  這裡設定的是「這間房整理一次要用的布巾」，數量填 0 代表不用這個品項。
+                  整趟住宿要洗幾次在訂單裡填——住 3 晚可能只在退房後洗一次，也可能中途再洗一次，
+                  那是每趟住宿的實際狀況，這裡決定不了。
                 </p>
 
                 <div className="border rounded-lg overflow-x-auto">
@@ -405,16 +408,14 @@ export default function LinenManagement() {
                         <th className="py-2 px-4">品項</th>
                         <th className="py-2 px-3 text-right w-24">單價</th>
                         <th className="py-2 px-3 w-28">數量</th>
-                        <th className="py-2 px-3 w-32">幾晚換一次</th>
-                        <th className="py-2 px-4 text-right w-32">住 {previewNights} 晚小計</th>
+                        <th className="py-2 px-4 text-right w-32">洗一次小計</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-100">
                       {items.filter((i) => i.is_active).map((item) => {
                         const d = roomDefaults.find((x) => x.linen_item_id === item.id);
                         const qty = d?.quantity ?? 0;
-                        const every = d?.change_every_nights ?? 1;
-                        const subtotal = qty * changeCount(previewNights, every) * (item.unit_price ?? 0);
+                        const subtotal = qty * (item.unit_price ?? 0);
                         return (
                           <tr key={item.id} className={qty > 0 ? 'bg-green-50/40' : ''}>
                             <td className="py-2 px-4 text-gray-700">{linenItemLabel(item)}</td>
@@ -425,15 +426,6 @@ export default function LinenManagement() {
                                 value={qty}
                                 onChange={(e) => setRoomDefault(item.id, { quantity: Math.max(0, Number(e.target.value) || 0) })}
                                 className="w-20 px-2 py-1 border rounded text-sm"
-                              />
-                            </td>
-                            <td className="py-2 px-3">
-                              <input
-                                type="number" min={1}
-                                value={every}
-                                onChange={(e) => setRoomDefault(item.id, { change_every_nights: Math.max(1, Number(e.target.value) || 1) })}
-                                className="w-20 px-2 py-1 border rounded text-sm"
-                                disabled={qty === 0}
                               />
                             </td>
                             <td className="py-2 px-4 text-right text-gray-700">{subtotal > 0 ? currency(subtotal) : '—'}</td>

@@ -22,7 +22,6 @@ export interface RoomLinenDefault {
   room_type_id: string;
   linen_item_id: string;
   quantity: number;
-  change_every_nights: number;
 }
 
 export interface LinenUsageRow {
@@ -46,19 +45,16 @@ export function nightsBetween(checkin: string | null | undefined, checkout: stri
   return nights > 0 ? nights : 0;
 }
 
-/**
- * 一趟住宿要換洗幾次。
- * 住 5 晚、設定 3 晚換一次 → ceil(5/3) = 2 次；設定 1（每晚換）→ 5 次。
- * 晚數 0（當日往返或日期沒填）仍算 1 次，因為房間還是整理過、布巾還是送洗了。
- */
-export function changeCount(nights: number, changeEveryNights: number): number {
-  const every = changeEveryNights > 0 ? changeEveryNights : 1;
-  const effectiveNights = nights > 0 ? nights : 1;
-  return Math.ceil(effectiveNights / every);
+/** 換洗次數至少是 1：房間整理過，布巾就送洗了。 */
+export function normalizeChangeCount(count: number | null | undefined): number {
+  return count != null && count > 0 ? Math.floor(count) : 1;
 }
 
 /**
- * 依「這張訂單開了哪幾間房 × 每間房的預設組合 × 換洗次數」算出整張訂單的布巾用量。
+ * 依「這張訂單開了哪幾間房 × 每間房的預設組合 × 這張訂單的換洗次數」算出布巾用量。
+ *
+ * 換洗次數由訂單指定，不是從晚數推算的：同樣住 3 晚，有的客人整趟只在退房後洗一次，
+ * 有的中途想再洗一次，這種事只有當下知道。
  *
  * 「包棟」不在這裡特別處理：它只是使用權的名稱，成本一律看實際開了哪幾間房，
  * 所以包棟訂單只要在訂單管理頁把開出去的房間選齊，算出來就是對的。
@@ -66,16 +62,16 @@ export function changeCount(nights: number, changeEveryNights: number): number {
 export function computeUsage(
   roomTypeIds: string[],
   defaults: RoomLinenDefault[],
-  nights: number,
+  changeCount: number,
   items: LinenItem[]
 ): LinenUsageRow[] {
   const priceById = new Map(items.map((i) => [i.id, i.unit_price ?? 0]));
   const totals = new Map<string, number>();
+  const times = normalizeChangeCount(changeCount);
 
   for (const roomTypeId of roomTypeIds) {
     for (const d of defaults.filter((x) => x.room_type_id === roomTypeId)) {
-      const qty = d.quantity * changeCount(nights, d.change_every_nights);
-      totals.set(d.linen_item_id, (totals.get(d.linen_item_id) || 0) + qty);
+      totals.set(d.linen_item_id, (totals.get(d.linen_item_id) || 0) + d.quantity * times);
     }
   }
 

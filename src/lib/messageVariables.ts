@@ -15,6 +15,31 @@ export interface MessageVariable {
   field_key: string;
 }
 
+// ------------------------------------------------------------------------
+// 訂單金額結構
+//   房價 room_amount：報價引擎算出來的住宿費用
+//   押金 security_deposit：每筆固定收取、可退款，不算在房價裡
+//   訂單總額 total_amount ＝ 房價 + 押金
+//   訂金 deposit ＝ 房價 × 訂金比例（以房價為基數，不含押金）
+// line-webhook.ts（自動報價）跟訂單管理頁（人工建單）都用這裡的函式，兩邊金額才不會算法不同。
+// ------------------------------------------------------------------------
+export function computeDeposit(roomAmount: number, depositPercent: number): number {
+  if (!Number.isFinite(roomAmount) || roomAmount <= 0) return 0;
+  const pct = Number.isFinite(depositPercent) && depositPercent > 0 ? depositPercent : 0;
+  return Math.round((roomAmount * pct) / 100);
+}
+
+export function computeOrderAmounts(roomAmount: number, securityDeposit: number, depositPercent: number) {
+  const room = Number.isFinite(roomAmount) ? roomAmount : 0;
+  const security = Number.isFinite(securityDeposit) ? securityDeposit : 0;
+  return {
+    room_amount: room,
+    security_deposit: security,
+    total_amount: room + security,
+    deposit: computeDeposit(room, depositPercent),
+  };
+}
+
 export interface BookingCtx {
   order_number?: string | null;
   name?: string | null;
@@ -28,6 +53,8 @@ export interface BookingCtx {
   infants?: number | null;
   whole_house?: boolean | null;
   room_type_label?: string | null;
+  room_amount?: number | null;
+  security_deposit?: number | null;
   total_amount?: number | null;
   deposit?: number | null;
   status?: string | null;
@@ -65,9 +92,11 @@ export const BOOKING_FIELD_OPTIONS: { value: string; label: string }[] = [
   { value: 'whole_house', label: '是否包棟' },
   { value: 'room_type_label', label: '房型' },
   { value: 'status', label: '訂單狀態' },
-  { value: 'total_amount', label: '總金額' },
-  { value: 'deposit', label: '訂金' },
-  { value: 'balance_due', label: '尾款（總金額－訂金，自動計算）' },
+  { value: 'room_amount', label: '房價（不含押金）' },
+  { value: 'security_deposit', label: '押金' },
+  { value: 'total_amount', label: '訂單總額（房價＋押金）' },
+  { value: 'deposit', label: '訂金（房價的固定比例）' },
+  { value: 'balance_due', label: '尾款（訂單總額－訂金，自動計算）' },
 ];
 
 export const CUSTOMER_FIELD_OPTIONS: { value: string; label: string }[] = [
@@ -206,6 +235,8 @@ export function resolveVariable(source: VariableSource, fieldKey: string, ctx: V
       case 'whole_house': return b.whole_house ? '是' : '否';
       case 'room_type_label': return b.room_type_label || (b.whole_house ? '包棟' : '');
       case 'status': return bookingStatusLabel(b.status);
+      case 'room_amount': return currency(b.room_amount ?? b.total_amount); // 舊訂單沒有 room_amount，退回 total_amount（改版前它存的就是房價）
+      case 'security_deposit': return currency(b.security_deposit);
       case 'total_amount': return currency(b.total_amount);
       case 'deposit': return currency(b.deposit);
       case 'balance_due': return b.total_amount != null ? currency(Number(b.total_amount) - Number(b.deposit || 0)) : '';
