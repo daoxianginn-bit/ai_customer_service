@@ -119,6 +119,10 @@ CREATE TABLE IF NOT EXISTS public.room_types (
 -- 訂價/訂房邏輯裡（其他 type 例如「空間」是純設施紀錄，不能訂房、不需要價格）。
 ALTER TABLE public.room_types ADD COLUMN IF NOT EXISTS type TEXT DEFAULT '房間';
 ALTER TABLE public.room_types ADD COLUMN IF NOT EXISTS equipment TEXT DEFAULT ''; -- 設備說明，自由文字
+-- 這個房型個別租房時的押金。訂單開了幾間房，押金就加總幾間（見「房型與定價」頁與
+-- messageVariables.ts 的 computeOrderAmounts）；包棟不用這個欄位，是另外固定的
+-- settings.whole_house_security_deposit。
+ALTER TABLE public.room_types ADD COLUMN IF NOT EXISTS security_deposit NUMERIC NOT NULL DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS public.room_pricing (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -251,10 +255,24 @@ ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS booking_confirm_message TEX
 匯款完成後，請回傳「帳號後五碼」或「轉帳明細截圖」，我們查帳無誤後會立即傳送【訂房成功確認信】給您！';
 -- 目前生效中的促銷方案：後台選定後，LINE 訂房對話流程會自動套用同一個。放在 promotions 表格之後（要參照其 id）。
 ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS active_promotion_id UUID REFERENCES public.promotions(id) ON DELETE SET NULL;
--- 押金：每筆訂單固定收取的可退款保證金，不參與房價計算，只加在訂單總額上。
+-- 押金：改版前是每筆訂單固定收取的可退款保證金。現在拆成兩種——個別租房用 room_types.security_deposit
+-- （每個房型各自設定，訂單開了幾間房就加總幾間）；包棟不能用加總（風險是整棟的，跟開幾間房無關），
+-- 沿用這個欄位當包棟專用的固定金額，語意從「每筆訂單」窄化成「包棟訂單」，欄位本身不用改名。
 ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS security_deposit_amount NUMERIC NOT NULL DEFAULT 3000;
 -- 訂金比例：以「房價」為基數，不含押金。30 代表房價的 30%。
 ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS deposit_percent NUMERIC NOT NULL DEFAULT 30;
+
+-- 匯款截止時間：改版前是「依送出時間算當天/隔天 21:00」寫死的邏輯，傍晚送出的客人可能只剩 3 小時，
+-- 半夜的客服又看不到通知。現在改成後台可調整的「送出後 N 小時」，見 line-webhook.ts 的
+-- computePaymentDeadlineDate()。
+ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS payment_deadline_hours INTEGER NOT NULL DEFAULT 10;
+-- 包棟押金：見上面 security_deposit_amount 的說明，這是給新的（個別房型押金加總 vs 包棟固定金額）
+-- 兩種算法用的正式欄位名稱；security_deposit_amount 保留給包棟繼續用，新程式碼一律讀這個。
+ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS whole_house_security_deposit NUMERIC NOT NULL DEFAULT 3000;
+-- 主帳號：不能被其他管理員移除（見 delete-admin.ts）。目前先簡單存一個 user id，
+-- 之後如果要做更完整的多角色權限，應該改接到上面第 7 節已經預留、但還沒接上的 admin_profiles.role，
+-- 這裡只是先解決「主帳號不能被刪」這個當下的需求。
+ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS primary_admin_id UUID REFERENCES auth.users(id) ON DELETE SET NULL;
 
 -- user_states 後來加的欄位（新專案 CREATE TABLE 時不含這些，靠這幾行 ALTER 補齊，既有專案升級也適用）
 ALTER TABLE public.user_states ADD COLUMN IF NOT EXISTS last_event_id TEXT;
@@ -262,6 +280,9 @@ ALTER TABLE public.user_states ADD COLUMN IF NOT EXISTS booking_session TEXT; --
 ALTER TABLE public.user_states ADD COLUMN IF NOT EXISTS last_message_at TIMESTAMP WITH TIME ZONE; -- 最近一次跟 LINE 官方帳號互動的時間（不分是否轉真人/訂房），供「客製訊息發送」查詢聯絡人清單用
 ALTER TABLE public.user_states ADD COLUMN IF NOT EXISTS first_message_at TIMESTAMP WITH TIME ZONE; -- 第一次互動時間，只在 line-webhook.ts 第一次見到這個 line_user_id 時寫入一次，之後不會再更新
 ALTER TABLE public.user_states ADD COLUMN IF NOT EXISTS avatar_url TEXT; -- LINE 大頭貼網址，跟暱稱同時機快取（第一次互動 / 手動按「重新整理暱稱」時更新）
+-- 客人要求不接收行銷群發。跟封鎖 LINE 官方帳號不一樣——封鎖會連客服/訂房管道都一起失去，
+-- 這個只影響「客製訊息發送」頁挑選名單時排不排得到這個人，個別客服對話不受影響。
+ALTER TABLE public.user_states ADD COLUMN IF NOT EXISTS marketing_opt_out BOOLEAN NOT NULL DEFAULT false;
 
 -- 客製訊息發送：後台自訂的可重複使用訊息範本
 CREATE TABLE IF NOT EXISTS public.custom_message_templates (
