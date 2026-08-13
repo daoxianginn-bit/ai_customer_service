@@ -32,12 +32,88 @@ export interface WholeHousePackage {
   id: string;
   occupancy: number;
   display_order: number;
+  room_layout: string; // 顯示用標籤，例如 "4+4"、"2+2+4"；同一 occupancy 可以有多筆方案代表不同組合
+  is_default: boolean; // 客人沒有指定房型組合時，系統自動選這一筆（同 occupancy 只該有一筆 true）
 }
 
 export interface WholeHousePackagePricing {
   package_id: string;
   tier: string;
   price: number | null;
+}
+
+export interface WholeHousePackageRoom {
+  package_id: string;
+  room_type_id: string;
+}
+
+// 客人指定的房型組合：容量 -> 間數，例如 { 2: 2, 4: 1 } 代表「2間2人房 + 1間4人房」。
+export type RequestedLayout = Record<number, number>;
+
+export interface WholeHouseLayoutOptions {
+  packageRooms?: WholeHousePackageRoom[];
+  roomTypes?: RoomType[]; // 用來把 packageRooms 的 room_type_id 換算成容量
+  requestedLayout?: RequestedLayout | null; // 客人沒指定就不帶，退回 is_default 那筆
+}
+
+export interface SpecialPrice {
+  start_date: string; // YYYY-MM-DD
+  end_date: string; // YYYY-MM-DD
+  occupancy: number | null; // null＝不分人數都套用
+  price: number;
+}
+
+/**
+ * 特殊指定日期價格：命中就直接回傳這個絕對金額，優先權最高，呼叫端要用這個取代
+ * 一般的 tier 判斷結果。同一天若同時有「指定人數」跟「不分人數」兩筆命中，優先用指定人數的那筆
+ * （比較精準）；沒有特殊日期資料或都沒命中則回傳 null，維持原本的公式計算。
+ */
+export function getSpecialPrice(date: Date, headcount: number, specialPrices: SpecialPrice[]): number | null {
+  const dateStr = toDateStr(date);
+  const matches = specialPrices.filter(
+    (s) => dateStr >= s.start_date && dateStr <= s.end_date && (s.occupancy == null || s.occupancy === headcount)
+  );
+  if (!matches.length) return null;
+  const withOccupancy = matches.find((s) => s.occupancy != null);
+  return (withOccupancy ?? matches[0]).price;
+}
+
+/** 這個方案的房間組成，是不是剛好符合客人指定的「容量 -> 間數」。 */
+function packageMatchesLayout(packageId: string, requestedLayout: RequestedLayout, packageRooms: WholeHousePackageRoom[], roomTypes: RoomType[]): boolean {
+  const capacityById = new Map(roomTypes.map((r) => [r.id, r.capacity]));
+  const actualCounts: RequestedLayout = {};
+  for (const pr of packageRooms) {
+    if (pr.package_id !== packageId) continue;
+    const cap = capacityById.get(pr.room_type_id);
+    if (cap == null) continue;
+    actualCounts[cap] = (actualCounts[cap] || 0) + 1;
+  }
+  const requestedKeys = Object.keys(requestedLayout).map(Number).filter((k) => requestedLayout[k] > 0);
+  const actualKeys = Object.keys(actualCounts).map(Number);
+  if (requestedKeys.length !== actualKeys.length) return false;
+  return requestedKeys.every((cap) => actualCounts[cap] === requestedLayout[cap]);
+}
+
+/**
+ * 找出某人數該用哪一筆包棟方案（只做「該用哪一筆」的判斷，不查價格）：
+ * 人數低於配置的最小級距，或客人指定的房型組合排不出來，都回傳 null——不再像改版前那樣
+ * 退回最小級距的價格墊底，這種情況一律轉真人由客服確認。
+ * 沒有指定房型組合（requestedLayout 沒帶）就退回 is_default 那一筆；同人數還沒設定 is_default 的舊資料，
+ * 退回同人數的第一筆，維持可用。
+ */
+function findWholeHouseBasePackage(headcount: number, packages: WholeHousePackage[], maxOccupancy: number, layoutOptions?: WholeHouseLayoutOptions): WholeHousePackage | null {
+  if (headcount > maxOccupancy || !packages.length) return null;
+
+  const sortedAsc = [...packages].sort((a, b) => a.occupancy - b.occupancy);
+  const eligible = sortedAsc.filter((p) => p.occupancy <= headcount).sort((a, b) => b.occupancy - a.occupancy);
+  if (!eligible.length) return null; // 人數低於最小配置級距
+
+  const sameOccupancy = eligible.filter((p) => p.occupancy === eligible[0].occupancy);
+  const requestedLayout = layoutOptions?.requestedLayout;
+  if (requestedLayout && layoutOptions?.packageRooms && layoutOptions?.roomTypes) {
+    return sameOccupancy.find((p) => packageMatchesLayout(p.id, requestedLayout, layoutOptions.packageRooms as WholeHousePackageRoom[], layoutOptions.roomTypes as RoomType[])) || null;
+  }
+  return sameOccupancy.find((p) => p.is_default) || sameOccupancy[0];
 }
 
 export interface ExtraPersonRule {
@@ -254,8 +330,9 @@ export interface WholeHouseQuote {
 
 /**
  * 選擇包棟方案：取「基礎人數 <= 需求人數」中最大的級距為基礎，差額用加人規則計算。
- * 若需求人數小於最小級距，仍以最小級距的價格為基礎（視為最低消費）。
+ * 需求人數小於配置的最小級距時回傳 null（見 findWholeHouseBasePackage()），不再墊底報價。
  * 加人規則有多種（不多開房／多開房）時全部回傳，交由對話流程詢問顧客要選哪一種。
+ * layoutOptions 有帶 requestedLayout 時，只在符合客人指定房型組合的方案裡找。
  */
 export function selectWholeHousePackage(
   headcount: number,
@@ -263,13 +340,11 @@ export function selectWholeHousePackage(
   packagePricing: WholeHousePackagePricing[],
   extraPersonRules: ExtraPersonRule[],
   tier: string,
-  maxOccupancy: number
+  maxOccupancy: number,
+  layoutOptions?: WholeHouseLayoutOptions
 ): WholeHouseQuote | null {
-  if (headcount > maxOccupancy || !packages.length) return null;
-
-  const sortedAsc = [...packages].sort((a, b) => a.occupancy - b.occupancy);
-  const eligible = sortedAsc.filter((p) => p.occupancy <= headcount).sort((a, b) => b.occupancy - a.occupancy);
-  const base = eligible[0] || sortedAsc[0]; // 需求人數小於最小級距時，用最小級距當最低消費基礎
+  const base = findWholeHouseBasePackage(headcount, packages, maxOccupancy, layoutOptions);
+  if (!base) return null;
 
   const basePricing = packagePricing.find((p) => p.package_id === base.id && p.tier === tier);
   if (!basePricing || basePricing.price == null) return null; // 該 tier 沒有包棟價格資料
@@ -450,6 +525,10 @@ export interface MultiNightQuoteInput {
   promotion: Promotion | null; // 只套用在第一晚
   consecutiveStayDiscountPerNight: number; // 固定金額，需打掃/無需打掃對應的金額由呼叫端算好傳進來
   peakSeasonWeekdayTier?: PeakSeasonWeekdayTier; // 預設 'peak'，見 resolvePricingTier() 說明
+  packageRooms?: WholeHousePackageRoom[]; // 包棟方案的房間組成，用來比對 requestedLayout
+  requestedLayout?: RequestedLayout | null; // 客人指定的房型組合（容量 -> 間數），沒指定就不帶
+  specialPrices?: SpecialPrice[]; // 特殊指定日期價格，只影響包棟
+  specialPriceStacksWithDiscounts?: boolean; // 預設 true：特殊價格命中時，促銷/連住折扣要不要繼續疊加
 }
 
 export interface MultiNightQuoteResult {
@@ -487,19 +566,32 @@ interface WholeHouseNightResult {
   package: WholeHousePackage; // 這個選項實際套用的方案級距
 }
 
+/**
+ * specialPrice 有帶值（不是 null/undefined）時，代表當晚命中特殊指定日期價格：直接用這個金額，
+ * 略過 tier 報價與加人/升等比價，但還是要跑 findWholeHouseBasePackage() 決定用哪個方案的房間組成
+ * （開房、布巾成本都要知道確切開了哪幾間房，特殊價格只換金額、不能連房間組成都不知道）。
+ * 客人指定的房型組合排不出來，或人數超界，一律回傳 null——特殊價格也救不了。
+ */
 function cheapestWholeHouseNightPrice(
   tier: string,
   headcount: number,
   packages: WholeHousePackage[],
   packagePricing: WholeHousePackagePricing[],
   extraPersonRules: ExtraPersonRule[],
-  maxOccupancy: number
+  maxOccupancy: number,
+  layoutOptions?: WholeHouseLayoutOptions,
+  specialPrice?: number | null
 ): WholeHouseNightResult | null {
+  const base = findWholeHouseBasePackage(headcount, packages, maxOccupancy, layoutOptions);
+  if (!base) return null;
+
+  if (specialPrice != null) return { price: specialPrice, package: base };
+
   const candidates: WholeHouseNightResult[] = [];
-  const base = selectWholeHousePackage(headcount, packages, packagePricing, extraPersonRules, tier, maxOccupancy);
-  if (base) {
-    const price = base.extraPersonOptions.length ? Math.min(...base.extraPersonOptions.map((o) => o.grandTotal)) : base.basePrice;
-    candidates.push({ price, package: base.package });
+  const quote = selectWholeHousePackage(headcount, packages, packagePricing, extraPersonRules, tier, maxOccupancy, layoutOptions);
+  if (quote) {
+    const price = quote.extraPersonOptions.length ? Math.min(...quote.extraPersonOptions.map((o) => o.grandTotal)) : quote.basePrice;
+    candidates.push({ price, package: quote.package });
   }
   const upgrade = selectWholeHouseUpgradeOption(headcount, packages, packagePricing, tier);
   if (upgrade) candidates.push({ price: upgrade.price, package: upgrade.package });
@@ -533,8 +625,24 @@ export function computeMultiNightQuote(input: MultiNightQuoteInput): MultiNightQ
       return price;
     };
 
+    const wholeHouseSpecialPrice = getSpecialPrice(date, input.headcount, input.specialPrices || []);
+    // 特殊價格命中時，是否還要疊加促銷/連住折扣由 settings 決定（預設 true＝疊加）；
+    // 不疊加的話，特殊價格就是當晚最終金額，直接跳過 applyDiscounts()。
+    const applyWholeHouseDiscounts = (raw: number | null): number | null => {
+      if (wholeHouseSpecialPrice != null && input.specialPriceStacksWithDiscounts === false) return raw;
+      return applyDiscounts(raw);
+    };
+
+    const layoutOptions: WholeHouseLayoutOptions = {
+      packageRooms: input.packageRooms,
+      roomTypes: input.roomTypes,
+      requestedLayout: input.requestedLayout,
+    };
     const individualRaw = cheapestIndividualNightPrice(tier, input.headcount, input.roomTypes, input.roomPricing, input.roomExtraPersonPricing);
-    const wholeHouseRaw = cheapestWholeHouseNightPrice(tier, input.headcount, input.packages, input.packagePricing, input.extraPersonRules, input.maxOccupancy);
+    const wholeHouseRaw = cheapestWholeHouseNightPrice(
+      tier, input.headcount, input.packages, input.packagePricing, input.extraPersonRules, input.maxOccupancy,
+      layoutOptions, wholeHouseSpecialPrice
+    );
 
     individualNights.push({
       date,
@@ -547,7 +655,7 @@ export function computeMultiNightQuote(input: MultiNightQuoteInput): MultiNightQ
       date,
       tier,
       rawPrice: wholeHouseRaw?.price ?? null,
-      discountedPrice: applyDiscounts(wholeHouseRaw?.price ?? null),
+      discountedPrice: applyWholeHouseDiscounts(wholeHouseRaw?.price ?? null),
       packageUsed: wholeHouseRaw?.package,
     });
   }

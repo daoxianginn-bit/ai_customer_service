@@ -597,16 +597,18 @@ function pickByLabelHeuristic(collected: Record<string, string>, allFields: Flow
 }
 
 async function fetchBookingData() {
-  const [rt, rp, rep, wp, wpp, epr, dr, promo] = await Promise.all([
+  const [rt, rp, rep, wp, wpp, wpr, epr, dr, promo, sp] = await Promise.all([
     // 只抓「房間」類型：其他類型（例如公共空間）不能訂房，不該進到報價引擎
     supabase.from('room_types').select('*').eq('type', '房間'),
     supabase.from('room_pricing').select('*'),
     supabase.from('room_extra_person_pricing').select('*'),
     supabase.from('whole_house_packages').select('*'),
     supabase.from('whole_house_package_pricing').select('*'),
+    supabase.from('whole_house_package_rooms').select('*'),
     supabase.from('whole_house_extra_person_rules').select('*'),
     supabase.from('booking_date_ranges').select('*'),
     supabase.from('promotions').select('*'),
+    supabase.from('special_prices').select('*'),
   ]);
   return {
     roomTypes: rt.data || [],
@@ -614,9 +616,11 @@ async function fetchBookingData() {
     roomExtraPersonPricing: rep.data || [],
     packages: wp.data || [],
     packagePricing: wpp.data || [],
+    packageRooms: wpr.data || [],
     extraPersonRules: epr.data || [],
     dateRanges: (dr.data || []).map((d: any) => ({ range_type: d.range_type, start_date: d.start_date, end_date: d.end_date })),
     promotions: promo.data || [],
+    specialPrices: (sp.data || []).map((s: any) => ({ start_date: s.start_date, end_date: s.end_date, occupancy: s.occupancy, price: s.price })),
   };
 }
 
@@ -790,12 +794,24 @@ async function saveBookingRooms(bookingId: string, roomIds: string[]) {
   if (error) console.error('[Booking] save booking_rooms failed:', error.message);
 }
 
+// 顧客答案裡「幾人房要開幾間」這類欄位，換算成「容量 -> 間數」，供房間分配跟包棟方案比對共用。
+function deriveRequestedLayout(collected: Record<string, string>, allFields: FlowFieldDef[]): Record<number, number> {
+  const countsByCapacity: Record<number, number> = {};
+  for (const f of allFields) {
+    if (f.quote_field !== 'room_count' || f.room_capacity == null) continue;
+    const n = Number(collected[f.key]);
+    if (Number.isFinite(n) && n > 0) countsByCapacity[f.room_capacity] = (countsByCapacity[f.room_capacity] || 0) + n;
+  }
+  return countsByCapacity;
+}
+
 async function resolveOpenedRooms(input: {
   collected: Record<string, string>;
   allFields: FlowFieldDef[];
   roomTypes: any[];
   useWholeHouse: boolean;
   engineRooms: { id: string }[];
+  wholeHouseDefaultRoomIds: string[]; // 沒指定房型組合時，包棟要開的是報價當下選中方案的房間，不是全部房間
   checkinIso: string;
   checkoutIso: string;
   bookingId: string;
@@ -805,20 +821,20 @@ async function resolveOpenedRooms(input: {
     .map((r: any) => ({ id: r.id, name: r.name, capacity: r.capacity, display_order: r.display_order ?? 0, floor: r.floor ?? '' }));
 
   // 1. 顧客有指定「幾人房各要幾間」就照他指定的挑
-  const countsByCapacity: Record<number, number> = {};
-  for (const f of input.allFields) {
-    if (f.quote_field !== 'room_count' || f.room_capacity == null) continue;
-    const n = Number(input.collected[f.key]);
-    if (Number.isFinite(n) && n > 0) countsByCapacity[f.room_capacity] = (countsByCapacity[f.room_capacity] || 0) + n;
-  }
+  const countsByCapacity = deriveRequestedLayout(input.collected, input.allFields);
   const requests = toRoomCountRequests(countsByCapacity);
   if (requests.length) {
     const occupied = await fetchOccupiedRoomIds(input.checkinIso, input.checkoutIso, input.bookingId);
     return selectRoomsByRequest(requests, selectable, occupied);
   }
 
-  // 2. 沒指定 + 包棟 → 整棟都給客人，就是全部房間
-  if (input.useWholeHouse) return { rooms: selectable, shortfall: [] };
+  // 2. 沒指定 + 包棟 → 開報價當下選中的那個包棟方案的房間組成（同人數現在可能有多個方案，
+  //    不能再像改版前那樣直接給全部房間——方案沒包含到的房間不該一起算進這張訂單）
+  if (input.useWholeHouse) {
+    const byId = new Map(selectable.map((r) => [r.id, r]));
+    const rooms = input.wholeHouseDefaultRoomIds.map((id) => byId.get(id)).filter((r): r is SelectableRoom => !!r);
+    return { rooms, shortfall: [] };
+  }
 
   // 3. 沒指定 + 個別租房 → 用報價引擎實際算價時用到的房型，房間與價格才會一致
   const byId = new Map(selectable.map((r) => [r.id, r]));
@@ -1163,6 +1179,9 @@ async function finishBookingFlow(
         ? settings.consecutive_stay_discount_cleaning || 0
         : settings.consecutive_stay_discount_no_cleaning || 0;
     const activePromotion = settings.active_promotion_id ? data.promotions.find((p: any) => p.id === settings.active_promotion_id) || null : null;
+    // 客人在「幾人房要開幾間」欄位裡指定的房型組合，包棟報價要用這個去挑對應方案，
+    // 價格才會跟 resolveOpenedRooms() 實際開的房間一致。
+    const requestedLayout = deriveRequestedLayout(collected, allFields);
 
     const result = computeMultiNightQuote({
       checkInDate: checkinDate,
@@ -1179,6 +1198,10 @@ async function finishBookingFlow(
       promotion: activePromotion,
       consecutiveStayDiscountPerNight,
       peakSeasonWeekdayTier: settings.peak_season_weekday_tier || 'peak',
+      packageRooms: data.packageRooms,
+      requestedLayout: Object.keys(requestedLayout).length ? requestedLayout : null,
+      specialPrices: data.specialPrices,
+      specialPriceStacksWithDiscounts: settings.special_price_stacks_with_discounts !== false,
     });
 
     const chosenOption = useWholeHouse ? result.wholeHouse : result.individual;
@@ -1200,6 +1223,14 @@ async function finishBookingFlow(
       ? result.individual.nights.map((n) => ({ date: dateToIso(n.date), roomTypeIds: (n.roomsUsed || []).map((r) => r.id) }))
       : [];
 
+    // 包棟且客人沒指定房型組合時，要開報價當下實際選中的那個方案的房間——用第一晚的
+    // packageUsed 當代表（同一趟住宿理論上每晚應該選到同一個方案，除非中間跨到不同 tier
+    // 剛好讓「升等方案」變得比較划算，這是既有邏輯本來就有的極少數情況，這裡不特別處理）。
+    const wholeHousePackageId = result.wholeHouse.nights[0]?.packageUsed?.id || null;
+    const wholeHouseDefaultRoomIds = wholeHousePackageId
+      ? data.packageRooms.filter((pr: any) => pr.package_id === wholeHousePackageId).map((pr: any) => pr.room_type_id)
+      : [];
+
     // 決定這張訂單實際開哪幾間房。價格已經在上面算完了，這一段不會動到金額，
     // 只負責「開哪幾間」——預訂單要列房型、布巾成本要知道間數、房況要標記佔用。
     const openedRooms = await resolveOpenedRooms({
@@ -1208,6 +1239,7 @@ async function finishBookingFlow(
       roomTypes: data.roomTypes,
       useWholeHouse,
       engineRooms: result.individual.nights.flatMap((n) => n.roomsUsed || []),
+      wholeHouseDefaultRoomIds,
       checkinIso,
       checkoutIso,
       bookingId,

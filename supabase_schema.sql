@@ -168,7 +168,16 @@ CREATE TABLE IF NOT EXISTS public.whole_house_packages (
     occupancy INTEGER NOT NULL,
     display_order INTEGER DEFAULT 0,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+    -- room_layout / is_default 由後面的 ALTER TABLE 補齊，新舊專案都適用
 );
+
+-- 同一個人數（occupancy）現在可以有多筆方案，各自代表不同的房型組合（例如 8 人的「4+4」
+-- 跟「2+2+4」各是獨立一筆，各自連自己的 whole_house_package_rooms 跟 whole_house_package_pricing）。
+-- room_layout 是純顯示用標籤；is_default 標記客人沒有指定房型組合時系統要自動選哪一筆
+-- （同一 occupancy 只能有一筆 is_default=true，由後台編輯畫面自己保證，資料庫沒有加約束——
+-- 避免既有資料在升級當下就不符合約束而炸掉）。
+ALTER TABLE public.whole_house_packages ADD COLUMN IF NOT EXISTS room_layout TEXT DEFAULT '';
+ALTER TABLE public.whole_house_packages ADD COLUMN IF NOT EXISTS is_default BOOLEAN NOT NULL DEFAULT true;
 
 CREATE TABLE IF NOT EXISTS public.whole_house_package_pricing (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -194,6 +203,21 @@ CREATE TABLE IF NOT EXISTS public.whole_house_extra_person_rules (
     UNIQUE (rule_type, tier)
 );
 
+-- 特殊指定日期價格：日期區間（可選填人數，NULL＝不分人數都套用）直接指定一個絕對金額，
+-- 優先權最高，計算包棟報價時第一個檢查，命中就直接用這個金額當「當晚基礎價」，
+-- 不再跑平日/小假日/連假/旺季那套 tier 判斷（見 bookingEngine.ts 的 getSpecialPrice()）。
+-- 促銷方案／連住折扣要不要繼續疊加在這個金額上面，由 settings.special_price_stacks_with_discounts 決定。
+CREATE TABLE IF NOT EXISTS public.special_prices (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    start_date DATE NOT NULL,
+    end_date DATE NOT NULL,
+    name TEXT DEFAULT '',
+    occupancy INTEGER,
+    price NUMERIC NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_special_prices_dates ON public.special_prices(start_date, end_date);
+
 CREATE TABLE IF NOT EXISTS public.promotions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name TEXT NOT NULL,
@@ -212,6 +236,9 @@ CREATE TABLE IF NOT EXISTS public.booking_date_ranges (
 
 -- 訂房相關的 settings 欄位（既有專案升級用；新專案 CREATE TABLE 時不含這些，靠這幾行 ALTER 補齊）
 ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS booking_whole_house_enabled BOOLEAN DEFAULT true;
+-- 特殊指定日期價格命中時，促銷方案／連住折扣要不要繼續疊加：true＝疊加（特殊價格只是換掉基礎價，
+-- 折扣照常套用，實收可能比設定的特殊價格低）；false＝不疊加（特殊價格就是當晚最終金額）。
+ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS special_price_stacks_with_discounts BOOLEAN NOT NULL DEFAULT true;
 ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS consecutive_stay_discount_cleaning NUMERIC DEFAULT 0;
 ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS consecutive_stay_discount_no_cleaning NUMERIC DEFAULT 0;
 ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS consecutive_stay_default_option TEXT DEFAULT 'no_cleaning';
@@ -689,6 +716,7 @@ ALTER TABLE public.whole_house_packages ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.whole_house_package_pricing ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.whole_house_package_rooms ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.whole_house_extra_person_rules ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.special_prices ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.promotions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.booking_date_ranges ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.custom_message_templates ENABLE ROW LEVEL SECURITY;
@@ -737,6 +765,8 @@ DROP POLICY IF EXISTS "Allow Auth Access WH Package Rooms" ON public.whole_house
 CREATE POLICY "Allow Auth Access WH Package Rooms" ON public.whole_house_package_rooms FOR ALL USING (auth.role() = 'authenticated');
 DROP POLICY IF EXISTS "Allow Auth Access WH Extra Person Rules" ON public.whole_house_extra_person_rules;
 CREATE POLICY "Allow Auth Access WH Extra Person Rules" ON public.whole_house_extra_person_rules FOR ALL USING (auth.role() = 'authenticated');
+DROP POLICY IF EXISTS "Allow Auth Access Special Prices" ON public.special_prices;
+CREATE POLICY "Allow Auth Access Special Prices" ON public.special_prices FOR ALL USING (auth.role() = 'authenticated');
 DROP POLICY IF EXISTS "Allow Auth Access Promotions" ON public.promotions;
 CREATE POLICY "Allow Auth Access Promotions" ON public.promotions FOR ALL USING (auth.role() = 'authenticated');
 DROP POLICY IF EXISTS "Allow Auth Access Booking Date Ranges" ON public.booking_date_ranges;
