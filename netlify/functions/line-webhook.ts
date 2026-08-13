@@ -158,7 +158,12 @@ export const handler: Handler = async (event) => {
       if (userState?.is_human_mode) {
         const lastInteraction = new Date(userState.last_human_interaction).getTime();
         const timeoutMs = (settings.handover_timeout_minutes || 30) * 60 * 1000;
-        if (new Date().getTime() - lastInteraction < timeoutMs) continue;
+        if (new Date().getTime() - lastInteraction < timeoutMs) {
+          // 客人還在互動就延後計時——真人客服是直接在 LINE 官方帳號 App 裡回覆客人，這個系統
+          // 看不到真人本人有沒有在處理，只能靠客人是否還在傳訊息判斷「這通還沒結束」。
+          await supabase.from('user_states').update({ last_human_interaction: new Date().toISOString() }).eq('line_user_id', userId);
+          continue;
+        }
 
         await supabase.from('user_states').update({ is_human_mode: false }).eq('line_user_id', userId);
         await supabase
@@ -170,7 +175,7 @@ export const handler: Handler = async (event) => {
 
       // 4.5 動態訂房流程：管理員在「訂房流程設定」自訂的多步驟對話（最多 5 步，每步最多擷取 3 個答案）。
       if (settings.is_ai_enabled) {
-        const existingSession = loadBookingSession(userState);
+        const existingSession = loadBookingSession(userState, settings);
         const activeFlows = await fetchActiveFlows();
         const matchedFlow = activeFlows.find((f) => matchTriggerRules(userMessage, f.triggerRules));
 
@@ -190,6 +195,15 @@ export const handler: Handler = async (event) => {
           }
           continue;
         }
+        // session 曾經存在、但已經逾時被 loadBookingSession() 判定過期（不是這位客人從沒問過）：
+        // 不能悄悄把這句回覆丟給下面的 AI/知識庫，客人會覺得系統在答非所問，要明確告知重新開始。
+        if (userState?.booking_session) {
+          await clearBookingSession(userId);
+          const replyText = '不好意思，這次詢問已逾時，請重新輸入一次，謝謝您 🙏';
+          await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
+          await logConversation(userId, nickname, 'outbound', replyText, 'system');
+          continue;
+        }
       }
 
       // 5. 呼叫 AI
@@ -203,7 +217,15 @@ export const handler: Handler = async (event) => {
         if (settings.active_ai === 'gpt') aiResult = (await callGPT(settings, userMessage, kbItems)).text;
         else aiResult = await callGemini(settings, userMessage, kbItems);
       } catch (e: any) {
-        aiResult = `❌ AI 錯誤：\n${e.message}`;
+        // 不能把原始錯誤訊息（API 金鑰失效、額度用完…）直接回給客人，客人看了只會一頭霧水；
+        // 客服也不會自動知道 AI 掛了，所以額外推播通知，不能只靠客人截圖來問才發現。
+        console.error('[AI] call failed:', e.message);
+        aiResult = '不好意思，目前系統忙線中，麻煩您稍後再試一次，或點選「真人客服」由專人為您服務 🙏';
+        for (const id of parseCsvKeywords(settings.agent_user_ids)) {
+          try {
+            await lineClient.pushMessage(id, { type: 'text', text: `⚠️ AI 呼叫失敗：【${nickname || '匿名用戶'}】\n錯誤訊息：${e.message}` });
+          } catch {}
+        }
       }
 
       if (aiResult) {
@@ -223,13 +245,15 @@ export const handler: Handler = async (event) => {
 // ========================================================================
 
 const BOOKING_SESSION_TTL_MS = 30 * 60 * 1000; // in_flow／awaiting_confirmation：30 分鐘沒有新回覆，視為放棄這次詢問
-// awaiting_remittance：匯款期限最晚到隔天 21:00（現在時間 18:00 後才會展延到隔天，見 computePaymentDeadline()），
-// 也就是最長約 29 小時後才到期。48 小時留了將近一整天緩衝，客人晚點才回也還接得住。
-const REMITTANCE_SESSION_TTL_MS = 48 * 60 * 60 * 1000;
+// awaiting_remittance 的存活時間要蓋過匯款截止時間（settings.payment_deadline_hours，見 computePaymentDeadline()），
+// 不然設定的小時數一拉長，session 會比匯款期限還早過期。多留 24 小時當緩衝，客人晚點才回也還接得住。
+const REMITTANCE_SESSION_BUFFER_MS = 24 * 60 * 60 * 1000;
 const BOOKING_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
-function bookingSessionTtlMs(phase: BookingSession['phase']): number {
-  return phase === 'awaiting_remittance' ? REMITTANCE_SESSION_TTL_MS : BOOKING_SESSION_TTL_MS;
+function bookingSessionTtlMs(phase: BookingSession['phase'], settings: any): number {
+  if (phase !== 'awaiting_remittance') return BOOKING_SESSION_TTL_MS;
+  const hours = Number(settings?.payment_deadline_hours) > 0 ? Number(settings.payment_deadline_hours) : 10;
+  return hours * 60 * 60 * 1000 + REMITTANCE_SESSION_BUFFER_MS;
 }
 
 interface FlowFieldDef {
@@ -311,11 +335,11 @@ interface BookingSession {
   updatedAt: number;
 }
 
-function loadBookingSession(userState: any): BookingSession | null {
+function loadBookingSession(userState: any, settings: any): BookingSession | null {
   if (!userState?.booking_session) return null;
   try {
     const parsed = JSON.parse(userState.booking_session);
-    if (!parsed || Date.now() - parsed.updatedAt > bookingSessionTtlMs(parsed.phase)) return null;
+    if (!parsed || Date.now() - parsed.updatedAt > bookingSessionTtlMs(parsed.phase, settings)) return null;
     return parsed;
   } catch {
     return null;
@@ -603,25 +627,24 @@ function formatAdultsKids(adults: number | null, kids: number | null, infants: n
   return `${a}大${k}小${i > 0 ? `${i}幼` : ''}`;
 }
 
-// 匯款截止時間：現在（台灣時間）18:00 前 → 今天 21:00；18:00（含）以後 → 明天 21:00。
-// 回傳真實時間戳，寫進 bookings.payment_deadline_at 供「排程管理」的自動取消逾期訂單使用；
-// computePaymentDeadline() 是給訊息文字用的字串版本，兩者共用同一個計算結果，不會算出不同答案。
-function computePaymentDeadlineDate(): Date {
-  const taiwanMs = Date.now() + 8 * 60 * 60 * 1000;
-  const taiwanNow = new Date(taiwanMs);
-  const deadlineMs = taiwanNow.getUTCHours() >= 18 ? taiwanMs + 24 * 60 * 60 * 1000 : taiwanMs;
-  const deadlineDay = new Date(deadlineMs);
-  // 台灣 21:00 = UTC 13:00（同一個台灣日曆日），直接用 Date.UTC 明算，不受伺服器時區影響。
-  return new Date(Date.UTC(deadlineDay.getUTCFullYear(), deadlineDay.getUTCMonth(), deadlineDay.getUTCDate(), 13, 0, 0));
+// 匯款截止時間：訂房確認當下起算 N 小時，N 是「系統設定」裡可調整的 payment_deadline_hours
+// （沒設定時預設 10 小時）。回傳真實時間戳，寫進 bookings.payment_deadline_at 供「排程管理」
+// 的自動取消逾期訂單使用；computePaymentDeadline() 是給訊息文字用的字串版本，
+// 兩者共用同一個計算結果，不會算出不同答案。
+function computePaymentDeadlineDate(settings: any): Date {
+  const hours = Number(settings?.payment_deadline_hours) > 0 ? Number(settings.payment_deadline_hours) : 10;
+  return new Date(Date.now() + hours * 60 * 60 * 1000);
 }
 
-function computePaymentDeadline(): string {
-  const deadline = computePaymentDeadlineDate();
+function computePaymentDeadline(settings: any): string {
+  const deadline = computePaymentDeadlineDate(settings);
   const taiwanDeadline = new Date(deadline.getTime() + 8 * 60 * 60 * 1000);
   const y = taiwanDeadline.getUTCFullYear();
   const m = String(taiwanDeadline.getUTCMonth() + 1).padStart(2, '0');
   const d = String(taiwanDeadline.getUTCDate()).padStart(2, '0');
-  return `${y}/${m}/${d} 21:00`;
+  const hh = String(taiwanDeadline.getUTCHours()).padStart(2, '0');
+  const mm = String(taiwanDeadline.getUTCMinutes()).padStart(2, '0');
+  return `${y}/${m}/${d} ${hh}:${mm}`;
 }
 
 function toTaiwanSlashFromIso(iso: string | null): string {
@@ -897,6 +920,30 @@ async function startBookingFlow(
   await logConversation(userId, resolvedNickname, 'outbound', firstMessage, 'system');
 }
 
+// 訂房流程進行到一半時，如果流程本身或當下步驟被後台異動掉（刪除流程／改步驟順序）導致對不上，
+// 不能悄悄清空 session 就不回話——客人會覺得系統掛了。比照關鍵字轉真人的完整流程處理，
+// 讓真人接手，而不是讓客人已讀不回。
+async function handoverBrokenFlowSession(lineClient: Client, lineEvent: any, settings: any, userId: string, nickname: string | null) {
+  await clearBookingSession(userId);
+  const startedAt = new Date().toISOString();
+  await supabase.from('user_states').upsert({ line_user_id: userId, nickname, is_human_mode: true, last_human_interaction: startedAt });
+  await supabase.from('handover_logs').insert({
+    line_user_id: userId,
+    nickname,
+    triggered_keyword: '訂房流程設定異動中斷',
+    started_at: startedAt,
+    status: 'open',
+  });
+  const replyText = '不好意思，這個詢問需要真人為您確認，已經為您轉接真人客服，請稍候 🙏';
+  await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
+  await logConversation(userId, nickname, 'outbound', replyText, 'system');
+  for (const id of parseCsvKeywords(settings.agent_user_ids)) {
+    try {
+      await lineClient.pushMessage(id, { type: 'text', text: `⚠️ 訂房流程設定跟客人進度對不上（可能是後台異動了流程步驟）：【${nickname || '匿名用戶'}】，已自動轉真人，請盡快接手。` });
+    } catch {}
+  }
+}
+
 async function continueBookingFlow(
   lineClient: Client,
   lineEvent: any,
@@ -917,12 +964,12 @@ async function continueBookingFlow(
 
   const flow = await fetchFlowById(session.flowId);
   if (!flow) {
-    await clearBookingSession(userId);
+    await handoverBrokenFlowSession(lineClient, lineEvent, settings, userId, nickname);
     return;
   }
   const currentStep = flow.steps.find((s) => s.step_order === session.stepIndex + 1);
   if (!currentStep) {
-    await clearBookingSession(userId);
+    await handoverBrokenFlowSession(lineClient, lineEvent, settings, userId, nickname);
     return;
   }
 
@@ -1197,7 +1244,13 @@ async function finishBookingFlow(
 
     // 報價引擎算出來的 total 是「房價」，押金與訂金在這裡一次算齊，
     // 不再等到確認訂房時去 Google 試算表撈人工填的訂金。
-    const amounts = computeOrderAmounts(total, Number(settings.security_deposit_amount ?? 0), Number(settings.deposit_percent ?? 0));
+    // 押金依實際開的房間數調整：個別租房是這張訂單開的每間房押金加總；包棟是另外設的固定金額
+    // （包棟的清潔/損壞責任是整棟的，不是把各房間押金加起來）。
+    const roomDepositById = new Map(data.roomTypes.map((rt: any) => [rt.id, Number(rt.security_deposit ?? 0)]));
+    const securityDeposit = useWholeHouse
+      ? Number(settings.whole_house_security_deposit ?? 0)
+      : openedRooms.rooms.reduce((sum, r) => sum + (roomDepositById.get(r.id) ?? 0), 0);
+    const amounts = computeOrderAmounts(total, securityDeposit, Number(settings.deposit_percent ?? 0));
 
     const { data: updatedBooking, error: updateError } = await supabase
       .from('bookings')
@@ -1335,7 +1388,7 @@ async function handleBookingConfirmation(
   // 供「排程管理」的自動取消逾期未匯款訂單使用。
   const { data: confirmed } = await supabase
     .from('bookings')
-    .update({ status: 'awaiting_deposit', reserved_at: nowIso, payment_deadline_at: computePaymentDeadlineDate().toISOString(), updated_at: nowIso })
+    .update({ status: 'awaiting_deposit', reserved_at: nowIso, payment_deadline_at: computePaymentDeadlineDate(settings).toISOString(), updated_at: nowIso })
     .eq('id', booking.id)
     .select()
     .single();
@@ -1366,7 +1419,7 @@ async function handleBookingConfirmation(
   });
   // 匯款日時間是系統即時算出來的截止時間，不是任何資料表的欄位，永遠由這裡直接帶入，
   // 不受「訊息變數資料維護」頁面的設定影響（就算被刪除或改名也一樣會生效）。
-  confirmFields['匯款日時間'] = computePaymentDeadline();
+  confirmFields['匯款日時間'] = computePaymentDeadline(settings);
 
   // 同報價確認：優先用流程自己的付款確認訊息，沒有才退回 settings 的舊值。
   const flowForConfirm = await fetchFlowById(session.flowId).catch(() => null);
@@ -1592,6 +1645,12 @@ async function mergeUpdateQuoteSheetRow(sheetId: string, gid: string, rowNumber:
 // overrideSystemPrompt：訂房流程的欄位擷取／內部任務用，會完全取代知識庫 system prompt。
 // ========================================================================
 
+// 知識庫邊界：不管管理員在「系統指令」裡怎麼寫，客服回答一律不能超出知識庫範圍——
+// 沒寫的問題如果讓 AI 憑常識回答，遇到退房政策、寵物政策這類「猜錯代價很高」的問題會很危險。
+// 固定寫死在這裡（不是 settings.system_prompt 的一部分），管理員改系統指令也不會不小心把這條規則改掉。
+const KB_BOUNDARY_INSTRUCTION =
+  '重要規則：只能根據下面「參考資料」裡的內容回答問題。參考資料沒有提到的事情，一律誠實回答「不好意思，這個問題我不清楚，建議您聯繫真人客服協助」，絕對不要用自己的知識猜測或編造答案，即使聽起來很合理也一樣。';
+
 async function callGPT(settings: any, currentMessage: string, kbItems: any[], overrideSystemPrompt?: string) {
   const isGPT5 = settings.gpt_model_name.includes('gpt-5');
 
@@ -1607,7 +1666,7 @@ async function callGPT(settings: any, currentMessage: string, kbItems: any[], ov
         if (r.ok) fileContent += `\n\n【${item.title}】\n${await r.text()}`;
       } catch (e) {}
     }
-    systemContent = `${settings.system_prompt}\n\n參考資料：\n${textBlock}${fileContent}`;
+    systemContent = `${settings.system_prompt}\n\n${KB_BOUNDARY_INSTRUCTION}\n\n參考資料：\n${textBlock}${fileContent}`;
   }
 
   if (isGPT5) {
@@ -1647,7 +1706,7 @@ async function callGemini(settings: any, currentMessage: string, kbItems: any[],
   }
 
   const textBlock = kbItems.filter((i) => i.type === 'text' && i.content).map((i) => `【${i.title}】\n${i.content}`).join('\n\n');
-  const userParts: any[] = [{ text: `System: ${settings.system_prompt}\nReference: ${textBlock}` }];
+  const userParts: any[] = [{ text: `System: ${settings.system_prompt}\n\n${KB_BOUNDARY_INSTRUCTION}\n\nReference: ${textBlock}` }];
 
   for (const item of kbItems.filter((i) => i.type === 'file' && i.file_url)) {
     try {

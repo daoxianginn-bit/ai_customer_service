@@ -162,6 +162,12 @@ export default function SystemSettings() {
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">自動轉回 AI 時間 (分)</label>
               <input type="number" name="handover_timeout_minutes" value={settings.handover_timeout_minutes || 30} onChange={handleChange} className="w-full px-4 py-2 border rounded-lg" />
+              <p className="text-xs text-gray-400 mt-1">客人持續傳訊息會一直延後這個時間，真正沒互動滿這個時間才會轉回 AI。</p>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">訂金匯款截止時間 (小時)</label>
+              <input type="number" min={1} name="payment_deadline_hours" value={settings.payment_deadline_hours ?? 10} onChange={handleChange} className="w-full px-4 py-2 border rounded-lg" />
+              <p className="text-xs text-gray-400 mt-1">顧客送出訂房確認後幾小時內要匯款，逾時由「排程管理」自動取消。</p>
             </div>
             <div className="col-span-2">
               <label className="block text-sm font-medium text-gray-700 mb-1">客服專員 LINE IDs (通知用)</label>

@@ -55,7 +55,8 @@ export default function BookingManagement() {
   const [saving, setSaving] = useState(false);
 
   const [settingsId, setSettingsId] = useState<string | null>(null);
-  const [securityDepositAmount, setSecurityDepositAmount] = useState(3000);
+  // 包棟押金：固定另設一個數字，不是把各房型押金加總算出來的（包棟風險本來就跟開幾間房無關，是整棟的清潔/損壞責任）。
+  const [wholeHouseSecurityDeposit, setWholeHouseSecurityDeposit] = useState(3000);
   const [depositPercent, setDepositPercent] = useState(30);
   const [wholeHouseEnabled, setWholeHouseEnabled] = useState(true);
   const [discountCleaning, setDiscountCleaning] = useState(0);
@@ -114,7 +115,7 @@ export default function BookingManagement() {
       supabase
         .from('settings')
         .select(
-          'id, booking_whole_house_enabled, consecutive_stay_discount_cleaning, consecutive_stay_discount_no_cleaning, consecutive_stay_default_option, peak_season_weekday_tier, active_promotion_id, security_deposit_amount, deposit_percent'
+          'id, booking_whole_house_enabled, consecutive_stay_discount_cleaning, consecutive_stay_discount_no_cleaning, consecutive_stay_default_option, peak_season_weekday_tier, active_promotion_id, whole_house_security_deposit, deposit_percent'
         )
         .single(),
       // 房型與定價只處理「房間」類型的資料（可訂房、可訂價），其他類型（例如公共空間）在
@@ -136,7 +137,7 @@ export default function BookingManagement() {
     setConsecutiveStayDefaultOption(st.data?.consecutive_stay_default_option ?? 'no_cleaning');
     setPeakSeasonWeekdayTier(st.data?.peak_season_weekday_tier ?? 'peak');
     setActivePromotionId(st.data?.active_promotion_id ?? '');
-    setSecurityDepositAmount(st.data?.security_deposit_amount ?? 3000);
+    setWholeHouseSecurityDeposit(st.data?.whole_house_security_deposit ?? 3000);
     setDepositPercent(st.data?.deposit_percent ?? 30);
     // 試算報價的預設值跟著「目前生效中」的設定走，這樣一打開頁面直接按試算，算出來的金額
     // 就會跟 LINE 顧客實際拿到的一致；仍可手動改去測試其他假設情境。
@@ -173,7 +174,7 @@ export default function BookingManagement() {
             consecutive_stay_default_option: consecutiveStayDefaultOption,
             peak_season_weekday_tier: peakSeasonWeekdayTier,
             active_promotion_id: activePromotionId || null,
-            security_deposit_amount: securityDepositAmount,
+            whole_house_security_deposit: wholeHouseSecurityDeposit,
             deposit_percent: depositPercent,
           })
           .eq('id', settingsId);
@@ -692,19 +693,20 @@ export default function BookingManagement() {
           <p className="text-sm font-medium text-gray-700 mb-1">押金與訂金</p>
           <p className="text-xs text-gray-500 mb-3">
             訂單總額 ＝ 房價 ＋ 押金；本次需匯訂金 ＝ <strong>房價</strong>的固定比例（不含押金）。
+            個別租房的押金依下方「房型與定價」各房型分別設定並加總；包棟不是加總，是下面這個獨立的固定金額。
             LINE 自動報價會照這裡的設定算好，不需要人工填。
           </p>
           <div className="flex flex-wrap gap-4 items-end">
             <div>
-              <label className="block text-xs text-gray-500 mb-1">押金（每筆固定，可退款）</label>
-              <input type="number" min={0} value={securityDepositAmount} onChange={(e) => setSecurityDepositAmount(Number(e.target.value))} className="w-32 px-3 py-2 border rounded-lg" />
+              <label className="block text-xs text-gray-500 mb-1">包棟押金（固定金額，可退款）</label>
+              <input type="number" min={0} value={wholeHouseSecurityDeposit} onChange={(e) => setWholeHouseSecurityDeposit(Number(e.target.value))} className="w-32 px-3 py-2 border rounded-lg" />
             </div>
             <div>
               <label className="block text-xs text-gray-500 mb-1">訂金比例（房價的 %）</label>
               <input type="number" min={0} max={100} value={depositPercent} onChange={(e) => setDepositPercent(Number(e.target.value))} className="w-32 px-3 py-2 border rounded-lg" />
             </div>
             <p className="text-xs text-gray-500 pb-2.5">
-              例：房價 NT$ 19,950 → 訂單總額 NT$ {(19950 + securityDepositAmount).toLocaleString()}、
+              例：包棟房價 NT$ 19,950 → 訂單總額 NT$ {(19950 + wholeHouseSecurityDeposit).toLocaleString()}、
               訂金 NT$ {Math.round((19950 * depositPercent) / 100).toLocaleString()}
             </p>
           </div>
@@ -722,6 +724,7 @@ export default function BookingManagement() {
             <thead className="bg-gray-50 border-b">
               <tr className="text-gray-600">
                 <th className="py-3 px-4">房間（樓層＋名稱＋人數）</th>
+                <th className="py-3 px-4">押金</th>
                 <th className="py-3 px-4">最多加人</th>
                 <th className="py-3 px-4">排序</th>
                 {PRICING_TIERS.map((t) => (
@@ -733,6 +736,9 @@ export default function BookingManagement() {
               {roomTypes.map((r) => (
                 <tr key={r.id}>
                   <td className="p-2 text-gray-700">{r.floor ? `${r.floor}-` : ''}{r.name}（{r.capacity}人）</td>
+                  <td className="p-2">
+                    <input type="number" min={0} value={r.security_deposit ?? 0} onChange={(e) => updateRoomType(r.id, 'security_deposit', Number(e.target.value))} className="w-20 px-2 py-1 border rounded" title="這間房個別租房時的押金" />
+                  </td>
                   <td className="p-2">
                     <input type="number" min={0} value={r.max_extra_persons ?? 0} onChange={(e) => updateRoomType(r.id, 'max_extra_persons', Number(e.target.value))} className="w-16 px-2 py-1 border rounded" title="0＝不支援加人" />
                   </td>
@@ -754,7 +760,7 @@ export default function BookingManagement() {
               ))}
               {roomTypes.length === 0 && (
                 <tr>
-                  <td colSpan={3 + PRICING_TIERS.length} className="py-10 text-center text-gray-400">
+                  <td colSpan={4 + PRICING_TIERS.length} className="py-10 text-center text-gray-400">
                     尚未設定任何「房間」類型的資料，請先到「房型與空間維護」新增
                   </td>
                 </tr>

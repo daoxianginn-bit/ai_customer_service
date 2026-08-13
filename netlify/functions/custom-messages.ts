@@ -60,7 +60,6 @@ export const handler: Handler = async (event) => {
     if (body.action === 'send') {
       const recipients: { lineUserId: string; fields: Record<string, string>; bookingId?: string }[] = Array.isArray(body.recipients) ? body.recipients : [];
       const template: string = body.template || '';
-      const markReserved: boolean = !!body.markReserved;
       if (!recipients.length) return { statusCode: 400, body: JSON.stringify({ error: '沒有選擇收件人' }) };
       if (!template.trim()) return { statusCode: 400, body: JSON.stringify({ error: '訊息內容是空的' }) };
       if (recipients.length > MAX_BATCH_SEND) {
@@ -72,41 +71,13 @@ export const handler: Handler = async (event) => {
         channelSecret: settings.line_channel_secret,
       });
 
-      // 「發送後改狀態」要用的匯款末五碼，一次查完，發送迴圈裡就不用逐筆打資料庫。
-      // 沒有匯款末五碼的訂單不能改成「已預定」（訂單管理頁的既有規則），這裡也照同一條規則走，
-      // 不然會做出訂單管理不允許手動建立的資料狀態。
-      const remitLast5ByBookingId = new Map<string, string | null>();
-      if (markReserved) {
-        const bookingIds = recipients.map((r) => r.bookingId).filter((id): id is string => !!id);
-        if (bookingIds.length) {
-          const { data } = await supabase.from('bookings').select('id, remit_last5').in('id', bookingIds);
-          for (const row of data || []) remitLast5ByBookingId.set(row.id, row.remit_last5 || null);
-        }
-      }
-
-      const results: { lineUserId: string; ok: boolean; error?: string; statusUpdated?: boolean; statusSkippedReason?: string }[] = [];
+      // 發訊息跟改訂單狀態是兩件事，故意不放在同一個動作裡——要改狀態一律回訂單管理頁做。
+      const results: { lineUserId: string; ok: boolean; error?: string }[] = [];
       for (const r of recipients) {
         const message = mergeTemplate(template, r.fields || {});
         try {
           await lineClient.pushMessage(r.lineUserId, { type: 'text', text: message });
-          const result: (typeof results)[number] = { lineUserId: r.lineUserId, ok: true };
-
-          if (markReserved && r.bookingId) {
-            const remitLast5 = remitLast5ByBookingId.get(r.bookingId);
-            if (!remitLast5) {
-              result.statusUpdated = false;
-              result.statusSkippedReason = '缺少匯款末五碼，請先到訂單管理填寫';
-            } else {
-              const { error: updateError } = await supabase
-                .from('bookings')
-                .update({ status: 'reserved', updated_at: new Date().toISOString() })
-                .eq('id', r.bookingId);
-              result.statusUpdated = !updateError;
-              if (updateError) result.statusSkippedReason = updateError.message;
-            }
-          }
-
-          results.push(result);
+          results.push({ lineUserId: r.lineUserId, ok: true });
         } catch (e: any) {
           results.push({ lineUserId: r.lineUserId, ok: false, error: e.message });
         }
@@ -218,11 +189,14 @@ async function listOrders(settings: any, filters: OrderFilters): Promise<{ varia
   const userIds = Array.from(new Set(bookings.map((b: any) => b.line_user_id).filter(Boolean)));
   let customerByUser: Record<string, any> = {};
   if (userIds.length) {
-    const { data: states } = await supabase.from('user_states').select('line_user_id, nickname, last_message_at, first_message_at').in('line_user_id', userIds);
+    const { data: states } = await supabase.from('user_states').select('line_user_id, nickname, last_message_at, first_message_at, marketing_opt_out').in('line_user_id', userIds);
     for (const s of states || []) customerByUser[s.line_user_id] = s;
   }
 
-  const rows = bookings.map((b: any) => {
+  // 標記「不接收行銷訊息」的客人，客製訊息發送名單一律排除，不能只靠客人自己封鎖官方帳號才退得掉。
+  const bookingsForBroadcast = bookings.filter((b: any) => !customerByUser[b.line_user_id]?.marketing_opt_out);
+
+  const rows = bookingsForBroadcast.map((b: any) => {
     const balanceDue = b.total_amount != null ? b.total_amount - (b.deposit ?? 0) : null;
     const fields = buildMergeFields(variables, {
       booking: b,

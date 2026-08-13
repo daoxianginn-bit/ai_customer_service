@@ -67,6 +67,26 @@ function newId(): string {
   return crypto.randomUUID();
 }
 
+// 兩條觸發規則「重疊」：同一句客人訊息可能同時命中兩邊。字串完全相同一定算；
+// 不然只要比較短的關鍵字是比較長的子字串，就代表包含關係的訊息兩邊都會命中
+// （粗略但夠用的啟發式判斷，目的是提醒管理員自己確認，不是精確的邏輯證明）。
+function keywordsOverlap(a: TriggerRule, b: TriggerRule): boolean {
+  if (!a.keyword || !b.keyword) return false;
+  if (a.keyword === b.keyword) return true;
+  const [shorter, longer] = a.keyword.length <= b.keyword.length ? [a.keyword, b.keyword] : [b.keyword, a.keyword];
+  return longer.includes(shorter);
+}
+
+// 儲存時只是提醒，不阻擋——重疊時系統本來就會依 display_order 選第一個，
+// 管理員可能就是故意這樣設計（例如一個當備用/兜底流程），不該強制要求修改。
+function findOverlappingFlowName(rules: TriggerRule[], excludeId: string, otherFlows: Flow[]): string | null {
+  for (const flow of otherFlows) {
+    if (flow.id === excludeId || !flow.is_active) continue;
+    if (flow.trigger_rules.some((fr) => rules.some((r) => keywordsOverlap(r, fr)))) return flow.name;
+  }
+  return null;
+}
+
 type FlowField = { key: string; label: string; quote_field: string };
 type FlowStep = { step_order: number; message_template: string; fields: FlowField[] };
 type FlowType = 'quote' | 'collect' | 'query';
@@ -184,6 +204,7 @@ export default function StandardMessages() {
   const [variables, setVariables] = useState<string[]>([]);
   const [roomCapacities, setRoomCapacities] = useState<number[]>([]);
   const [errorMsg, setErrorMsg] = useState('');
+  const [warningMsg, setWarningMsg] = useState('');
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
@@ -357,6 +378,14 @@ export default function StandardMessages() {
       if (step.fields.some((f) => !f.label.trim())) return setErrorMsg(`步驟 ${step.step_order} 有欄位沒有填名稱`);
     }
 
+    // 觸發條件重疊只是提醒，不擋儲存——重疊時系統依 display_order 選第一個，管理員自己決定要不要調整。
+    const overlappingFlowName = draft.is_active ? findOverlappingFlowName(rules, draft.id, flows) : null;
+    setWarningMsg(
+      overlappingFlowName
+        ? `注意：觸發關鍵字跟已啟用的流程「${overlappingFlowName}」重疊。同一句話兩邊都命中時，系統會依排序選第一個，請確認這是您要的結果。`
+        : ''
+    );
+
     setSaving(true);
     setErrorMsg('');
     try {
@@ -458,6 +487,14 @@ export default function StandardMessages() {
           <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
           <span className="flex-1">{errorMsg}</span>
           <button onClick={() => setErrorMsg('')} className="text-red-400 hover:text-red-600 text-xs">關閉</button>
+        </div>
+      )}
+
+      {warningMsg && (
+        <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 text-amber-700 text-sm px-4 py-3 rounded-xl">
+          <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+          <span className="flex-1">{warningMsg}</span>
+          <button onClick={() => setWarningMsg('')} className="text-amber-500 hover:text-amber-700 text-xs">關閉</button>
         </div>
       )}
 

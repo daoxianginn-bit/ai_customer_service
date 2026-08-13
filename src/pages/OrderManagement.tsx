@@ -84,7 +84,7 @@ export default function OrderManagement() {
 
   // 押金與訂金比例的預設值來自「房型與報價」的設定，人工建單時按「重算」就會套用同一套算法，
   // 跟 LINE 自動報價算出來的金額一致。
-  const [moneyDefaults, setMoneyDefaults] = useState({ security: 3000, percent: 30 });
+  const [moneyDefaults, setMoneyDefaults] = useState({ wholeHouseSecurity: 3000, percent: 30 });
 
   // 布巾備品：實際開了哪幾間房決定送洗成本（「包棟」只是使用權名稱，不影響算法）
   const [rooms, setRooms] = useState<RoomOption[]>([]);
@@ -111,28 +111,34 @@ export default function OrderManagement() {
   }, [selectedRoomIds, form.linen_change_count, linenDefaults, linenItems]);
 
   const fetchRoomTypeOptions = async () => {
-    const { data } = await supabase.from('room_types').select('id, name, floor, capacity').eq('type', '房間').order('display_order');
+    const { data } = await supabase.from('room_types').select('id, name, floor, capacity, security_deposit').eq('type', '房間').order('display_order');
     setRooms((data || []) as RoomOption[]);
     setRoomTypeOptions((data || []).map((r: any) => r.name));
   };
 
   const fetchMoneyDefaults = async () => {
-    const { data } = await supabase.from('settings').select('security_deposit_amount, deposit_percent').single();
+    const { data } = await supabase.from('settings').select('whole_house_security_deposit, deposit_percent').single();
     if (!data) return;
     setMoneyDefaults({
-      security: Number(data.security_deposit_amount ?? 3000),
+      wholeHouseSecurity: Number(data.whole_house_security_deposit ?? 3000),
       percent: Number(data.deposit_percent ?? 30),
     });
   };
 
-  // 依房價重算其餘三個金額，用的是跟 LINE 自動報價同一個函式，人工建單才不會算出不同的數字
+  // 押金預設值：包棟用「報價設定」的固定金額；個別租房用目前勾選房間的押金加總。
+  const defaultSecurityDeposit = form.whole_house
+    ? moneyDefaults.wholeHouseSecurity
+    : selectedRoomIds.reduce((sum, id) => sum + Number(rooms.find((r) => r.id === id)?.security_deposit ?? 0), 0);
+
+  // 依房價重算其餘三個金額，用的是跟 LINE 自動報價同一個函式，人工建單才不會算出不同的數字；
+  // 管理員仍可在「押金」欄位手動覆蓋這個預設值。
   const recalcAmounts = () => {
     const room = Number(form.room_amount);
     if (!Number.isFinite(room) || room <= 0) {
       setFormError('請先填房價，才能重算訂單總額與訂金。');
       return;
     }
-    const security = form.security_deposit === '' ? moneyDefaults.security : Number(form.security_deposit);
+    const security = form.security_deposit === '' ? defaultSecurityDeposit : Number(form.security_deposit);
     const amounts = computeOrderAmounts(room, security, moneyDefaults.percent);
     setFormError('');
     setForm((f) => ({
@@ -569,7 +575,7 @@ export default function OrderManagement() {
           </div>
           <div>
             <label className="block text-xs text-gray-500 mb-1">押金</label>
-            <input type="number" value={form.security_deposit} onChange={(e) => setForm({ ...form, security_deposit: e.target.value })} className="w-full px-3 py-2 border rounded-lg" placeholder={String(moneyDefaults.security)} />
+            <input type="number" value={form.security_deposit} onChange={(e) => setForm({ ...form, security_deposit: e.target.value })} className="w-full px-3 py-2 border rounded-lg" placeholder={String(defaultSecurityDeposit)} />
           </div>
           <div>
             <label className="block text-xs text-gray-500 mb-1">訂單總額（房價＋押金）</label>
@@ -585,7 +591,7 @@ export default function OrderManagement() {
               onClick={recalcAmounts}
               className="text-xs flex items-center gap-1 text-green-600 hover:text-green-700"
             >
-              <RefreshCw className="w-3.5 h-3.5" /> 依房價重算：訂單總額 ＝ 房價＋押金 {moneyDefaults.security}，訂金 ＝ 房價 {moneyDefaults.percent}%
+              <RefreshCw className="w-3.5 h-3.5" /> 依房價重算：訂單總額 ＝ 房價＋押金 {defaultSecurityDeposit}，訂金 ＝ 房價 {moneyDefaults.percent}%
             </button>
           </div>
           <div>

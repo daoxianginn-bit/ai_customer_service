@@ -21,6 +21,13 @@ export const handler: Handler = async (event) => {
 
   if (userId === user.id) return { statusCode: 400, body: '無法移除自己的帳號' };
 
+  // 主帳號不能被其他管理員刪除——前端會擋，但刪除動作用的是 service role 金鑰，
+  // 真正的防線一定要在後端做，不能只靠前端 UI 不給按。
+  const { data: settings } = await supabaseAdmin.from('settings').select('primary_admin_id').single();
+  if (settings?.primary_admin_id && userId === settings.primary_admin_id) {
+    return { statusCode: 400, body: '這是主帳號，不能被移除' };
+  }
+
   const { error } = await supabaseAdmin.auth.admin.deleteUser(userId);
   if (error) return { statusCode: 500, body: error.message };
 

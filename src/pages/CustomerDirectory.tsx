@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { supabase } from '../lib/supabase';
-import { Users, Search, RotateCcw, MessageSquare, ClipboardList, Copy, RefreshCcw, AlertCircle } from 'lucide-react';
-import { PageHeader, Button, Modal, StatusBadge, EmptyState, Pagination } from '../components/ui';
+import { Users, Search, RotateCcw, MessageSquare, ClipboardList, Copy, RefreshCcw, AlertCircle, Trash2 } from 'lucide-react';
+import { PageHeader, Button, Modal, StatusBadge, EmptyState, Pagination, ConfirmDialog } from '../components/ui';
 import { DEPOSIT_OR_LATER_STATUSES } from '../lib/bookingStatus';
 
 const PAGE_SIZE_OPTIONS = [10, 20, 50];
@@ -15,6 +15,7 @@ interface Contact {
   bookingCount: number;
   hasConfirmed: boolean;
   hasAnyBooking: boolean;
+  marketing_opt_out: boolean;
 }
 
 type ContactStatus = 'missing_nickname' | 'ordered' | 'inquiry_only' | 'interacted';
@@ -71,6 +72,19 @@ async function callLineProfileFunction(lineUserId: string) {
   return result;
 }
 
+async function callDeleteCustomerDataFunction(lineUserId: string) {
+  const { data: sessionData } = await supabase.auth.getSession();
+  const token = sessionData.session?.access_token;
+  const res = await fetch('/.netlify/functions/delete-customer-data', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ lineUserId }),
+  });
+  const result = await res.json();
+  if (!res.ok) throw new Error(result.error || '清除失敗');
+  return result;
+}
+
 export default function CustomerDirectory() {
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [loading, setLoading] = useState(true);
@@ -91,6 +105,12 @@ export default function CustomerDirectory() {
   const [detailBookings, setDetailBookings] = useState<any[]>([]);
   const [detailConversations, setDetailConversations] = useState<any[]>([]);
   const [detailLoading, setDetailLoading] = useState(false);
+
+  // 清除客戶資料只有主帳號能做——跟「帳號管理」頁同一個 settings.primary_admin_id。
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const [primaryAdminId, setPrimaryAdminId] = useState<string | null>(null);
+  const [deleteCustomerTarget, setDeleteCustomerTarget] = useState<Contact | null>(null);
+  const [deletingCustomer, setDeletingCustomer] = useState(false);
   const [detailError, setDetailError] = useState('');
 
   const [showFullConvo, setShowFullConvo] = useState(false);
@@ -103,12 +123,17 @@ export default function CustomerDirectory() {
     runQuery(0);
   }, [pageSize]);
 
+  useEffect(() => {
+    supabase.auth.getUser().then(({ data }) => setCurrentUserId(data.user?.id || null));
+    supabase.from('settings').select('primary_admin_id').single().then(({ data }) => setPrimaryAdminId(data?.primary_admin_id || null));
+  }, []);
+
   const runQuery = async (pageIndex: number) => {
     setLoading(true);
     setQueryError('');
     let query = supabase
       .from('user_states')
-      .select('line_user_id, nickname, avatar_url, last_message_at, first_message_at')
+      .select('line_user_id, nickname, avatar_url, last_message_at, first_message_at, marketing_opt_out')
       .order('last_message_at', { ascending: false, nullsFirst: false })
       .range(pageIndex * pageSize, pageIndex * pageSize + pageSize - 1);
 
@@ -151,6 +176,7 @@ export default function CustomerDirectory() {
         bookingCount: bookings.length,
         hasConfirmed: bookings.some((b: any) => DEPOSIT_OR_LATER_STATUSES.includes(b.status)),
         hasAnyBooking: bookings.length > 0,
+        marketing_opt_out: !!s.marketing_opt_out,
       };
     });
     setContacts(merged);
@@ -214,6 +240,26 @@ export default function CustomerDirectory() {
       setRefreshErrors((prev) => ({ ...prev, [lineUserId]: e.message || '同步失敗' }));
     } finally {
       setRefreshingIds((prev) => { const next = new Set(prev); next.delete(lineUserId); return next; });
+    }
+  };
+
+  const toggleMarketingOptOut = async (lineUserId: string, optOut: boolean) => {
+    await supabase.from('user_states').update({ marketing_opt_out: optOut }).eq('line_user_id', lineUserId);
+    setContacts((prev) => prev.map((c) => (c.line_user_id === lineUserId ? { ...c, marketing_opt_out: optOut } : c)));
+  };
+
+  const confirmDeleteCustomer = async () => {
+    if (!deleteCustomerTarget) return;
+    setDeletingCustomer(true);
+    try {
+      await callDeleteCustomerDataFunction(deleteCustomerTarget.line_user_id);
+      setContacts((prev) => prev.filter((c) => c.line_user_id !== deleteCustomerTarget.line_user_id));
+      if (selectedId === deleteCustomerTarget.line_user_id) setSelectedId(null);
+      setDeleteCustomerTarget(null);
+    } catch (e: any) {
+      alert(`清除失敗：${e.message}`);
+    } finally {
+      setDeletingCustomer(false);
     }
   };
 
@@ -422,6 +468,28 @@ export default function CustomerDirectory() {
                   <div className="flex justify-between"><span className="text-gray-500">最近互動時間</span><span>{selectedContact.last_message_at ? new Date(selectedContact.last_message_at).toLocaleString('zh-TW') : '-'}</span></div>
                   <div className="flex justify-between"><span className="text-gray-500">第一次互動時間</span><span>{selectedContact.first_message_at ? new Date(selectedContact.first_message_at).toLocaleString('zh-TW') : '-'}</span></div>
                 </div>
+                <label className="flex items-start gap-2 mt-3 text-xs text-gray-600 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={selectedContact.marketing_opt_out}
+                    onChange={(e) => toggleMarketingOptOut(selectedContact.line_user_id, e.target.checked)}
+                    className="mt-0.5"
+                  />
+                  <span>
+                    不接收行銷訊息
+                    <span className="block text-gray-400 mt-0.5">勾選後，「客製訊息發送」頁的名單會自動排除這位客人，客服／訂房相關的個別對話不受影響。</span>
+                  </span>
+                </label>
+
+                {currentUserId && currentUserId === primaryAdminId && (
+                  <button
+                    onClick={() => setDeleteCustomerTarget(selectedContact)}
+                    className="flex items-center gap-1.5 mt-3 text-xs text-red-600 hover:text-red-700"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    清除此客人所有資料（個資法刪除請求用，不可復原）
+                  </button>
+                )}
               </div>
 
               <div>
@@ -496,6 +564,17 @@ export default function CustomerDirectory() {
           </div>
         )}
       </Modal>
+
+      <ConfirmDialog
+        open={!!deleteCustomerTarget}
+        title="清除客戶資料"
+        message={`確定要清除「${deleteCustomerTarget?.nickname || deleteCustomerTarget?.line_user_id}」在系統裡的所有資料嗎？包含訂單、對話紀錄、轉真人紀錄與聯絡人資料，此動作無法復原。`}
+        confirmLabel="清除"
+        danger
+        loading={deletingCustomer}
+        onConfirm={confirmDeleteCustomer}
+        onCancel={() => setDeleteCustomerTarget(null)}
+      />
     </div>
   );
 }

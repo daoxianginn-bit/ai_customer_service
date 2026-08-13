@@ -11,6 +11,7 @@ export interface RoomOption {
   floor?: string | null;
   capacity?: number | null;
   type?: string | null;
+  security_deposit?: number | null;
 }
 
 /**
