@@ -2,14 +2,23 @@ import { useEffect, useState } from 'react';
 import { Save, Bot, MessageCircle, UserCheck, Copy, FileSpreadsheet, Clock, SlidersHorizontal } from 'lucide-react';
 import { useSettings } from '../lib/useSettings';
 import { PageHeader, Button } from '../components/ui';
-import CollapsibleSection from '../components/CollapsibleSection';
 
 // 原本是 AI 引擎設定／LINE 串接設定／轉接規則三個獨立頁面，內容都只是對同一張
-// settings 表的單一表單（同一個 useSettings() hook），合成一頁三個收合區塊，
-// 選單從 3 條變 1 條。欄位名稱、儲存邏輯、驗證規則完全沒動，純粹是版面搬家。
+// settings 表的單一表單（同一個 useSettings() hook），合成一頁三個分頁籤（比照
+// LinenManagement.tsx 既有的多分頁寫法），一次只顯示一個區塊，不用一直往下滾展開/收合。
+// 欄位名稱、儲存邏輯、驗證規則完全沒動，純粹是版面搬家。
+type Tab = 'ai' | 'line' | 'handover';
+
+const TABS: { key: Tab; label: string; icon: JSX.Element }[] = [
+  { key: 'ai', label: 'AI 引擎設定', icon: <Bot className="w-4 h-4" /> },
+  { key: 'line', label: 'LINE 串接設定', icon: <MessageCircle className="w-4 h-4" /> },
+  { key: 'handover', label: '轉接規則', icon: <UserCheck className="w-4 h-4" /> },
+];
+
 export default function SystemSettings() {
   const { settings, setSettings, loading, saving, handleSave, handleChange } = useSettings();
   const [webhookUrl, setWebhookUrl] = useState('');
+  const [tab, setTab] = useState<Tab>('ai');
 
   useEffect(() => {
     setWebhookUrl(window.location.origin + '/.netlify/functions/line-webhook');
@@ -36,7 +45,22 @@ export default function SystemSettings() {
         }
       />
 
-      <CollapsibleSection title="AI 引擎設定" icon={<Bot className="w-5 h-5 text-green-600" />} description="選擇 AI 供應商、模型參數與系統指令" defaultOpen>
+      <div className="bg-white rounded-xl shadow-sm border overflow-hidden">
+        <div className="flex border-b overflow-x-auto">
+          {TABS.map((t) => (
+            <button
+              key={t.key}
+              onClick={() => setTab(t.key)}
+              className={`flex items-center gap-2 px-5 py-3 text-sm whitespace-nowrap border-b-2 transition-colors ${
+                tab === t.key ? 'border-green-600 text-green-700 font-medium bg-green-50' : 'border-transparent text-gray-600 hover:bg-gray-50'
+              }`}
+            >
+              {t.icon}{t.label}
+            </button>
+          ))}
+        </div>
+
+        {tab === 'ai' && (
         <div className="p-6 space-y-6">
           <div className="grid grid-cols-2 gap-4">
             <button onClick={() => setSettings({ ...settings, active_ai: 'gpt' })} className={`p-6 rounded-xl border-2 transition-all flex items-center gap-4 ${settings.active_ai === 'gpt' ? 'border-green-500 bg-green-50' : 'border-gray-200 bg-white hover:border-gray-300'}`}>
@@ -109,9 +133,9 @@ export default function SystemSettings() {
             <p className="text-xs text-gray-400 mt-1">參考資料請至「AI知識庫」新增，會自動附加到此指令後方。</p>
           </div>
         </div>
-      </CollapsibleSection>
+        )}
 
-      <CollapsibleSection title="LINE 串接設定" icon={<MessageCircle className="w-5 h-5 text-green-600" />} description="管理 Webhook 與 Channel 憑證">
+        {tab === 'line' && (
         <div className="p-6 space-y-6">
           <div className="grid grid-cols-2 gap-6">
             <div className="col-span-2">
@@ -150,9 +174,9 @@ export default function SystemSettings() {
             </div>
           </div>
         </div>
-      </CollapsibleSection>
+        )}
 
-      <CollapsibleSection title="轉接規則" icon={<UserCheck className="w-5 h-5 text-green-600" />} description="設定何時將對話轉給真人客服，以及資料保留政策">
+        {tab === 'handover' && (
         <div className="p-6 space-y-6">
           <div className="grid grid-cols-2 gap-6">
             <div>
@@ -181,7 +205,8 @@ export default function SystemSettings() {
             <p className="text-xs text-gray-400 mt-1">超過此天數的對話紀錄會由每日排程自動清除，預設 3 天。</p>
           </div>
         </div>
-      </CollapsibleSection>
+        )}
+      </div>
     </div>
   );
 }

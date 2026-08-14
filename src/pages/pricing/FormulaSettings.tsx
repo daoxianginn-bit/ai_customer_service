@@ -105,7 +105,7 @@ export default function FormulaSettings() {
   if (loading) return <div className="p-8 text-center text-gray-500">載入中...</div>;
 
   return (
-    <div className="max-w-4xl mx-auto space-y-4">
+    <div className="max-w-6xl mx-auto space-y-4">
       <PageHeader
         icon={<SlidersHorizontal className="w-6 h-6 text-green-600" />}
         title="計價公式設定"
@@ -117,32 +117,53 @@ export default function FormulaSettings() {
         }
       />
 
-      <div className="bg-white rounded-xl shadow-sm border overflow-hidden">
-        <div className="p-6 border-b space-y-3">
-          <p className="text-sm font-medium text-gray-700">基礎公式</p>
-          <div className="flex flex-wrap gap-4">
-            <div>
-              <label className="block text-xs text-gray-500 mb-1">每床基礎價</label>
-              <input type="number" value={bedBaseRate} onChange={(e) => setBedBaseRate(Number(e.target.value))} className="w-28 px-3 py-2 border rounded-lg" />
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-start">
+        <div className="bg-white rounded-xl shadow-sm border overflow-hidden">
+          <div className="p-6 border-b space-y-3">
+            <p className="text-sm font-medium text-gray-700">基礎公式</p>
+            <div className="flex flex-wrap gap-4">
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">每床基礎價</label>
+                <input type="number" value={bedBaseRate} onChange={(e) => setBedBaseRate(Number(e.target.value))} className="w-28 px-3 py-2 border rounded-lg" />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-500 mb-1 flex items-center gap-1">
+                  滿載獎勵
+                  <InfoTooltip>人數剛好等於標準房型的床位數（沒有空床）才加這筆獎勵金，例如 4 人剛好住滿 4 床的房型組合。人數是奇數時一定會有 1 床空著，不會拿到這筆獎勵。</InfoTooltip>
+                </label>
+                <input type="number" value={fullOccupancyBonus} onChange={(e) => setFullOccupancyBonus(Number(e.target.value))} className="w-28 px-3 py-2 border rounded-lg" />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-500 mb-1 flex items-center gap-1">
+                  最少接待人數
+                  <InfoTooltip>低於這個人數，LINE 對話流程不會自動報價，會請客人改由真人客服處理。</InfoTooltip>
+                </label>
+                <input type="number" min={1} value={minGroupHeadcount} onChange={(e) => setMinGroupHeadcount(Number(e.target.value))} className="w-24 px-3 py-2 border rounded-lg" />
+              </div>
             </div>
-            <div>
-              <label className="block text-xs text-gray-500 mb-1 flex items-center gap-1">
-                滿載獎勵
-                <InfoTooltip>人數剛好等於標準房型的床位數（沒有空床）才加這筆獎勵金，例如 4 人剛好住滿 4 床的房型組合。人數是奇數時一定會有 1 床空著，不會拿到這筆獎勵。</InfoTooltip>
-              </label>
-              <input type="number" value={fullOccupancyBonus} onChange={(e) => setFullOccupancyBonus(Number(e.target.value))} className="w-28 px-3 py-2 border rounded-lg" />
+          </div>
+
+          <div className="p-6">
+            <p className="text-sm font-medium text-gray-700 mb-3">日期加價（平日 +0，不可調整）</p>
+            <div className="flex flex-wrap gap-4">
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">小假日 +</label>
+                <input type="number" value={dateSurchargeSmall} onChange={(e) => setDateSurchargeSmall(Number(e.target.value))} className="w-28 px-3 py-2 border rounded-lg" />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">連假 +</label>
+                <input type="number" value={dateSurchargeHoliday} onChange={(e) => setDateSurchargeHoliday(Number(e.target.value))} className="w-28 px-3 py-2 border rounded-lg" />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">旺季 +</label>
+                <input type="number" value={dateSurchargePeak} onChange={(e) => setDateSurchargePeak(Number(e.target.value))} className="w-28 px-3 py-2 border rounded-lg" />
+              </div>
             </div>
-            <div>
-              <label className="block text-xs text-gray-500 mb-1 flex items-center gap-1">
-                最少接待人數
-                <InfoTooltip>低於這個人數，LINE 對話流程不會自動報價，會請客人改由真人客服處理。</InfoTooltip>
-              </label>
-              <input type="number" min={1} value={minGroupHeadcount} onChange={(e) => setMinGroupHeadcount(Number(e.target.value))} className="w-24 px-3 py-2 border rounded-lg" />
-            </div>
+            <p className="text-xs text-gray-400 mt-3">旺季／連假的日期區間，請到「房況/行事曆」頁右上角「旺季/連假日期設定」調整。</p>
           </div>
         </div>
 
-        <div className="p-6 border-b space-y-3">
+        <div className="bg-white rounded-xl shadow-sm border p-6 space-y-3">
           <p className="text-sm font-medium text-gray-700 flex items-center gap-1">
             各容量加開房費
             <InfoTooltip>客人指定的房型組合跟系統算出的「標準房型」不同時，減少的房型間數先抵掉增加的房型間數（不分容量，1 間抵 1 間），抵完剩下的增加間數，才照這裡各自的費率收費加總。</InfoTooltip>
@@ -165,60 +186,41 @@ export default function FormulaSettings() {
             </div>
           )}
         </div>
+      </div>
 
-        <div className="p-6 border-b space-y-3">
-          <p className="text-sm font-medium text-gray-700">日期加價（平日 +0，不可調整）</p>
-          <div className="flex flex-wrap gap-4">
-            <div>
-              <label className="block text-xs text-gray-500 mb-1">小假日 +</label>
-              <input type="number" value={dateSurchargeSmall} onChange={(e) => setDateSurchargeSmall(Number(e.target.value))} className="w-28 px-3 py-2 border rounded-lg" />
-            </div>
-            <div>
-              <label className="block text-xs text-gray-500 mb-1">連假 +</label>
-              <input type="number" value={dateSurchargeHoliday} onChange={(e) => setDateSurchargeHoliday(Number(e.target.value))} className="w-28 px-3 py-2 border rounded-lg" />
-            </div>
-            <div>
-              <label className="block text-xs text-gray-500 mb-1">旺季 +</label>
-              <input type="number" value={dateSurchargePeak} onChange={(e) => setDateSurchargePeak(Number(e.target.value))} className="w-28 px-3 py-2 border rounded-lg" />
-            </div>
-          </div>
-          <p className="text-xs text-gray-400">旺季／連假的日期區間，請到「旺季/連假日期」設定。</p>
-        </div>
-
-        <div className="p-6">
-          <p className="text-sm font-medium text-gray-700 mb-1">房型押金</p>
-          <p className="text-xs text-gray-500 mb-3">開了哪幾間房，押金就是那幾間房押金的加總。</p>
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-sm">
-              <thead className="bg-gray-50 border-b">
-                <tr className="text-gray-600">
-                  <th className="py-2 px-3">房型</th>
-                  <th className="py-2 px-3">押金</th>
+      <div className="bg-white rounded-xl shadow-sm border p-6">
+        <p className="text-sm font-medium text-gray-700 mb-1">房型押金</p>
+        <p className="text-xs text-gray-500 mb-3">開了哪幾間房，押金就是那幾間房押金的加總。</p>
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-sm">
+            <thead className="bg-gray-50 border-b">
+              <tr className="text-gray-600">
+                <th className="py-2 px-3">房型</th>
+                <th className="py-2 px-3">押金</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100">
+              {roomTypes.map((r) => (
+                <tr key={r.id}>
+                  <td className="py-2 px-3 font-medium">{r.floor ? `${r.floor}-` : ''}{r.name}（{r.capacity}人）</td>
+                  <td className="p-2">
+                    <input
+                      type="number"
+                      min={0}
+                      value={r.security_deposit ?? 0}
+                      onChange={(e) => updateRoomType(r.id, 'security_deposit', Number(e.target.value))}
+                      className="w-28 px-2 py-1 border rounded"
+                    />
+                  </td>
                 </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100">
-                {roomTypes.map((r) => (
-                  <tr key={r.id}>
-                    <td className="py-2 px-3 font-medium">{r.floor ? `${r.floor}-` : ''}{r.name}（{r.capacity}人）</td>
-                    <td className="p-2">
-                      <input
-                        type="number"
-                        min={0}
-                        value={r.security_deposit ?? 0}
-                        onChange={(e) => updateRoomType(r.id, 'security_deposit', Number(e.target.value))}
-                        className="w-28 px-2 py-1 border rounded"
-                      />
-                    </td>
-                  </tr>
-                ))}
-                {roomTypes.length === 0 && (
-                  <tr>
-                    <td colSpan={2} className="py-6 text-center text-gray-400">尚未設定任何「房間」類型的資料，請先到「房型與空間維護」新增</td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
+              ))}
+              {roomTypes.length === 0 && (
+                <tr>
+                  <td colSpan={2} className="py-6 text-center text-gray-400">尚未設定任何「房間」類型的資料，請先到「房型與空間維護」新增</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
         </div>
       </div>
     </div>

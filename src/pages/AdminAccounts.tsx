@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import { UserPlus, Trash2, Users } from 'lucide-react';
-import { PageHeader, Button, EmptyState, ConfirmDialog } from '../components/ui';
+import { PageHeader, Button, EmptyState, ConfirmDialog, Modal } from '../components/ui';
 
 type Admin = {
   id: string;
@@ -38,6 +38,7 @@ export default function AdminAccounts() {
   const [settingsId, setSettingsId] = useState<string | null>(null);
   const [primaryAdminId, setPrimaryAdminId] = useState<string | null>(null);
   const [claiming, setClaiming] = useState(false);
+  const [showInvite, setShowInvite] = useState(false);
 
   useEffect(() => {
     fetchAdmins();
@@ -86,6 +87,7 @@ export default function AdminAccounts() {
       await callFn('invite-admin', { method: 'POST', body: JSON.stringify({ email: email.trim() }) });
       alert('邀請信已寄出！');
       setEmail('');
+      setShowInvite(false);
       fetchAdmins();
     } catch (err: any) {
       alert(`邀請失敗：${err.message}`);
@@ -110,7 +112,12 @@ export default function AdminAccounts() {
 
   return (
     <div className="max-w-4xl mx-auto space-y-6 pb-20">
-      <PageHeader icon={<Users className="w-6 h-6 text-green-600" />} title="帳號管理" description="邀請其他管理員登入後台，或移除不再需要的帳號" />
+      <PageHeader
+        icon={<Users className="w-6 h-6 text-green-600" />}
+        title="帳號管理"
+        description="邀請其他管理員登入後台，或移除不再需要的帳號"
+        action={<Button onClick={() => setShowInvite(true)} icon={<UserPlus className="w-4 h-4" />}>邀請新管理員</Button>}
+      />
 
       {!primaryAdminId && (
         <div className="bg-amber-50 border border-amber-200 text-amber-800 text-sm px-4 py-3 rounded-xl flex items-center justify-between gap-3">
@@ -118,23 +125,6 @@ export default function AdminAccounts() {
           <Button onClick={claimPrimary} loading={claiming}>{claiming ? '設定中...' : '將我設為主帳號'}</Button>
         </div>
       )}
-
-      <div className="bg-white p-6 rounded-xl shadow-sm border space-y-3">
-        <h3 className="font-bold text-gray-800">邀請新管理員</h3>
-        <div className="flex gap-2">
-          <input
-            type="email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            placeholder="colleague@example.com"
-            className="flex-1 px-4 py-2 border rounded-lg"
-          />
-          <Button onClick={handleInvite} loading={inviting} icon={<UserPlus className="w-4 h-4" />}>
-            {inviting ? '寄送中...' : '寄送邀請'}
-          </Button>
-        </div>
-        <p className="text-xs text-gray-400">對方會收到 Supabase 寄出的邀請信，點擊連結設定密碼後即可登入。</p>
-      </div>
 
       <div className="bg-white rounded-xl shadow-sm border overflow-hidden">
         <div className="overflow-x-auto">
@@ -194,6 +184,30 @@ export default function AdminAccounts() {
         onConfirm={confirmDelete}
         onCancel={() => setDeleteTarget(null)}
       />
+
+      <Modal
+        open={showInvite}
+        title="邀請新管理員"
+        onClose={() => setShowInvite(false)}
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setShowInvite(false)}>取消</Button>
+            <Button onClick={handleInvite} loading={inviting} icon={<UserPlus className="w-4 h-4" />}>{inviting ? '寄送中...' : '寄送邀請'}</Button>
+          </>
+        }
+      >
+        <div>
+          <label className="block text-xs text-gray-500 mb-1">Email</label>
+          <input
+            type="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            placeholder="colleague@example.com"
+            className="w-full px-4 py-2 border rounded-lg"
+          />
+        </div>
+        <p className="text-xs text-gray-400">對方會收到 Supabase 寄出的邀請信，點擊連結設定密碼後即可登入。</p>
+      </Modal>
     </div>
   );
 }

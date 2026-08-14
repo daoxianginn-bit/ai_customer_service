@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { supabase } from '../lib/supabase';
-import { ClipboardList, Search, RotateCcw, Save, Plus, Trash2, AlertCircle, Shirt, RefreshCw } from 'lucide-react';
+import { ClipboardList, Search, RotateCcw, Save, Plus, Trash2, AlertCircle, Shirt, RefreshCw, CalendarDays, ListFilter, DoorOpen, ArrowRight } from 'lucide-react';
 import { PageHeader, Button, Modal, StatusBadge, EmptyState, ConfirmDialog } from '../components/ui';
-import { BOOKING_STATUS_OPTIONS, SYSTEM_ONLY_STATUS, REQUIRES_REMIT_LAST5_STATUS } from '../lib/bookingStatus';
+import { BOOKING_STATUS_OPTIONS, SYSTEM_ONLY_STATUS, REQUIRES_REMIT_LAST5_STATUS, FLOW_STEP_STATUSES, flowStepIndex, bookingStatusLabel } from '../lib/bookingStatus';
 import { computeOrderAmounts } from '../lib/messageVariables';
 import { generateOrderNumber } from '../lib/orderNumber';
 import {
@@ -60,6 +60,103 @@ function StatusHelpIcon() {
   );
 }
 
+const EXCEPTION_STATUS_STYLE: Record<string, string> = {
+  awaiting_refund: 'border-red-200 bg-red-50 text-red-700',
+  refunded: 'border-gray-200 bg-gray-100 text-gray-600',
+  cancelled: 'border-red-100 bg-red-50/60 text-red-500',
+  pending_manual_conflict: 'border-amber-200 bg-amber-50 text-amber-700',
+};
+
+// 訂單流程狀態進度列：上排是正常 6 步流程（點了篩選表格），下排是例外/其他流程。
+function FlowStatusBar({
+  counts,
+  activeStatus,
+  onSelectStatus,
+}: {
+  counts: Record<string, number>;
+  activeStatus: string;
+  onSelectStatus: (status: string) => void;
+}) {
+  const exceptionPill = (statusValue: string, label: string) => {
+    const active = activeStatus === statusValue;
+    return (
+      <button
+        onClick={() => onSelectStatus(statusValue)}
+        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium transition-colors ${
+          active ? 'ring-2 ring-offset-1 ring-red-300' : ''
+        } ${EXCEPTION_STATUS_STYLE[statusValue] || 'border-gray-200 bg-gray-50 text-gray-600'}`}
+      >
+        {label}
+        <span className="font-bold">{counts[statusValue] || 0}</span>
+      </button>
+    );
+  };
+
+  return (
+    <div className="bg-white rounded-xl shadow-sm border p-5 space-y-4">
+      <p className="text-xs font-medium text-gray-500 flex items-center gap-1">訂單流程狀態 <StatusHelpIcon /></p>
+      <div className="flex flex-wrap items-center gap-1">
+        {FLOW_STEP_STATUSES.map((s, i) => {
+          const active = activeStatus === s;
+          return (
+            <div key={s} className="flex items-center">
+              <button
+                onClick={() => onSelectStatus(s)}
+                className={`flex flex-col items-center gap-1 px-4 py-2 rounded-lg border transition-colors min-w-[84px] ${
+                  active ? 'border-green-500 bg-green-50' : 'border-gray-200 hover:bg-gray-50'
+                }`}
+              >
+                <span className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold ${active ? 'bg-green-600 text-white' : 'bg-gray-100 text-gray-500'}`}>
+                  {i + 1}
+                </span>
+                <span className="text-xs text-gray-600 whitespace-nowrap">{bookingStatusLabel(s)}</span>
+                <span className="text-sm font-bold text-gray-800">{counts[s] || 0}</span>
+              </button>
+              {i < FLOW_STEP_STATUSES.length - 1 && <ArrowRight className="w-4 h-4 text-gray-300 mx-1 shrink-0" />}
+            </div>
+          );
+        })}
+      </div>
+      <div className="pt-3 border-t">
+        <p className="text-xs text-gray-400 mb-2">例外／其他流程</p>
+        <div className="flex flex-wrap gap-3 items-center">
+          <div className="flex items-center gap-1.5">
+            {exceptionPill('awaiting_refund', bookingStatusLabel('awaiting_refund'))}
+            <ArrowRight className="w-3.5 h-3.5 text-gray-300" />
+            {exceptionPill('refunded', bookingStatusLabel('refunded'))}
+          </div>
+          {exceptionPill('cancelled', bookingStatusLabel('cancelled'))}
+          {exceptionPill(SYSTEM_ONLY_STATUS.value, SYSTEM_ONLY_STATUS.label)}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// 每筆訂單在表格裡的「流程位置」小圖示：正常流程顯示 1~6 小圓圈鏈，例外狀態顯示標籤取代。
+function FlowPositionCell({ status }: { status: string }) {
+  const idx = flowStepIndex(status);
+  if (idx == null) {
+    return <span className="text-[11px] px-2 py-0.5 rounded-full border whitespace-nowrap bg-amber-50 text-amber-700 border-amber-200">例外流程</span>;
+  }
+  return (
+    <div className="flex items-center">
+      {FLOW_STEP_STATUSES.map((_, i) => (
+        <span key={i} className="flex items-center">
+          <span
+            className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0 ${
+              i + 1 === idx ? 'bg-green-600 text-white' : i + 1 < idx ? 'bg-green-100 text-green-600' : 'bg-gray-100 text-gray-400'
+            }`}
+          >
+            {i + 1}
+          </span>
+          {i < FLOW_STEP_STATUSES.length - 1 && <span className={`w-2 h-px shrink-0 ${i + 1 < idx ? 'bg-green-300' : 'bg-gray-200'}`} />}
+        </span>
+      ))}
+    </div>
+  );
+}
+
 export default function OrderManagement() {
   const [keyword, setKeyword] = useState('');
   const [startDate, setStartDate] = useState('');
@@ -72,6 +169,7 @@ export default function OrderManagement() {
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(0);
   const [hasMore, setHasMore] = useState(false);
+  const [statusCounts, setStatusCounts] = useState<Record<string, number>>({});
 
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -99,8 +197,23 @@ export default function OrderManagement() {
     fetchRoomTypeOptions();
     fetchLinenSetup();
     fetchMoneyDefaults();
+    fetchStatusCounts();
     runQuery(0);
   }, []);
+
+  // 「訂單流程狀態」進度列的即時筆數：輕量查詢（只抓 status 欄位），前端算每個狀態幾筆。
+  const fetchStatusCounts = async () => {
+    const { data } = await supabase.from('bookings').select('status');
+    const counts: Record<string, number> = {};
+    for (const row of data || []) counts[row.status] = (counts[row.status] || 0) + 1;
+    setStatusCounts(counts);
+  };
+
+  // 點流程列的某個步驟：切換篩選列的「訂單狀態」並重新查詢，再點一次同一個步驟會清掉篩選。
+  const selectStatusFilter = (statusValue: string) => {
+    setStatus((prev) => (prev === statusValue ? '' : statusValue));
+    setTimeout(() => runQuery(0), 0);
+  };
 
   // 換房間或改換洗次數才重算；已手動調整過的品項由 mergeUsage 保留。
   // 日期不在依賴裡：換洗次數改由使用者自己填，晚數只是給他參考的提示。
@@ -337,6 +450,7 @@ export default function OrderManagement() {
 
       setShowForm(false);
       runQuery(page);
+      fetchStatusCounts();
     } catch (err: any) {
       setFormError(`儲存失敗：${err.message}`);
     } finally {
@@ -370,6 +484,7 @@ export default function OrderManagement() {
       if (error) throw error;
       setDeleteTarget(null);
       runQuery(page);
+      fetchStatusCounts();
     } catch (err: any) {
       alert(`刪除失敗：${err.message}`);
     } finally {
@@ -390,36 +505,40 @@ export default function OrderManagement() {
         action={<Button onClick={openNew} icon={<Plus className="w-4 h-4" />}>新增訂單</Button>}
       />
 
-      <div className="bg-white p-4 rounded-xl shadow-sm border space-y-3">
-        <div className="flex flex-wrap gap-3 items-end">
-          <div className="flex-1 min-w-[200px]">
-            <label className="block text-xs text-gray-500 mb-1">關鍵字搜尋</label>
+      <FlowStatusBar counts={statusCounts} activeStatus={status} onSelectStatus={selectStatusFilter} />
+
+      <div className="bg-white p-5 rounded-xl shadow-sm border space-y-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3">
+          <div className="lg:col-span-2">
+            <label className="flex items-center gap-1 text-xs text-gray-500 mb-1"><Search className="w-3.5 h-3.5" />關鍵字搜尋</label>
             <input value={keyword} onChange={(e) => setKeyword(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && runQuery(0)} placeholder="搜尋姓名、電話或訂單編號" className="w-full px-3 py-2 border rounded-lg text-sm" />
           </div>
           <div>
-            <label className="block text-xs text-gray-500 mb-1">入住日期（起）</label>
-            <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="px-3 py-2 border rounded-lg text-sm" />
+            <label className="flex items-center gap-1 text-xs text-gray-500 mb-1"><CalendarDays className="w-3.5 h-3.5" />入住日期（起）</label>
+            <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm" />
           </div>
           <div>
-            <label className="block text-xs text-gray-500 mb-1">入住日期（迄）</label>
-            <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} className="px-3 py-2 border rounded-lg text-sm" />
+            <label className="flex items-center gap-1 text-xs text-gray-500 mb-1"><CalendarDays className="w-3.5 h-3.5" />入住日期（迄）</label>
+            <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm" />
           </div>
           <div>
-            <label className="block text-xs text-gray-500 mb-1">訂單狀態</label>
-            <select value={status} onChange={(e) => setStatus(e.target.value)} className="px-3 py-2 border rounded-lg text-sm bg-white">
+            <label className="flex items-center gap-1 text-xs text-gray-500 mb-1"><ListFilter className="w-3.5 h-3.5" />訂單狀態</label>
+            <select value={status} onChange={(e) => setStatus(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm bg-white">
               {FILTER_STATUS_OPTIONS.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
             </select>
           </div>
           <div>
-            <label className="block text-xs text-gray-500 mb-1">房型</label>
-            <select value={roomType} onChange={(e) => setRoomType(e.target.value)} className="px-3 py-2 border rounded-lg text-sm bg-white">
+            <label className="flex items-center gap-1 text-xs text-gray-500 mb-1"><DoorOpen className="w-3.5 h-3.5" />房型</label>
+            <select value={roomType} onChange={(e) => setRoomType(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm bg-white">
               <option value="">全部房型</option>
               <option value="包棟">包棟</option>
               {roomTypeOptions.map((r) => (<option key={r} value={r}>{r}</option>))}
             </select>
           </div>
-          <Button onClick={() => runQuery(0)} loading={loading} icon={<Search className="w-4 h-4" />}>查詢</Button>
+        </div>
+        <div className="flex justify-end gap-2">
           <Button variant="secondary" onClick={clearFilters} icon={<RotateCcw className="w-4 h-4" />}>清除條件</Button>
+          <Button onClick={() => runQuery(0)} loading={loading} icon={<Search className="w-4 h-4" />}>查詢</Button>
         </div>
       </div>
 
@@ -437,14 +556,15 @@ export default function OrderManagement() {
                 <th className="py-3 px-4">總報價</th>
                 <th className="py-3 px-4">尾款</th>
                 <th className="py-3 px-4">狀態</th>
+                <th className="py-3 px-4">流程位置</th>
                 <th className="py-3 px-4"></th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
               {loading ? (
-                <tr><td colSpan={10} className="py-10 text-center text-gray-400">載入中...</td></tr>
+                <tr><td colSpan={11} className="py-10 text-center text-gray-400">載入中...</td></tr>
               ) : rows.length === 0 ? (
-                <tr><td colSpan={10}><EmptyState icon={<ClipboardList className="w-12 h-12 text-gray-200" />} message="查無符合條件的訂單" /></td></tr>
+                <tr><td colSpan={11}><EmptyState icon={<ClipboardList className="w-12 h-12 text-gray-200" />} message="查無符合條件的訂單" /></td></tr>
               ) : (
                 rows.map((row) => (
                   <tr key={row.id} onClick={() => openEdit(row)} className="hover:bg-green-50 transition-colors cursor-pointer">
@@ -457,6 +577,7 @@ export default function OrderManagement() {
                     <td className="py-3 px-4 whitespace-nowrap">{row.total_amount != null ? `NT$ ${Number(row.total_amount).toLocaleString()}` : '-'}</td>
                     <td className="py-3 px-4 whitespace-nowrap">{balanceDue(row) != null ? `NT$ ${Number(balanceDue(row)).toLocaleString()}` : '-'}</td>
                     <td className="py-3 px-4"><StatusBadge status={row.status} /></td>
+                    <td className="py-3 px-4"><FlowPositionCell status={row.status} /></td>
                     <td className="py-3 px-4 text-right">
                       <button onClick={(e) => { e.stopPropagation(); setDeleteTarget(row); }} className="p-1.5 text-red-500 hover:bg-red-50 rounded" title="刪除">
                         <Trash2 className="w-4 h-4" />

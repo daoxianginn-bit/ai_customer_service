@@ -238,44 +238,46 @@ export default function ScheduledTasks() {
         排程時間每 15 分鐘檢查一次，不是精準到秒——設定「09:00」代表系統會在 09:00 到 09:15 之間的某個時間點執行。
       </p>
 
-      <div className="bg-white rounded-xl shadow-sm border overflow-hidden">
-        {rows.length === 0 ? (
+      {rows.length === 0 ? (
+        <div className="bg-white rounded-xl shadow-sm border overflow-hidden">
           <EmptyState icon={<Clock className="w-12 h-12 text-gray-200" />} message="還沒有任何排程，點右上角「新增排程」開始" />
-        ) : (
-          <div className="divide-y divide-gray-100">
-            {rows.map((row) => (
-              <div key={row.id} className="p-5 flex flex-wrap items-start justify-between gap-4">
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <p className="font-medium text-gray-800">{row.name}</p>
-                    <span className="text-xs bg-gray-100 text-gray-600 rounded-full px-2 py-0.5">{taskTypeLabel(row.task_type)}</span>
-                  </div>
-                  <p className="text-xs text-gray-500 mt-1">
-                    {describeSchedule({ recurrence: row.recurrence, runAtTime: row.run_at_time, runAtDate: row.run_at_date, weekday: row.weekday, dayOfMonth: row.day_of_month })}
-                    {row.is_active && row.next_run_at && <span className="text-gray-400"> · 下次執行約 {formatDateTime(row.next_run_at)}</span>}
-                  </p>
-                  {row.last_run_at && (
-                    <p className="flex items-center gap-1.5 text-xs mt-2">
-                      {row.last_run_status === 'success' ? (
-                        <CheckCircle2 className="w-3.5 h-3.5 text-green-600 shrink-0" />
-                      ) : (
-                        <XCircle className="w-3.5 h-3.5 text-red-500 shrink-0" />
-                      )}
-                      <span className="text-gray-400">上次執行 {formatDateTime(row.last_run_at)}：</span>
-                      <span className="text-gray-600">{row.last_run_summary}</span>
-                    </p>
-                  )}
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          {rows.map((row) => (
+            <div key={row.id} className="bg-white rounded-xl shadow-sm border p-5 flex flex-col gap-3">
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <p className="font-medium text-gray-800 truncate">{row.name}</p>
+                  <span className="inline-block mt-1 text-xs bg-gray-100 text-gray-600 rounded-full px-2 py-0.5">{taskTypeLabel(row.task_type)}</span>
                 </div>
-                <div className="flex items-center gap-2 shrink-0">
-                  <Switch checked={row.is_active} onChange={() => toggleActive(row)} title={row.is_active ? '啟用中' : '已停用'} />
-                  <button onClick={() => openEdit(row)} className="p-2 hover:bg-gray-100 rounded-lg" title="編輯"><Pencil className="w-4 h-4 text-gray-500" /></button>
-                  <button onClick={() => setDeleteTarget(row)} className="p-2 hover:bg-red-50 rounded-lg" title="刪除"><Trash2 className="w-4 h-4 text-red-500" /></button>
-                </div>
+                <Switch checked={row.is_active} onChange={() => toggleActive(row)} title={row.is_active ? '啟用中' : '已停用'} />
               </div>
-            ))}
-          </div>
-        )}
-      </div>
+              <p className="text-xs text-gray-500">
+                {describeSchedule({ recurrence: row.recurrence, runAtTime: row.run_at_time, runAtDate: row.run_at_date, weekday: row.weekday, dayOfMonth: row.day_of_month })}
+                {row.is_active && row.next_run_at && <span className="text-gray-400 block mt-0.5">下次執行約 {formatDateTime(row.next_run_at)}</span>}
+              </p>
+              {row.last_run_at && (
+                <p className="flex items-start gap-1.5 text-xs">
+                  {row.last_run_status === 'success' ? (
+                    <CheckCircle2 className="w-3.5 h-3.5 text-green-600 shrink-0 mt-0.5" />
+                  ) : (
+                    <XCircle className="w-3.5 h-3.5 text-red-500 shrink-0 mt-0.5" />
+                  )}
+                  <span>
+                    <span className="text-gray-400">上次執行 {formatDateTime(row.last_run_at)}：</span>
+                    <span className="text-gray-600">{row.last_run_summary}</span>
+                  </span>
+                </p>
+              )}
+              <div className="flex items-center gap-2 pt-1 mt-auto border-t">
+                <button onClick={() => openEdit(row)} className="flex items-center gap-1 text-xs text-gray-600 hover:bg-gray-100 rounded-lg px-2 py-1.5 mt-1"><Pencil className="w-3.5 h-3.5" />編輯</button>
+                <button onClick={() => setDeleteTarget(row)} className="flex items-center gap-1 text-xs text-red-500 hover:bg-red-50 rounded-lg px-2 py-1.5 mt-1"><Trash2 className="w-3.5 h-3.5" />刪除</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
 
       <Modal
         open={showForm}

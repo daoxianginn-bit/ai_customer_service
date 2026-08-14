@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase';
-import { Plus, Trash2, Pencil, FileText, File as FileIcon, X, ClipboardList } from 'lucide-react';
-import { PageHeader, Button, EmptyState, Switch, ConfirmDialog } from '../components/ui';
+import { Plus, Trash2, Pencil, FileText, File as FileIcon, ClipboardList } from 'lucide-react';
+import { PageHeader, Button, EmptyState, Switch, ConfirmDialog, Modal } from '../components/ui';
 
 type KbItem = {
   id: string;
@@ -147,50 +147,6 @@ export default function KnowledgeBase() {
         action={<Button onClick={openNewForm} icon={<Plus className="w-4 h-4" />}>新增資料</Button>}
       />
 
-      {showForm && (
-        <div className="bg-white p-6 rounded-xl shadow-sm border space-y-4">
-          <div className="flex justify-between items-center">
-            <h3 className="font-bold text-gray-800">{form.id ? '編輯資料' : '新增資料'}</h3>
-            <button onClick={() => setShowForm(false)} className="p-1 hover:bg-gray-100 rounded"><X className="w-5 h-5 text-gray-400" /></button>
-          </div>
-
-          <div className="flex gap-3">
-            <button onClick={() => setForm({ ...form, type: 'text' })} disabled={!!form.id} className={`flex-1 p-3 rounded-lg border-2 flex items-center justify-center gap-2 disabled:opacity-50 ${form.type === 'text' ? 'border-green-500 bg-green-50' : 'border-gray-200'}`}>
-              <FileText className="w-4 h-4" /> 文字內容
-            </button>
-            <button onClick={() => setForm({ ...form, type: 'file' })} disabled={!!form.id} className={`flex-1 p-3 rounded-lg border-2 flex items-center justify-center gap-2 disabled:opacity-50 ${form.type === 'file' ? 'border-green-500 bg-green-50' : 'border-gray-200'}`}>
-              <FileIcon className="w-4 h-4" /> 檔案 (PDF/TXT)
-            </button>
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">標題</label>
-            <input type="text" value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} className="w-full px-4 py-2 border rounded-lg" placeholder="例如：常見問題、退換貨政策" />
-          </div>
-
-          {form.type === 'text' ? (
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">內容</label>
-              <textarea value={form.content} onChange={(e) => setForm({ ...form, content: e.target.value })} rows={5} className="w-full px-4 py-2 border rounded-lg" />
-            </div>
-          ) : (
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">上傳檔案</label>
-              <div className="relative border-2 border-dashed border-gray-300 rounded-lg p-6 flex flex-col items-center justify-center text-gray-500 hover:border-green-400 hover:bg-green-50">
-                <input type="file" accept=".pdf,.txt" onChange={handleFileUpload} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
-                <FileIcon className="w-8 h-8 mb-2" />
-                <p>{form.file_name ? `已選擇：${form.file_name}` : '點擊或拖曳上傳'}</p>
-              </div>
-            </div>
-          )}
-
-          <div className="flex justify-end gap-2 pt-2">
-            <Button variant="secondary" onClick={() => setShowForm(false)}>取消</Button>
-            <Button onClick={handleSubmit} loading={saving}>{saving ? '儲存中...' : '儲存'}</Button>
-          </div>
-        </div>
-      )}
-
       <div className="bg-white rounded-xl shadow-sm border overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-left">
@@ -241,6 +197,48 @@ export default function KnowledgeBase() {
         onConfirm={confirmDelete}
         onCancel={() => setDeleteTarget(null)}
       />
+
+      <Modal
+        open={showForm}
+        title={form.id ? '編輯資料' : '新增資料'}
+        onClose={() => setShowForm(false)}
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setShowForm(false)}>取消</Button>
+            <Button onClick={handleSubmit} loading={saving}>{saving ? '儲存中...' : '儲存'}</Button>
+          </>
+        }
+      >
+        <div className="flex gap-3">
+          <button onClick={() => setForm({ ...form, type: 'text' })} disabled={!!form.id} className={`flex-1 p-3 rounded-lg border-2 flex items-center justify-center gap-2 disabled:opacity-50 ${form.type === 'text' ? 'border-green-500 bg-green-50' : 'border-gray-200'}`}>
+            <FileText className="w-4 h-4" /> 文字內容
+          </button>
+          <button onClick={() => setForm({ ...form, type: 'file' })} disabled={!!form.id} className={`flex-1 p-3 rounded-lg border-2 flex items-center justify-center gap-2 disabled:opacity-50 ${form.type === 'file' ? 'border-green-500 bg-green-50' : 'border-gray-200'}`}>
+            <FileIcon className="w-4 h-4" /> 檔案 (PDF/TXT)
+          </button>
+        </div>
+
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">標題</label>
+          <input type="text" value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} className="w-full px-4 py-2 border rounded-lg" placeholder="例如：常見問題、退換貨政策" />
+        </div>
+
+        {form.type === 'text' ? (
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">內容</label>
+            <textarea value={form.content} onChange={(e) => setForm({ ...form, content: e.target.value })} rows={5} className="w-full px-4 py-2 border rounded-lg" />
+          </div>
+        ) : (
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">上傳檔案</label>
+            <div className="relative border-2 border-dashed border-gray-300 rounded-lg p-6 flex flex-col items-center justify-center text-gray-500 hover:border-green-400 hover:bg-green-50">
+              <input type="file" accept=".pdf,.txt" onChange={handleFileUpload} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
+              <FileIcon className="w-8 h-8 mb-2" />
+              <p>{form.file_name ? `已選擇：${form.file_name}` : '點擊或拖曳上傳'}</p>
+            </div>
+          </div>
+        )}
+      </Modal>
     </div>
   );
 }

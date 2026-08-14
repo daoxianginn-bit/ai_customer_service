@@ -54,3 +54,12 @@ export const DEPOSIT_OR_LATER_STATUSES = ['reserved', 'awaiting_balance', 'confi
 
 // 選這個狀態時，「訂單管理」表單會要求填寫匯款末5碼才能儲存（前端表單驗證，不是資料庫層級限制）。
 export const REQUIRES_REMIT_LAST5_STATUS = 'reserved';
+
+// 訂單管理頁「訂單流程狀態」進度列用的 6 步驟正常流程，依序前進；待退款/已退款/已取消/待人工確認
+// 是例外流程，不在這個序列裡（flowStepIndex 對它們回傳 null）。
+export const FLOW_STEP_STATUSES = ['inquiring', 'quoted', 'awaiting_deposit', 'reserved', 'awaiting_balance', 'confirmed'];
+
+export function flowStepIndex(status?: string | null): number | null {
+  const idx = FLOW_STEP_STATUSES.indexOf(status || '');
+  return idx === -1 ? null : idx + 1;
+}

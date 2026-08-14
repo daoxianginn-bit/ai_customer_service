@@ -1,22 +1,36 @@
-import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { useEffect, useMemo, useState } from 'react';
+import { Calendar, dateFnsLocalizer, Views } from 'react-big-calendar';
+import { format, parse, startOfWeek, getDay } from 'date-fns';
+import { zhTW } from 'date-fns/locale';
+import 'react-big-calendar/lib/css/react-big-calendar.css';
+import './RoomCalendar.css';
 import { supabase } from '../lib/supabase';
-import { CalendarDays, ChevronLeft, ChevronRight, ArrowRight } from 'lucide-react';
+import { CalendarDays, ChevronLeft, ChevronRight, SlidersHorizontal } from 'lucide-react';
 import { PageHeader, Modal, StatusBadge } from '../components/ui';
 import { OCCUPYING_STATUSES, bookingStatusLabel } from '../lib/bookingStatus';
+import DateRangeSettingsModal from '../components/DateRangeSettingsModal';
 
-type CellInfo = { status: string; guestName: string; bookingId: string };
-
-// 行事曆用實心色塊呈現，跟 StatusBadge 的淺色徽章不同視覺語言，這裡單獨定義。
-const STATUS_COLOR: Record<string, string> = {
-  awaiting_deposit: 'bg-yellow-400',
-  reserved: 'bg-purple-500',
-  awaiting_balance: 'bg-orange-500',
-  confirmed: 'bg-green-500',
-  pending_manual_conflict: 'bg-red-500',
+// 行事曆事件用實心色塊呈現，跟 StatusBadge 的淺色徽章不同視覺語言，這裡單獨定義（十六進位色碼，
+// 直接當 inline style 用，不依賴 Tailwind class 疊在 react-big-calendar 自己的樣式表上時的載入順序）。
+const STATUS_HEX: Record<string, string> = {
+  awaiting_deposit: '#facc15',
+  reserved: '#a855f7',
+  awaiting_balance: '#f97316',
+  confirmed: '#22c55e',
+  pending_manual_conflict: '#ef4444',
 };
+const QUOTED_HEX = '#9ca3af'; // 已報價但尚未鎖定房型，顏色跟其他狀態區隔用灰色＋虛線框
 
 const CALENDAR_STATUSES = [...OCCUPYING_STATUSES]; // awaiting_deposit/reserved/awaiting_balance/confirmed/pending_manual_conflict
+
+const locales = { 'zh-TW': zhTW };
+const localizer = dateFnsLocalizer({
+  format,
+  parse,
+  startOfWeek: () => startOfWeek(new Date(), { locale: zhTW }),
+  getDay,
+  locales,
+});
 
 function pad(n: number): string {
   return String(n).padStart(2, '0');
@@ -26,32 +40,28 @@ function toIso(y: number, m: number, d: number): string {
   return `${y}-${pad(m + 1)}-${pad(d)}`;
 }
 
-function addDays(iso: string, days: number): string {
-  const d = new Date(`${iso}T00:00:00`);
-  d.setDate(d.getDate() + days);
-  return toIso(d.getFullYear(), d.getMonth(), d.getDate());
+interface BookingEvent {
+  id: string;
+  title: string;
+  start: Date;
+  end: Date;
+  allDay: true;
+  status: string;
+  quoted: boolean;
+  booking: any;
 }
 
-const WEEKDAY_LABELS = ['日', '一', '二', '三', '四', '五', '六'];
-
 export default function RoomCalendar() {
-  const today = new Date();
-  const [year, setYear] = useState(today.getFullYear());
-  const [month, setMonth] = useState(today.getMonth()); // 0-indexed
-
-  const [roomTypes, setRoomTypes] = useState<any[]>([]);
-  const [wholeHouseByDate, setWholeHouseByDate] = useState<Record<string, CellInfo>>({});
-  const [roomOccupancy, setRoomOccupancy] = useState<Record<string, Record<string, CellInfo>>>({});
-  const [unassignedPending, setUnassignedPending] = useState<any[]>([]);
-  const [monthBookings, setMonthBookings] = useState<any[]>([]); // 當月所有訂單原始資料，點日期查當天訂單用
+  const [calendarDate, setCalendarDate] = useState(new Date());
+  const [events, setEvents] = useState<BookingEvent[]>([]);
+  const [dateRanges, setDateRanges] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
 
-  // 點日期查當天訂單
-  const [selectedDay, setSelectedDay] = useState<string | null>(null);
+  const [selectedEvent, setSelectedEvent] = useState<BookingEvent | null>(null);
+  const [dateRangeModalOpen, setDateRangeModalOpen] = useState(false);
 
-  // 旺季／連假日期區間本身（新增/編輯/刪除/匯入）改到「價格設定 > 旺季/連假日期」頁管理，
-  // 這裡只唯讀抓來畫月曆上的小圓點徽章跟摘要。
-  const [dateRanges, setDateRanges] = useState<any[]>([]);
+  const year = calendarDate.getFullYear();
+  const month = calendarDate.getMonth();
 
   useEffect(() => {
     fetchMonthData();
@@ -61,15 +71,12 @@ export default function RoomCalendar() {
     fetchDateRanges();
   }, []);
 
-  const daysInMonth = new Date(year, month + 1, 0).getDate();
-  const monthStartIso = toIso(year, month, 1);
-  const monthEndIso = toIso(year, month, daysInMonth);
-
   const fetchMonthData = async () => {
     setLoading(true);
     try {
-      const { data: rt } = await supabase.from('room_types').select('*').eq('is_active', true).eq('type', '房間').order('display_order');
-      setRoomTypes(rt || []);
+      const daysInMonth = new Date(year, month + 1, 0).getDate();
+      const monthStartIso = toIso(year, month, 1);
+      const monthEndIso = toIso(year, month, daysInMonth);
 
       const { data: bookings } = await supabase
         .from('bookings')
@@ -78,47 +85,23 @@ export default function RoomCalendar() {
         .lte('checkin_date', monthEndIso)
         .gt('checkout_date', monthStartIso);
 
-      setMonthBookings(bookings || []);
-
-      const wholeHouseMap: Record<string, CellInfo> = {};
-      const pendingList: any[] = [];
-      const individualBookings = (bookings || []).filter((b: any) => !b.whole_house);
-
-      for (const b of bookings || []) {
-        if (!b.checkin_date || !b.checkout_date) continue;
-        const guestName = b.name || b.nickname || '未取得';
-        if (b.whole_house) {
-          let cursor = b.checkin_date > monthStartIso ? b.checkin_date : monthStartIso;
-          const end = b.checkout_date < addDays(monthEndIso, 1) ? b.checkout_date : addDays(monthEndIso, 1);
-          while (cursor < end) {
-            wholeHouseMap[cursor] = { status: b.status, guestName, bookingId: b.id };
-            cursor = addDays(cursor, 1);
-          }
-        } else if (b.status === 'quoted') {
-          pendingList.push(b);
-        }
-      }
-      setWholeHouseByDate(wholeHouseMap);
-      setUnassignedPending(pendingList);
-
-      const individualIds = individualBookings.map((b: any) => b.id);
-      const bookingById: Record<string, any> = Object.fromEntries((bookings || []).map((b: any) => [b.id, b]));
-      const occupancy: Record<string, Record<string, CellInfo>> = {};
-      if (individualIds.length) {
-        const { data: roomNights } = await supabase
-          .from('booking_room_nights')
-          .select('*')
-          .in('booking_id', individualIds)
-          .gte('night_date', monthStartIso)
-          .lte('night_date', monthEndIso);
-        for (const rn of roomNights || []) {
-          const b = bookingById[rn.booking_id];
-          if (!b) continue;
-          if (!occupancy[rn.room_type_id]) occupancy[rn.room_type_id] = {};
-          occupancy[rn.room_type_id][rn.night_date] = { status: b.status, guestName: b.name || b.nickname || '未取得', bookingId: b.id };
-        }
-      }
-      setRoomOccupancy(occupancy);
+      const nextEvents: BookingEvent[] = (bookings || [])
+        .filter((b: any) => b.checkin_date && b.checkout_date)
+        .map((b: any) => {
+          const guestName = b.name || b.nickname || '未取得';
+          const roomLabel = b.whole_house ? '包棟' : b.room_type_label || (b.status === 'quoted' ? '未指定房型' : '房型未定');
+          return {
+            id: b.id,
+            title: `${guestName}（${roomLabel}）`,
+            start: new Date(`${b.checkin_date}T00:00:00`),
+            end: new Date(`${b.checkout_date}T00:00:00`), // 退房日不算住宿夜，跟 react-big-calendar 多日事件「end 不含」的慣例一致
+            allDay: true,
+            status: b.status,
+            quoted: b.status === 'quoted',
+            booking: b,
+          };
+        });
+      setEvents(nextEvents);
     } finally {
       setLoading(false);
     }
@@ -132,30 +115,46 @@ export default function RoomCalendar() {
   // 這個日期落在哪個「旺季」或「連假」區間，回傳命中的那幾筆（可能同時有多筆重疊，例如手動加的跟匯入的重複）。
   const specialRangesForDate = (iso: string) => dateRanges.filter((d) => iso >= d.start_date && iso <= d.end_date);
 
-  const goPrevMonth = () => {
-    if (month === 0) { setYear((y) => y - 1); setMonth(11); } else setMonth((m) => m - 1);
-  };
-  const goNextMonth = () => {
-    if (month === 11) { setYear((y) => y + 1); setMonth(0); } else setMonth((m) => m + 1);
-  };
+  const dayPropGetter = useMemo(
+    () => (date: Date) => {
+      const iso = toIso(date.getFullYear(), date.getMonth(), date.getDate());
+      const special = specialRangesForDate(iso);
+      if (special.some((s) => s.range_type === '連假')) return { className: 'rbc-day-holiday' };
+      if (special.some((s) => s.range_type === '旺季')) return { className: 'rbc-day-peak' };
+      return {};
+    },
+    [dateRanges]
+  );
 
-  const days = Array.from({ length: daysInMonth }, (_, i) => i + 1);
+  const eventPropGetter = (event: BookingEvent) => ({
+    style: {
+      backgroundColor: event.quoted ? QUOTED_HEX : STATUS_HEX[event.status] || '#9ca3af',
+      color: '#fff',
+      border: event.quoted ? '1px dashed #fff' : 'none',
+      opacity: event.quoted ? 0.85 : 1,
+    },
+  });
 
-  const selectedDayBookings = selectedDay
-    ? monthBookings.filter((b) => b.checkin_date <= selectedDay && b.checkout_date > selectedDay)
-    : [];
+  const goPrevMonth = () => setCalendarDate(new Date(year, month - 1, 1));
+  const goNextMonth = () => setCalendarDate(new Date(year, month + 1, 1));
 
   return (
-    <div className="max-w-6xl mx-auto space-y-6">
+    <div className="max-w-6xl mx-auto space-y-4">
       <PageHeader
         icon={<CalendarDays className="w-6 h-6 text-green-600" />}
         title="房況/行事曆"
-        description="依房型檢視本月訂房狀況，顏色代表訂單狀態；日期上方的小標籤代表旺季/連假。點日期數字可以查當天有哪些訂單。"
+        description="每個色塊是一筆訂單（房客／房型），顏色代表訂單狀態；淺橘／淺紅底色代表旺季／連假。點色塊可以查看該筆訂單詳情。"
         action={
           <div className="flex items-center gap-2">
             <button onClick={goPrevMonth} className="p-2 border rounded-lg hover:bg-gray-50"><ChevronLeft className="w-4 h-4" /></button>
             <span className="font-semibold text-gray-700 w-24 text-center">{year}年{month + 1}月</span>
             <button onClick={goNextMonth} className="p-2 border rounded-lg hover:bg-gray-50"><ChevronRight className="w-4 h-4" /></button>
+            <button
+              onClick={() => setDateRangeModalOpen(true)}
+              className="flex items-center gap-1.5 bg-green-600 text-white px-3 py-2 rounded-lg text-sm hover:bg-green-700 ml-1"
+            >
+              <SlidersHorizontal className="w-4 h-4" /> 旺季/連假日期設定
+            </button>
           </div>
         }
       />
@@ -163,147 +162,60 @@ export default function RoomCalendar() {
       <div className="flex flex-wrap gap-4 text-xs text-gray-500">
         {CALENDAR_STATUSES.map((status) => (
           <span key={status} className="flex items-center gap-1.5">
-            <span className={`w-3 h-3 rounded ${STATUS_COLOR[status]}`} />
+            <span className="w-3 h-3 rounded" style={{ backgroundColor: STATUS_HEX[status] }} />
             {bookingStatusLabel(status)}
           </span>
         ))}
+        <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded border border-dashed" style={{ backgroundColor: QUOTED_HEX }} />已報價（未鎖房型）</span>
         <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded bg-orange-100 border border-orange-300" />旺季</span>
         <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded bg-red-100 border border-red-300" />連假</span>
       </div>
 
-      <div className="bg-white rounded-xl shadow-sm border overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="border-collapse text-xs">
-            <thead>
-              <tr>
-                <th className="sticky left-0 bg-gray-50 border-b border-r px-3 py-2 text-left text-gray-600 w-28 z-10">房型</th>
-                {days.map((d) => {
-                  const weekday = new Date(year, month, d).getDay();
-                  const iso = toIso(year, month, d);
-                  const special = specialRangesForDate(iso);
-                  const isPeak = special.some((s) => s.range_type === '旺季');
-                  const isHoliday = special.some((s) => s.range_type === '連假');
-                  const specialTitle = special.map((s) => `${s.range_type}${s.label ? `：${s.label}` : ''}`).join('、');
-                  return (
-                    <th key={d} className="border-b px-1.5 py-2 text-center font-normal w-9">
-                      <button
-                        onClick={() => setSelectedDay(iso)}
-                        title={specialTitle || undefined}
-                        className={`w-full rounded hover:bg-green-50 ${weekday === 0 || weekday === 6 ? 'text-red-400' : 'text-gray-500'}`}
-                      >
-                        <div>{d}</div>
-                        <div className="text-[10px]">{WEEKDAY_LABELS[weekday]}</div>
-                        <div className="h-1.5 flex justify-center gap-0.5 mt-0.5">
-                          {isPeak && <span className="w-1.5 h-1.5 rounded-full bg-orange-400" />}
-                          {isHoliday && <span className="w-1.5 h-1.5 rounded-full bg-red-400" />}
-                        </div>
-                      </button>
-                    </th>
-                  );
-                })}
-              </tr>
-            </thead>
-            <tbody>
-              <tr className="bg-purple-50/40">
-                <td className="sticky left-0 bg-purple-50 border-r px-3 py-2 font-medium text-purple-700 z-10">包棟</td>
-                {days.map((d) => {
-                  const iso = toIso(year, month, d);
-                  const info = wholeHouseByDate[iso];
-                  return (
-                    <td key={d} className="border-b border-l p-0.5 text-center">
-                      {info ? <div className={`h-6 rounded ${STATUS_COLOR[info.status] || 'bg-gray-300'}`} title={`${info.guestName}（${bookingStatusLabel(info.status)}）`} /> : <div className="h-6" />}
-                    </td>
-                  );
-                })}
-              </tr>
-              {loading ? (
-                <tr><td colSpan={daysInMonth + 1} className="py-10 text-center text-gray-400">載入中...</td></tr>
-              ) : roomTypes.length === 0 ? (
-                <tr><td colSpan={daysInMonth + 1} className="py-10 text-center text-gray-400">尚未設定房型</td></tr>
-              ) : (
-                roomTypes.map((room) => (
-                  <tr key={room.id} className="hover:bg-gray-50">
-                    <td className="sticky left-0 bg-white border-r px-3 py-2 font-medium text-gray-700 z-10">{room.name}</td>
-                    {days.map((d) => {
-                      const iso = toIso(year, month, d);
-                      const info = roomOccupancy[room.id]?.[iso];
-                      const blockedByWholeHouse = !!wholeHouseByDate[iso];
-                      return (
-                        <td key={d} className="border-b border-l p-0.5 text-center">
-                          {info ? (
-                            <div className={`h-6 rounded ${STATUS_COLOR[info.status] || 'bg-gray-300'}`} title={`${info.guestName}（${bookingStatusLabel(info.status)}）`} />
-                          ) : blockedByWholeHouse ? (
-                            <div className="h-6 rounded bg-purple-100" title="包棟佔用" />
-                          ) : (
-                            <div className="h-6" />
-                          )}
-                        </td>
-                      );
-                    })}
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
+      <div className="room-calendar bg-white rounded-xl shadow-sm border p-3" style={{ height: 720 }}>
+        {loading && <div className="text-center text-gray-400 text-sm py-2">載入中...</div>}
+        <Calendar
+          localizer={localizer}
+          culture="zh-TW"
+          events={events}
+          date={calendarDate}
+          onNavigate={setCalendarDate}
+          views={[Views.MONTH]}
+          view={Views.MONTH}
+          toolbar={false}
+          popup
+          dayPropGetter={dayPropGetter}
+          eventPropGetter={eventPropGetter as any}
+          onSelectEvent={(event: any) => setSelectedEvent(event)}
+          messages={{ noEventsInRange: '這段期間沒有訂單', showMore: (total: number) => `還有 ${total} 筆` }}
+          style={{ height: '100%' }}
+        />
       </div>
 
-      {unassignedPending.length > 0 && (
-        <div className="bg-white rounded-xl shadow-sm border p-6">
-          <h3 className="font-bold text-gray-800 mb-1">本月已報價訂單（尚未鎖定房型）</h3>
-          <p className="text-xs text-gray-400 mb-3">個別租房要等顧客確認訂房、進入「待預定」以後才會鎖定實際房型，這裡先列出還在等待客戶回覆、月曆上暫時看不到的訂單。</p>
-          <div className="space-y-1 text-sm text-gray-600">
-            {unassignedPending.map((b) => (
-              <div key={b.id}>・{b.name || b.nickname || '未取得'}（{String(b.checkin_date).replace(/-/g, '/')} ~ {String(b.checkout_date).replace(/-/g, '/')}）</div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* ============== 旺季／連假日期區間摘要（新增/編輯/刪除搬到「價格設定 > 旺季/連假日期」頁） ============== */}
-      <div className="bg-white rounded-xl shadow-sm border p-6 flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h3 className="font-bold text-gray-800 flex items-center gap-2"><CalendarDays className="w-5 h-5 text-green-600" />旺季／連假日期區間</h3>
-          <p className="text-sm text-gray-500 mt-1">
-            目前共設定 {dateRanges.length} 筆區間（優先順序：旺季 &gt; 連假 &gt; 一般日期依星期幾判斷），新增/編輯/刪除跟匯入國家行事曆請到「價格設定」管理，這裡的月曆小圓點會自動同步。
-          </p>
-        </div>
-        <Link
-          to="/room-pricing/date-ranges"
-          className="flex items-center gap-1 shrink-0 bg-green-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-green-700"
-        >
-          管理旺季/連假日期 <ArrowRight className="w-4 h-4" />
-        </Link>
-      </div>
-
-      {/* ============== 點日期查當天訂單 ============== */}
-      <Modal
-        open={!!selectedDay}
-        title={selectedDay ? `${selectedDay.replace(/-/g, '/')} 當天訂單` : ''}
-        onClose={() => setSelectedDay(null)}
-      >
-        {selectedDayBookings.length === 0 ? (
-          <p className="text-sm text-gray-400">這天沒有佔用中的訂單。</p>
-        ) : (
-          <div className="space-y-2">
-            {selectedDayBookings.map((b) => (
-              <div key={b.id} className="border rounded-lg p-3 text-sm flex justify-between items-center gap-3">
-                <div>
-                  <p className="font-medium text-gray-800">{b.name || b.nickname || '未取得'}</p>
-                  <p className="text-xs text-gray-500">
-                    {b.whole_house ? '包棟' : b.room_type_label || '房型未定'}
-                    {String(b.checkin_date).replace(/-/g, '/')} ~ {String(b.checkout_date).replace(/-/g, '/')}
-                  </p>
-                </div>
-                <div className="text-right shrink-0">
-                  {b.total_amount != null && <p className="text-gray-700 mb-1">NT$ {Number(b.total_amount).toLocaleString()}</p>}
-                  <StatusBadge status={b.status} />
-                </div>
-              </div>
-            ))}
+      {/* ============== 點色塊看訂單詳情 ============== */}
+      <Modal open={!!selectedEvent} title="訂單詳情" onClose={() => setSelectedEvent(null)}>
+        {selectedEvent && (
+          <div className="border rounded-lg p-3 text-sm flex justify-between items-center gap-3">
+            <div>
+              <p className="font-medium text-gray-800">{selectedEvent.booking.name || selectedEvent.booking.nickname || '未取得'}</p>
+              <p className="text-xs text-gray-500">
+                {selectedEvent.booking.whole_house ? '包棟' : selectedEvent.booking.room_type_label || '房型未定'}
+                {'　'}
+                {String(selectedEvent.booking.checkin_date).replace(/-/g, '/')} ~ {String(selectedEvent.booking.checkout_date).replace(/-/g, '/')}
+              </p>
+            </div>
+            <div className="text-right shrink-0">
+              {selectedEvent.booking.total_amount != null && <p className="text-gray-700 mb-1">NT$ {Number(selectedEvent.booking.total_amount).toLocaleString()}</p>}
+              <StatusBadge status={selectedEvent.status} />
+            </div>
           </div>
         )}
       </Modal>
+
+      <DateRangeSettingsModal
+        open={dateRangeModalOpen}
+        onClose={() => setDateRangeModalOpen(false)}
+        onSaved={fetchDateRanges}
+      />
     </div>
   );
 }

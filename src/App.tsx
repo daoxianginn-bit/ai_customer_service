@@ -10,7 +10,6 @@ import AdminAccounts from './pages/AdminAccounts';
 import PricingOverview from './pages/pricing/Overview';
 import QuoteCalculator from './pages/pricing/QuoteCalculator';
 import FormulaSettings from './pages/pricing/FormulaSettings';
-import DateRanges from './pages/pricing/DateRanges';
 import SpecialDates from './pages/pricing/SpecialDates';
 import Discounts from './pages/pricing/Discounts';
 import StandardMessages from './pages/StandardMessages';
@@ -105,7 +104,6 @@ function App() {
           <Route path="/room-pricing" element={<PricingOverview />} />
           <Route path="/room-pricing/quote" element={<QuoteCalculator />} />
           <Route path="/room-pricing/formula" element={<FormulaSettings />} />
-          <Route path="/room-pricing/date-ranges" element={<DateRanges />} />
           <Route path="/room-pricing/special-dates" element={<SpecialDates />} />
           <Route path="/room-pricing/discounts" element={<Discounts />} />
           <Route path="/linens" element={<LinenManagement />} />

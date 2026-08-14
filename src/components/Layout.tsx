@@ -51,7 +51,6 @@ const navEntries: NavEntry[] = [
       { to: '/room-pricing', label: '價格總覽', icon: LayoutDashboard },
       { to: '/room-pricing/quote', label: '試算報價', icon: Calculator },
       { to: '/room-pricing/formula', label: '計價公式設定', icon: SlidersHorizontal },
-      { to: '/room-pricing/date-ranges', label: '旺季/連假日期', icon: CalendarDays },
       { to: '/room-pricing/special-dates', label: '特殊日期價格', icon: Sparkles },
       { to: '/room-pricing/discounts', label: '促銷與折扣', icon: Percent },
     ],

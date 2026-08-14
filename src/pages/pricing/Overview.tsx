@@ -173,8 +173,8 @@ export default function PricingOverview() {
               <input type="number" value={dateSurchargePeak} onChange={(e) => setDateSurchargePeak(Number(e.target.value))} className="w-28 px-3 py-2 border rounded-lg text-right" />
             </div>
           </div>
-          <Link to="/room-pricing/date-ranges" className="text-xs text-green-700 hover:underline inline-flex items-center gap-1">
-            查看詳細日期設定 <ArrowRight className="w-3 h-3" />
+          <Link to="/room-calendar" className="text-xs text-green-700 hover:underline inline-flex items-center gap-1">
+            到「房況/行事曆」設定旺季/連假日期 <ArrowRight className="w-3 h-3" />
           </Link>
         </div>
 
