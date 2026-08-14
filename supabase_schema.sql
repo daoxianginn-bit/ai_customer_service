@@ -218,12 +218,27 @@ CREATE TABLE IF NOT EXISTS public.special_prices (
 );
 CREATE INDEX IF NOT EXISTS idx_special_prices_dates ON public.special_prices(start_date, end_date);
 
+-- 加開房費：客人實際要求的房型組合比標準房型多開的每一間，依這間房的容量收費
+-- （例如雙人房 1000、四人房 1500）。每種實際存在的容量各一筆，新增房型容量時
+-- 這裡也要補一筆，不然那個容量沒有加開費資料時預設視為 0。
+CREATE TABLE IF NOT EXISTS public.room_capacity_pricing (
+    capacity INTEGER PRIMARY KEY,
+    extra_room_fee NUMERIC NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS public.promotions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name TEXT NOT NULL,
     discount_percent NUMERIC NOT NULL DEFAULT 0,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+    -- discount_type / discount_amount 由後面的 ALTER TABLE 補齊，新舊專案都適用
 );
+
+-- 促銷除了打折 % 之外，也能設固定金額折抵（例如「早鳥折 500 元」）。
+-- discount_type='percent'（預設，沿用既有的 discount_percent 欄位）；'amount' 時改用 discount_amount
+-- 直接從房價扣，兩個欄位都保留、依 discount_type 決定套用哪一個，不會互相覆蓋。
+ALTER TABLE public.promotions ADD COLUMN IF NOT EXISTS discount_type TEXT NOT NULL DEFAULT 'percent';
+ALTER TABLE public.promotions ADD COLUMN IF NOT EXISTS discount_amount NUMERIC NOT NULL DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS public.booking_date_ranges (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -239,6 +254,18 @@ ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS booking_whole_house_enabled
 -- 特殊指定日期價格命中時，促銷方案／連住折扣要不要繼續疊加：true＝疊加（特殊價格只是換掉基礎價，
 -- 折扣照常套用，實收可能比設定的特殊價格低）；false＝不疊加（特殊價格就是當晚最終金額）。
 ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS special_price_stacks_with_discounts BOOLEAN NOT NULL DEFAULT true;
+
+-- 純公式驅動計價（取代同人數多方案手動定價那套）：標準房型的價格 = 床位數 × 每床基礎價，
+-- 人數剛好滿載（等於床位數）再加滿載獎勵；標準房型怎麼湊見 bookingEngine.ts 的
+-- computeStandardRoomLayout()。日期加價沿用 booking_date_ranges 的 tier 判斷，平日固定 +0，
+-- 其餘三個 tier 各自的加價金額存在這裡。
+ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS bed_base_rate NUMERIC NOT NULL DEFAULT 1000;
+ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS full_occupancy_bonus NUMERIC NOT NULL DEFAULT 500;
+-- 低於這個人數不自動報價，直接轉真人客服確認（見 line-webhook.ts 的「無法自動試算」訊息）。
+ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS min_group_headcount INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS date_surcharge_small_holiday NUMERIC NOT NULL DEFAULT 5000;
+ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS date_surcharge_peak NUMERIC NOT NULL DEFAULT 8000;
+ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS date_surcharge_long_holiday NUMERIC NOT NULL DEFAULT 12000;
 ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS consecutive_stay_discount_cleaning NUMERIC DEFAULT 0;
 ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS consecutive_stay_discount_no_cleaning NUMERIC DEFAULT 0;
 ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS consecutive_stay_default_option TEXT DEFAULT 'no_cleaning';
@@ -717,6 +744,7 @@ ALTER TABLE public.whole_house_package_pricing ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.whole_house_package_rooms ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.whole_house_extra_person_rules ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.special_prices ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.room_capacity_pricing ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.promotions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.booking_date_ranges ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.custom_message_templates ENABLE ROW LEVEL SECURITY;
@@ -767,6 +795,8 @@ DROP POLICY IF EXISTS "Allow Auth Access WH Extra Person Rules" ON public.whole_
 CREATE POLICY "Allow Auth Access WH Extra Person Rules" ON public.whole_house_extra_person_rules FOR ALL USING (auth.role() = 'authenticated');
 DROP POLICY IF EXISTS "Allow Auth Access Special Prices" ON public.special_prices;
 CREATE POLICY "Allow Auth Access Special Prices" ON public.special_prices FOR ALL USING (auth.role() = 'authenticated');
+DROP POLICY IF EXISTS "Allow Auth Access Room Capacity Pricing" ON public.room_capacity_pricing;
+CREATE POLICY "Allow Auth Access Room Capacity Pricing" ON public.room_capacity_pricing FOR ALL USING (auth.role() = 'authenticated');
 DROP POLICY IF EXISTS "Allow Auth Access Promotions" ON public.promotions;
 CREATE POLICY "Allow Auth Access Promotions" ON public.promotions FOR ALL USING (auth.role() = 'authenticated');
 DROP POLICY IF EXISTS "Allow Auth Access Booking Date Ranges" ON public.booking_date_ranges;

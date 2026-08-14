@@ -494,6 +494,8 @@ export interface Promotion {
   id: string;
   name: string;
   discount_percent: number;
+  discount_type?: 'percent' | 'amount'; // 預設 'percent'，沿用 discount_percent；'amount' 時改用 discount_amount 直接扣金額
+  discount_amount?: number;
 }
 
 export interface NightlyPrice {
@@ -618,7 +620,9 @@ export function computeMultiNightQuote(input: MultiNightQuoteInput): MultiNightQ
       if (raw == null) return null;
       let price = raw;
       if (isFirstNight && input.promotion) {
-        price = price * (1 - input.promotion.discount_percent / 100);
+        price = input.promotion.discount_type === 'amount'
+          ? Math.max(0, price - (input.promotion.discount_amount || 0))
+          : price * (1 - input.promotion.discount_percent / 100);
       } else if (!isFirstNight) {
         price = Math.max(0, price - input.consecutiveStayDiscountPerNight);
       }
@@ -671,5 +675,203 @@ export function computeMultiNightQuote(input: MultiNightQuoteInput): MultiNightQ
     headcount: input.headcount,
     individual: { nights: individualNights, total: sumOrNull(individualNights) },
     wholeHouse: { nights: wholeHouseNights, total: sumOrNull(wholeHouseNights) },
+  };
+}
+
+// ============================================================================
+// 純公式驅動計價（取代上面 selectWholeHousePackage 那一整套手動定價）：
+// 標準房型的價格 = 床位數 × 每床基礎價，人數剛好滿載（等於床位數）再加滿載獎勵；
+// 客人要求的房型組合跟標準房型不同時，另外算加開房費。不分「個別租房」跟「包棟」，
+// 所有人數統一走這條路徑。
+//
+// 這幾個函式是新加的，不動上面既有的函式——這個檔案跟 booking_computer 專案共用，
+// 既有函式改動要兩邊同步，這次只讓這個專案自己的呼叫端改用新函式，比較安全。
+// ============================================================================
+
+export interface RoomCapacityCount {
+  capacity: number;
+  count: number; // 這個容量目前有幾間啟用中的房間
+}
+
+export type CapacityLayout = Record<number, number>; // 容量 -> 間數
+
+export interface StandardRoomLayoutResult {
+  layout: CapacityLayout;
+  beds: number; // 實際湊到的床位數；success=false 時會小於目標床位數
+  roomCount: number;
+  success: boolean; // false = 現有房型庫存湊不出這個人數需要的床位數
+}
+
+/**
+ * 標準房型：目標床位數 = 人數是偶數用人數本身，奇數則 +1（房間容量都是偶數，湊不出奇數床位，
+ * 奇數人數一定會有 1 床空著）。優先塞容量最大的房型、剩下用小容量湊滿，在實際庫存範圍內
+ * 湊出最少間數的組合。庫存不足（總容量小於目標床位數）時 success=false，呼叫端要轉真人。
+ */
+export function computeStandardRoomLayout(headcount: number, availableCapacities: RoomCapacityCount[]): StandardRoomLayoutResult {
+  const targetBeds = headcount % 2 === 0 ? headcount : headcount + 1;
+  const pool = availableCapacities.filter((c) => c.capacity > 0 && c.count > 0).map((c) => ({ ...c }));
+
+  const layout: CapacityLayout = {};
+  let remaining = targetBeds;
+
+  for (const item of [...pool].sort((a, b) => b.capacity - a.capacity)) {
+    if (remaining <= 0) break;
+    const used = Math.min(item.count, Math.floor(remaining / item.capacity));
+    if (used <= 0) continue;
+    layout[item.capacity] = (layout[item.capacity] || 0) + used;
+    remaining -= used * item.capacity;
+  }
+
+  // 大容量湊完還有剩（容量組合不是乾淨的倍數關係時才會發生），退回用小容量一間一間湊到剩下的庫存用完。
+  if (remaining > 0) {
+    for (const item of [...pool].sort((a, b) => a.capacity - b.capacity)) {
+      let available = item.count - (layout[item.capacity] || 0);
+      while (remaining > 0 && available > 0 && item.capacity <= remaining) {
+        layout[item.capacity] = (layout[item.capacity] || 0) + 1;
+        remaining -= item.capacity;
+        available--;
+      }
+    }
+  }
+
+  const roomCount = Object.values(layout).reduce((s, n) => s + n, 0);
+  return { layout, beds: targetBeds - Math.max(0, remaining), roomCount, success: remaining <= 0 };
+}
+
+export interface CapacityFee {
+  capacity: number;
+  extra_room_fee: number;
+}
+
+/**
+ * 加開房費：客人實際要求的房型組合跟標準房型逐一比對，算出每種容量增加/減少幾間。
+ * 減少的間數（不分容量）先拿去抵掉增加的間數，抵完剩下的增加間數，各自照該容量的
+ * 加開費率收費加總。抵銷順序目前是容量小的先抵（沒有更明確的業務規則可以判斷，
+ * 這個假設之後如果不對，這裡是唯一要調整的地方）。
+ */
+export function computeExtraRoomFee(standard: CapacityLayout, requested: CapacityLayout, capacityFees: CapacityFee[]): number {
+  const feeByCapacity = new Map(capacityFees.map((f) => [f.capacity, f.extra_room_fee]));
+  const capacities = Array.from(new Set([...Object.keys(standard), ...Object.keys(requested)].map(Number))).sort((a, b) => a - b);
+
+  let totalFreed = 0;
+  const increases: { capacity: number; count: number }[] = [];
+  for (const cap of capacities) {
+    const std = standard[cap] || 0;
+    const req = requested[cap] || 0;
+    if (req > std) increases.push({ capacity: cap, count: req - std });
+    else if (std > req) totalFreed += std - req;
+  }
+
+  let fee = 0;
+  for (const inc of increases) {
+    const offset = Math.min(totalFreed, inc.count);
+    totalFreed -= offset;
+    fee += (inc.count - offset) * (feeByCapacity.get(inc.capacity) ?? 0);
+  }
+  return fee;
+}
+
+export interface DateSurcharge {
+  small_holiday: number;
+  peak: number;
+  long_holiday: number;
+}
+
+function dateSurchargeForTier(tier: string, s: DateSurcharge): number {
+  if (tier === TIER_SEMI_HOLIDAY) return s.small_holiday;
+  if (tier === TIER_PEAK_SEASON) return s.peak;
+  if (tier === TIER_CONSECUTIVE_HOLIDAY) return s.long_holiday;
+  return 0;
+}
+
+export interface UnifiedNightlyPrice {
+  date: Date;
+  tier: string;
+  rawPrice: number;
+  discountedPrice: number;
+  layoutUsed: CapacityLayout;
+}
+
+export interface UnifiedQuoteInput {
+  checkInDate: Date;
+  nights: number;
+  headcount: number;
+  dateRanges: DateRange[];
+  roomCapacities: RoomCapacityCount[];
+  capacityFees: CapacityFee[];
+  bedBaseRate: number;
+  fullOccupancyBonus: number;
+  minGroupHeadcount: number;
+  dateSurcharge: DateSurcharge;
+  requestedLayout?: CapacityLayout | null; // 客人指定的房型組合，沒指定就不帶，用標準房型
+  promotion: Promotion | null;
+  consecutiveStayDiscountPerNight: number;
+  specialPrices?: SpecialPrice[];
+  specialPriceStacksWithDiscounts?: boolean; // 預設 true
+  peakSeasonWeekdayTier?: PeakSeasonWeekdayTier;
+}
+
+export interface UnifiedMultiNightQuoteResult {
+  checkInDate: Date;
+  nights: number;
+  headcount: number;
+  standardLayout: CapacityLayout | null; // null = 人數超出範圍或庫存湊不出來，無法報價
+  nightly: UnifiedNightlyPrice[];
+  total: number | null;
+}
+
+/**
+ * 統整報價：不分個別租房／包棟，所有人數都走這條路徑。人數低於 minGroupHeadcount 或
+ * 超過目前房型庫存總容量、或庫存湊不出標準房型時，回傳 total=null，呼叫端要轉真人。
+ * 客人指定的房型組合跟標準房型不同時，逐晚在標準價格上加計加開房費（命中特殊指定日期價格
+ * 那一晚除外——特殊價格直接取代「標準價格＋加開房費＋日期加價」整段，不會再疊加加開房費）。
+ */
+export function computeUnifiedMultiNightQuote(input: UnifiedQuoteInput): UnifiedMultiNightQuoteResult {
+  const totalCapacity = input.roomCapacities.reduce((s, c) => s + c.capacity * c.count, 0);
+  const cannotQuote = { checkInDate: input.checkInDate, nights: input.nights, headcount: input.headcount, standardLayout: null, nightly: [], total: null };
+
+  if (input.headcount < input.minGroupHeadcount || input.headcount > totalCapacity) return cannotQuote;
+
+  const standard = computeStandardRoomLayout(input.headcount, input.roomCapacities);
+  if (!standard.success) return cannotQuote;
+
+  const hasRequestedLayout = !!input.requestedLayout && Object.keys(input.requestedLayout).length > 0;
+  const finalLayout = hasRequestedLayout ? (input.requestedLayout as CapacityLayout) : standard.layout;
+  const extraFee = hasRequestedLayout ? computeExtraRoomFee(standard.layout, finalLayout, input.capacityFees) : 0;
+
+  const nightly: UnifiedNightlyPrice[] = [];
+  for (let i = 0; i < input.nights; i++) {
+    const date = new Date(input.checkInDate);
+    date.setDate(date.getDate() + i);
+    const tier = resolvePricingTier(date, input.dateRanges, input.peakSeasonWeekdayTier);
+    const isFirstNight = i === 0;
+
+    const special = getSpecialPrice(date, input.headcount, input.specialPrices || []);
+    const raw = special != null
+      ? special
+      : standard.beds * input.bedBaseRate + (input.headcount === standard.beds ? input.fullOccupancyBonus : 0) + extraFee + dateSurchargeForTier(tier, input.dateSurcharge);
+
+    let price = raw;
+    const skipDiscount = special != null && input.specialPriceStacksWithDiscounts === false;
+    if (!skipDiscount) {
+      if (isFirstNight && input.promotion) {
+        price = input.promotion.discount_type === 'amount'
+          ? Math.max(0, price - (input.promotion.discount_amount || 0))
+          : price * (1 - input.promotion.discount_percent / 100);
+      } else if (!isFirstNight) {
+        price = Math.max(0, price - input.consecutiveStayDiscountPerNight);
+      }
+    }
+
+    nightly.push({ date, tier, rawPrice: raw, discountedPrice: price, layoutUsed: finalLayout });
+  }
+
+  return {
+    checkInDate: input.checkInDate,
+    nights: input.nights,
+    headcount: input.headcount,
+    standardLayout: standard.layout,
+    nightly,
+    total: nightly.length ? nightly.reduce((s, n) => s + n.discountedPrice, 0) : null,
   };
 }

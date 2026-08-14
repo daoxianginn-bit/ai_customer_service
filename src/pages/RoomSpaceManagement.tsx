@@ -150,6 +150,7 @@ export default function RoomSpaceManagement() {
                 <th className="py-3 px-4">名稱</th>
                 <th className="py-3 px-4">樓層</th>
                 <th className="py-3 px-4">容納人數</th>
+                <th className="py-3 px-4">組合優先順序</th>
                 <th className="py-3 px-4">設備</th>
                 <th className="py-3 px-4">啟用</th>
                 <th className="py-3 px-4"></th>
@@ -157,9 +158,9 @@ export default function RoomSpaceManagement() {
             </thead>
             <tbody className="divide-y divide-gray-100">
               {loading ? (
-                <tr><td colSpan={7} className="py-10 text-center text-gray-400">載入中...</td></tr>
+                <tr><td colSpan={8} className="py-10 text-center text-gray-400">載入中...</td></tr>
               ) : rows.length === 0 ? (
-                <tr><td colSpan={7}><EmptyState icon={<DoorOpen className="w-12 h-12 text-gray-200" />} message="尚未設定任何房間或空間，點右上角「新增房間/空間」開始" /></td></tr>
+                <tr><td colSpan={8}><EmptyState icon={<DoorOpen className="w-12 h-12 text-gray-200" />} message="尚未設定任何房間或空間，點右上角「新增房間/空間」開始" /></td></tr>
               ) : (
                 rows.map((row) => (
                   <tr key={row.id} onClick={() => openEdit(row)} className="hover:bg-green-50 transition-colors cursor-pointer">
@@ -167,6 +168,7 @@ export default function RoomSpaceManagement() {
                     <td className="py-3 px-4 font-medium text-gray-800">{row.name}</td>
                     <td className="py-3 px-4">{row.floor || '-'}</td>
                     <td className="py-3 px-4">{row.type === '房間' ? row.capacity : '-'}</td>
+                    <td className="py-3 px-4">{row.display_order}</td>
                     <td className="py-3 px-4 text-gray-500 max-w-xs truncate">{row.equipment || '-'}</td>
                     <td className="py-3 px-4" onClick={(e) => e.stopPropagation()}>
                       <Switch checked={row.is_active} onChange={() => toggleActive(row)} />
@@ -223,6 +225,11 @@ export default function RoomSpaceManagement() {
               <input type="number" value={form.capacity} onChange={(e) => setForm({ ...form, capacity: Number(e.target.value) })} className="w-full px-3 py-2 border rounded-lg" />
             </div>
           )}
+        </div>
+        <div>
+          <label className="block text-xs text-gray-500 mb-1">組合優先順序</label>
+          <input type="number" value={form.display_order} onChange={(e) => setForm({ ...form, display_order: Number(e.target.value) })} className="w-full px-3 py-2 border rounded-lg" />
+          <p className="text-xs text-gray-400 mt-1">數字小的排前面。系統自動建議包棟房型組合、或客人沒指定要開哪幾間房時，同容量的房間會優先挑數字小的。</p>
         </div>
         <div>
           <label className="block text-xs text-gray-500 mb-1">設備</label>

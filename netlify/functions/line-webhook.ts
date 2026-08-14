@@ -4,7 +4,7 @@ import { createClient } from '@supabase/supabase-js';
 import OpenAI from 'openai';
 import fetch from 'node-fetch';
 import crypto from 'crypto';
-import { computeMultiNightQuote } from '../../src/lib/bookingEngine';
+import { computeUnifiedMultiNightQuote } from '../../src/lib/bookingEngine';
 import {
   buildMergeFields,
   MessageVariable,
@@ -239,7 +239,7 @@ export const handler: Handler = async (event) => {
 
 // ========================================================================
 // 動態訂房流程
-// 設計原則：日期判斷、晚數計算、金額計算全部交給 computeMultiNightQuote()（純程式碼），
+// 設計原則：日期判斷、晚數計算、金額計算全部交給 computeUnifiedMultiNightQuote()（純程式碼），
 // AI 只負責①依每個步驟定義的欄位擷取顧客回答、②把算好的報價結果包裝成罐頭訊息，絕不讓 AI 自己算晚數或金額。
 // 訂房紀錄以 Supabase `bookings` 表為主要來源，Google「報價」試算表只是盡力鏡射的備份，寫入失敗不影響主流程。
 // ========================================================================
@@ -314,8 +314,7 @@ function mapFlowRow(row: any, stepRows: any[]): FlowDef {
 
 interface BookingQuoteInfo {
   total: number;
-  useWholeHouse: boolean;
-  roomNights: { date: string; roomTypeIds: string[] }[]; // 只有個別租房才會有內容，供確認訂房時的衝突檢查/寫入用
+  roomNights: { date: string; roomTypeIds: string[] }[]; // 供確認訂房時的衝突檢查/寫入用
   roomIds: string[]; // 這張訂單開的房間（包棟也有），確認訂房時用來產生布巾用量
 }
 
@@ -597,31 +596,31 @@ function pickByLabelHeuristic(collected: Record<string, string>, allFields: Flow
 }
 
 async function fetchBookingData() {
-  const [rt, rp, rep, wp, wpp, wpr, epr, dr, promo, sp] = await Promise.all([
+  const [rt, dr, promo, sp, cp] = await Promise.all([
     // 只抓「房間」類型：其他類型（例如公共空間）不能訂房，不該進到報價引擎
     supabase.from('room_types').select('*').eq('type', '房間'),
-    supabase.from('room_pricing').select('*'),
-    supabase.from('room_extra_person_pricing').select('*'),
-    supabase.from('whole_house_packages').select('*'),
-    supabase.from('whole_house_package_pricing').select('*'),
-    supabase.from('whole_house_package_rooms').select('*'),
-    supabase.from('whole_house_extra_person_rules').select('*'),
     supabase.from('booking_date_ranges').select('*'),
     supabase.from('promotions').select('*'),
     supabase.from('special_prices').select('*'),
+    supabase.from('room_capacity_pricing').select('*'),
   ]);
   return {
     roomTypes: rt.data || [],
-    roomPricing: rp.data || [],
-    roomExtraPersonPricing: rep.data || [],
-    packages: wp.data || [],
-    packagePricing: wpp.data || [],
-    packageRooms: wpr.data || [],
-    extraPersonRules: epr.data || [],
     dateRanges: (dr.data || []).map((d: any) => ({ range_type: d.range_type, start_date: d.start_date, end_date: d.end_date })),
     promotions: promo.data || [],
     specialPrices: (sp.data || []).map((s: any) => ({ start_date: s.start_date, end_date: s.end_date, occupancy: s.occupancy, price: s.price })),
+    capacityFees: (cp.data || []).map((c: any) => ({ capacity: c.capacity, extra_room_fee: c.extra_room_fee })),
   };
+}
+
+// 目前有效啟用的房間，依容量分組計數，供純公式計價（computeStandardRoomLayout）使用。
+function toRoomCapacityCounts(roomTypes: any[]): { capacity: number; count: number }[] {
+  const counts = new Map<number, number>();
+  for (const r of roomTypes) {
+    if (r.is_active === false || !r.capacity) continue;
+    counts.set(r.capacity, (counts.get(r.capacity) || 0) + 1);
+  }
+  return Array.from(counts.entries()).map(([capacity, count]) => ({ capacity, count }));
 }
 
 function formatAdultsKids(adults: number | null, kids: number | null, infants: number | null): string {
@@ -805,13 +804,14 @@ function deriveRequestedLayout(collected: Record<string, string>, allFields: Flo
   return countsByCapacity;
 }
 
+// 決定這張訂單實際開哪幾間房：顧客有指定「幾人房各要幾間」就照他指定的挑，
+// 沒指定就用系統算出的標準房型（standardLayout，來自 computeStandardRoomLayout）。
+// 不分個別租房／包棟——這個模型下所有訂單都是「開了哪幾間房」。
 async function resolveOpenedRooms(input: {
   collected: Record<string, string>;
   allFields: FlowFieldDef[];
   roomTypes: any[];
-  useWholeHouse: boolean;
-  engineRooms: { id: string }[];
-  wholeHouseDefaultRoomIds: string[]; // 沒指定房型組合時，包棟要開的是報價當下選中方案的房間，不是全部房間
+  standardLayout: Record<number, number>;
   checkinIso: string;
   checkoutIso: string;
   bookingId: string;
@@ -820,28 +820,11 @@ async function resolveOpenedRooms(input: {
     .filter((r: any) => r.is_active !== false)
     .map((r: any) => ({ id: r.id, name: r.name, capacity: r.capacity, display_order: r.display_order ?? 0, floor: r.floor ?? '' }));
 
-  // 1. 顧客有指定「幾人房各要幾間」就照他指定的挑
   const countsByCapacity = deriveRequestedLayout(input.collected, input.allFields);
-  const requests = toRoomCountRequests(countsByCapacity);
-  if (requests.length) {
-    const occupied = await fetchOccupiedRoomIds(input.checkinIso, input.checkoutIso, input.bookingId);
-    return selectRoomsByRequest(requests, selectable, occupied);
-  }
-
-  // 2. 沒指定 + 包棟 → 開報價當下選中的那個包棟方案的房間組成（同人數現在可能有多個方案，
-  //    不能再像改版前那樣直接給全部房間——方案沒包含到的房間不該一起算進這張訂單）
-  if (input.useWholeHouse) {
-    const byId = new Map(selectable.map((r) => [r.id, r]));
-    const rooms = input.wholeHouseDefaultRoomIds.map((id) => byId.get(id)).filter((r): r is SelectableRoom => !!r);
-    return { rooms, shortfall: [] };
-  }
-
-  // 3. 沒指定 + 個別租房 → 用報價引擎實際算價時用到的房型，房間與價格才會一致
-  const byId = new Map(selectable.map((r) => [r.id, r]));
-  const rooms = Array.from(new Set(input.engineRooms.map((r) => r.id)))
-    .map((id) => byId.get(id))
-    .filter((r): r is SelectableRoom => !!r);
-  return { rooms, shortfall: [] };
+  const finalCounts = Object.keys(countsByCapacity).length ? countsByCapacity : input.standardLayout;
+  const requests = toRoomCountRequests(finalCounts);
+  const occupied = await fetchOccupiedRoomIds(input.checkinIso, input.checkoutIso, input.bookingId);
+  return selectRoomsByRequest(requests, selectable, occupied);
 }
 
 // 依「布巾備品 > 房間預設組合」自動帶出這張訂單的洗滌用量與成本。
@@ -1122,7 +1105,7 @@ async function finishBookingFlow(
     if (f.quote_field && collected[f.key] !== undefined) quoteValues[f.quote_field] = collected[f.key];
   }
 
-  const hasAllQuoteFields = ['checkin_date', 'checkout_date', 'headcount', 'whole_house'].every((k) => quoteValues[k] !== undefined);
+  const hasAllQuoteFields = ['checkin_date', 'checkout_date', 'headcount'].every((k) => quoteValues[k] !== undefined);
 
   if (!hasAllQuoteFields) {
     const name = pickByLabelHeuristic(collected, allFields, ['姓名', '名字']) || nickname;
@@ -1156,7 +1139,6 @@ async function finishBookingFlow(
   const checkinIso = quoteValues.checkin_date;
   const checkoutIso = quoteValues.checkout_date;
   const headcount = Number(quoteValues.headcount);
-  const useWholeHouse = quoteValues.whole_house === 'true';
 
   const checkinDate = new Date(`${checkinIso}T00:00:00`);
   const checkoutDate = new Date(`${checkoutIso}T00:00:00`);
@@ -1173,73 +1155,58 @@ async function finishBookingFlow(
 
   try {
     const data = await fetchBookingData();
-    const maxOccupancy = data.packages.length ? Math.max(...data.packages.map((p: any) => p.occupancy)) : 0;
     const consecutiveStayDiscountPerNight =
       settings.consecutive_stay_default_option === 'cleaning'
         ? settings.consecutive_stay_discount_cleaning || 0
         : settings.consecutive_stay_discount_no_cleaning || 0;
     const activePromotion = settings.active_promotion_id ? data.promotions.find((p: any) => p.id === settings.active_promotion_id) || null : null;
-    // 客人在「幾人房要開幾間」欄位裡指定的房型組合，包棟報價要用這個去挑對應方案，
-    // 價格才會跟 resolveOpenedRooms() 實際開的房間一致。
+    // 客人在「幾人房要開幾間」欄位裡指定的房型組合，沒指定就用系統自動算出的標準房型。
     const requestedLayout = deriveRequestedLayout(collected, allFields);
 
-    const result = computeMultiNightQuote({
+    const result = computeUnifiedMultiNightQuote({
       checkInDate: checkinDate,
       nights,
       headcount,
       dateRanges: data.dateRanges,
-      roomTypes: data.roomTypes,
-      roomPricing: data.roomPricing,
-      roomExtraPersonPricing: data.roomExtraPersonPricing,
-      packages: settings.booking_whole_house_enabled ? data.packages : [],
-      packagePricing: settings.booking_whole_house_enabled ? data.packagePricing : [],
-      extraPersonRules: settings.booking_whole_house_enabled ? data.extraPersonRules : [],
-      maxOccupancy,
+      roomCapacities: toRoomCapacityCounts(data.roomTypes),
+      capacityFees: data.capacityFees,
+      bedBaseRate: Number(settings.bed_base_rate ?? 1000),
+      fullOccupancyBonus: Number(settings.full_occupancy_bonus ?? 500),
+      minGroupHeadcount: Number(settings.min_group_headcount ?? 1),
+      dateSurcharge: {
+        small_holiday: Number(settings.date_surcharge_small_holiday ?? 0),
+        peak: Number(settings.date_surcharge_peak ?? 0),
+        long_holiday: Number(settings.date_surcharge_long_holiday ?? 0),
+      },
+      requestedLayout: Object.keys(requestedLayout).length ? requestedLayout : null,
       promotion: activePromotion,
       consecutiveStayDiscountPerNight,
-      peakSeasonWeekdayTier: settings.peak_season_weekday_tier || 'peak',
-      packageRooms: data.packageRooms,
-      requestedLayout: Object.keys(requestedLayout).length ? requestedLayout : null,
       specialPrices: data.specialPrices,
       specialPriceStacksWithDiscounts: settings.special_price_stacks_with_discounts !== false,
+      peakSeasonWeekdayTier: settings.peak_season_weekday_tier || 'peak',
     });
 
-    const chosenOption = useWholeHouse ? result.wholeHouse : result.individual;
-
-    if (chosenOption.total == null) {
+    if (result.total == null) {
       await supabase
         .from('bookings')
-        .update({ collected_answers: collected, checkin_date: checkinIso, checkout_date: checkoutIso, nights, headcount, whole_house: useWholeHouse, updated_at: new Date().toISOString() })
+        .update({ collected_answers: collected, checkin_date: checkinIso, checkout_date: checkoutIso, nights, headcount, updated_at: new Date().toISOString() })
         .eq('id', bookingId);
-      const replyText = '不好意思，這個日期／人數組合目前無法自動試算（可能是該時段未開放此方案，或超過可接待人數），麻煩您點選「真人客服」，我們會盡快為您確認房況與價格。';
+      const replyText = '不好意思，這個日期／人數組合目前無法自動試算（可能是超過可接待人數，或低於最少接待人數），麻煩您點選「真人客服」，我們會盡快為您確認房況與價格。';
       await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
       await logConversation(userId, nickname, 'outbound', replyText, 'system');
       await clearBookingSession(userId);
       return;
     }
 
-    const total = chosenOption.total as number;
-    const roomNights = !useWholeHouse
-      ? result.individual.nights.map((n) => ({ date: dateToIso(n.date), roomTypeIds: (n.roomsUsed || []).map((r) => r.id) }))
-      : [];
-
-    // 包棟且客人沒指定房型組合時，要開報價當下實際選中的那個方案的房間——用第一晚的
-    // packageUsed 當代表（同一趟住宿理論上每晚應該選到同一個方案，除非中間跨到不同 tier
-    // 剛好讓「升等方案」變得比較划算，這是既有邏輯本來就有的極少數情況，這裡不特別處理）。
-    const wholeHousePackageId = result.wholeHouse.nights[0]?.packageUsed?.id || null;
-    const wholeHouseDefaultRoomIds = wholeHousePackageId
-      ? data.packageRooms.filter((pr: any) => pr.package_id === wholeHousePackageId).map((pr: any) => pr.room_type_id)
-      : [];
+    const total = result.total as number;
 
     // 決定這張訂單實際開哪幾間房。價格已經在上面算完了，這一段不會動到金額，
-    // 只負責「開哪幾間」——預訂單要列房型、布巾成本要知道間數、房況要標記佔用。
+    // 只負責「開哪幾間」——沒指定房型組合就用系統算出的標準房型（result.standardLayout）。
     const openedRooms = await resolveOpenedRooms({
       collected,
       allFields,
       roomTypes: data.roomTypes,
-      useWholeHouse,
-      engineRooms: result.individual.nights.flatMap((n) => n.roomsUsed || []),
-      wholeHouseDefaultRoomIds,
+      standardLayout: result.standardLayout || {},
       checkinIso,
       checkoutIso,
       bookingId,
@@ -1261,13 +1228,11 @@ async function finishBookingFlow(
     }
 
     // 房型摘要，供訂單管理/客製訊息發送列表快速顯示，不用每次都 join。
-    // 包棟也照實列出房間名稱（不再只寫「包棟」）——包棟只是使用權的名稱，
-    // 客人還是想知道自己拿到哪幾間房，布巾成本也要算。
-    const roomTypeLabel = openedRooms.rooms.length
-      ? openedRooms.rooms.map((r) => roomLabel(r)).join('、')
-      : useWholeHouse
-        ? '包棟'
-        : null;
+    const roomTypeLabel = openedRooms.rooms.length ? openedRooms.rooms.map((r) => roomLabel(r)).join('、') : null;
+
+    // 每晚都佔用同一批房間（這個模型不會有同一趟住宿中途換房），供衝突檢查/行事曆使用。
+    const roomTypeIds = openedRooms.rooms.map((r) => r.id);
+    const roomNights = Array.from({ length: nights }, (_, i) => ({ date: dateToIso(new Date(checkinDate.getTime() + i * 86400000)), roomTypeIds }));
 
     await saveBookingRooms(bookingId, openedRooms.rooms.map((r) => r.id));
 
@@ -1275,13 +1240,10 @@ async function finishBookingFlow(
     const phone = pickByLabelHeuristic(collected, allFields, ['電話', '手機', '聯絡']);
 
     // 報價引擎算出來的 total 是「房價」，押金與訂金在這裡一次算齊，
-    // 不再等到確認訂房時去 Google 試算表撈人工填的訂金。
-    // 押金依實際開的房間數調整：個別租房是這張訂單開的每間房押金加總；包棟是另外設的固定金額
-    // （包棟的清潔/損壞責任是整棟的，不是把各房間押金加起來）。
+    // 不再等到確認訂房時去 Google 試算表撈人工填的訂金。押金＝這張訂單開的每間房押金加總
+    // （不再分個別租房/包棟，這個模型下所有訂單都是「開了哪幾間房」）。
     const roomDepositById = new Map(data.roomTypes.map((rt: any) => [rt.id, Number(rt.security_deposit ?? 0)]));
-    const securityDeposit = useWholeHouse
-      ? Number(settings.whole_house_security_deposit ?? 0)
-      : openedRooms.rooms.reduce((sum, r) => sum + (roomDepositById.get(r.id) ?? 0), 0);
+    const securityDeposit = openedRooms.rooms.reduce((sum, r) => sum + (roomDepositById.get(r.id) ?? 0), 0);
     const amounts = computeOrderAmounts(total, securityDeposit, Number(settings.deposit_percent ?? 0));
 
     const { data: updatedBooking, error: updateError } = await supabase
@@ -1293,7 +1255,7 @@ async function finishBookingFlow(
         checkout_date: checkoutIso,
         nights,
         headcount,
-        whole_house: useWholeHouse,
+        whole_house: false,
         room_amount: amounts.room_amount,
         security_deposit: amounts.security_deposit,
         total_amount: amounts.total_amount,
@@ -1330,7 +1292,7 @@ async function finishBookingFlow(
       collected,
       bookingId,
       phase: 'awaiting_confirmation',
-      quote: { total, useWholeHouse, roomNights, roomIds: openedRooms.rooms.map((r) => r.id) },
+      quote: { total, roomNights, roomIds: openedRooms.rooms.map((r) => r.id) },
     });
   } catch (e: any) {
     console.error('[Booking] quote failed:', e.message);
@@ -1387,7 +1349,7 @@ async function handleBookingConfirmation(
   let hasConflict = false;
   try {
     hasConflict = await checkBookingConflict(
-      { checkin_date: booking.checkin_date, checkout_date: booking.checkout_date, whole_house: quote.useWholeHouse, roomTypeIdsByNight },
+      { checkin_date: booking.checkin_date, checkout_date: booking.checkout_date, whole_house: false, roomTypeIdsByNight },
       booking.id
     );
   } catch (e: any) {
@@ -1425,7 +1387,7 @@ async function handleBookingConfirmation(
     .select()
     .single();
 
-  if (!quote.useWholeHouse && quote.roomNights?.length) {
+  if (quote.roomNights?.length) {
     const rows = quote.roomNights.flatMap((rn) => rn.roomTypeIds.map((roomTypeId) => ({ booking_id: booking.id, night_date: rn.date, room_type_id: roomTypeId })));
     if (rows.length) {
       const { error: roomNightsError } = await supabase.from('booking_room_nights').insert(rows);
@@ -1434,9 +1396,6 @@ async function handleBookingConfirmation(
   }
 
   // 訂房確認的當下就把布巾洗滌成本帶出來，管理員之後在訂單管理可以再調整。
-  // 包棟訂單一樣有——成本看的是開了幾間房，跟是不是包棟無關。
-  // 包棟不寫 booking_room_nights（衝突檢查與行事曆靠 whole_house 旗標處理，寫了會重複佔位），
-  // 但 booking_rooms 兩種都有，所以布巾成本兩種都算得出來。
   await generateLinenUsage(booking.id, quote.roomIds || [], booking.linen_change_count ?? 1);
 
   if (confirmed) mirrorBookingToSheet(settings, confirmed).catch(() => {});
@@ -1445,7 +1404,7 @@ async function handleBookingConfirmation(
   // 這裡直接沿用，不需要再去 Google 試算表撈人工填的訂金。
   const confirmVariables = await fetchMessageVariables();
   const confirmFields = buildMergeFields(confirmVariables, {
-    booking: { ...booking, whole_house: quote.useWholeHouse },
+    booking,
     customer: { nickname, line_user_id: userId },
     settings,
   });
