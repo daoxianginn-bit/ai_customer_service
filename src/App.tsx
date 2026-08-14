@@ -7,7 +7,12 @@ import SystemSettings from './pages/SystemSettings';
 import KnowledgeBase from './pages/KnowledgeBase';
 import AiServiceCenter from './pages/AiServiceCenter';
 import AdminAccounts from './pages/AdminAccounts';
-import BookingManagement from './pages/BookingManagement';
+import PricingOverview from './pages/pricing/Overview';
+import QuoteCalculator from './pages/pricing/QuoteCalculator';
+import FormulaSettings from './pages/pricing/FormulaSettings';
+import DateRanges from './pages/pricing/DateRanges';
+import SpecialDates from './pages/pricing/SpecialDates';
+import Discounts from './pages/pricing/Discounts';
 import StandardMessages from './pages/StandardMessages';
 import MessageVariables from './pages/MessageVariables';
 import CustomMessageSending from './pages/CustomMessageSending';
@@ -97,7 +102,12 @@ function App() {
           <Route path="/orders" element={<OrderManagement />} />
           <Route path="/room-calendar" element={<RoomCalendar />} />
           <Route path="/room-spaces" element={<RoomSpaceManagement />} />
-          <Route path="/room-pricing" element={<BookingManagement />} />
+          <Route path="/room-pricing" element={<PricingOverview />} />
+          <Route path="/room-pricing/quote" element={<QuoteCalculator />} />
+          <Route path="/room-pricing/formula" element={<FormulaSettings />} />
+          <Route path="/room-pricing/date-ranges" element={<DateRanges />} />
+          <Route path="/room-pricing/special-dates" element={<SpecialDates />} />
+          <Route path="/room-pricing/discounts" element={<Discounts />} />
           <Route path="/linens" element={<LinenManagement />} />
           {/* 舊路徑（改版前「耗材維護」獨立頁面）保留轉址，避免書籤失效 */}
           <Route path="/consumables" element={<Navigate to="/linens" replace />} />
