@@ -3,7 +3,6 @@ import { Client, validateSignature, WebhookEvent } from '@line/bot-sdk';
 import { createClient } from '@supabase/supabase-js';
 import OpenAI from 'openai';
 import fetch from 'node-fetch';
-import crypto from 'crypto';
 import { computeUnifiedMultiNightQuote } from '../../src/lib/bookingEngine';
 import {
   buildMergeFields,
@@ -26,12 +25,33 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY || ''
 );
 
-async function logConversation(userId: string, nickname: string | null, direction: 'inbound' | 'outbound', content: string, source: string) {
-  try {
-    await supabase.from('conversations').insert({ line_user_id: userId, nickname, direction, content, source });
-  } catch (e) {
-    console.error('[Log] Failed to insert conversation:', e);
+// 收尾寫入佇列：對話記錄、聯絡人 last_message_at 這類「沒有人在等結果」的資料庫寫入，
+// 過去是 await 在回覆客人之前，等於每則訊息都讓客人多等好幾個資料庫來回。改成先丟進佇列，
+// 等回覆送出後、函式結束前一次平行 flush。
+// 注意：serverless 容器在 handler return 之後就被凍結，所以不能真的 fire-and-forget，
+// 一定要在 return 前 await 完，否則寫入會被中途砍掉（這也是為什麼不直接用裸 promise）。
+let pendingWrites: Promise<unknown>[] = [];
+
+function deferWrite(label: string, run: () => PromiseLike<unknown>) {
+  pendingWrites.push(
+    Promise.resolve()
+      .then(run)
+      .catch((e) => console.error(`[DeferredWrite] ${label} failed:`, e))
+  );
+}
+
+async function flushPendingWrites() {
+  while (pendingWrites.length) {
+    const queued = pendingWrites;
+    pendingWrites = [];
+    await Promise.allSettled(queued);
   }
+}
+
+function logConversation(userId: string, nickname: string | null, direction: 'inbound' | 'outbound', content: string, source: string) {
+  deferWrite('conversations.insert', () =>
+    supabase.from('conversations').insert({ line_user_id: userId, nickname, direction, content, source })
+  );
 }
 
 function parseCsvKeywords(raw: string | null | undefined): string[] {
@@ -55,11 +75,26 @@ function dateToIso(d: Date): string {
   return `${y}-${m}-${day}`;
 }
 
+// settings 每次 webhook 呼叫都要讀（簽章驗證、AI 開關、系統指令都在裡面），但內容改動不頻繁。
+// 短 TTL 記憶體快取：後台改設定最多晚 30 秒生效，換來每則訊息少一次資料庫來回。
+// 30 秒是刻意選的——包含 is_ai_enabled 這種「出事要馬上關掉」的開關，不能設太長。
+const SETTINGS_CACHE_TTL_MS = 30 * 1000;
+let settingsCache: { data: any; fetchedAt: number } | null = null;
+
+async function fetchSettings(): Promise<any | null> {
+  const now = Date.now();
+  if (settingsCache && now - settingsCache.fetchedAt < SETTINGS_CACHE_TTL_MS) return settingsCache.data;
+  const { data, error } = await supabase.from('settings').select('*').single();
+  if (error || !data) return null;
+  settingsCache = { data, fetchedAt: now };
+  return data;
+}
+
 export const handler: Handler = async (event) => {
   if (event.httpMethod !== 'POST') return { statusCode: 405, body: 'Method Not Allowed' };
 
-  const { data: settings, error: settingsError } = await supabase.from('settings').select('*').single();
-  if (settingsError || !settings) return { statusCode: 500, body: 'Failed to fetch settings' };
+  const settings = await fetchSettings();
+  if (!settings) return { statusCode: 500, body: 'Failed to fetch settings' };
 
   const lineClient = new Client({
     channelAccessToken: settings.line_channel_access_token,
@@ -73,175 +108,251 @@ export const handler: Handler = async (event) => {
 
   const events: WebhookEvent[] = JSON.parse(event.body || '').events;
 
-  for (const lineEvent of events) {
-    if (lineEvent.type === 'message' && lineEvent.message.type === 'text') {
-      const userId = lineEvent.source.userId!;
-      const userMessage = (lineEvent.message.text || '').trim();
-      const eventId = (lineEvent as any).webhookEventId;
+  // LINE 在多位客人差不多時間傳訊息時，會把多筆事件包在同一次 webhook 呼叫的 events 陣列裡送過來。
+  // 不同客人之間彼此獨立、互不相關，用 Promise.allSettled 平行處理，不要讓前面的人卡住後面的人
+  // （否則排隊等到 Netlify function 逾時或 LINE replyToken 過期，後面的客人會完全收不到回覆）。
+  // 但同一位客人在同一批裡出現多筆事件時，仍照原始順序依序處理——訂房流程的 session 是「讀出來改一改寫回去」，
+  // 平行處理同一人的兩筆事件會互相覆蓋彼此的寫入，所以同一 userId 的事件要序列化。
+  const eventsByUser = new Map<string, WebhookEvent[]>();
+  events.forEach((lineEvent, idx) => {
+    const key = (lineEvent as any).source?.userId || `__no-user-${idx}`;
+    if (!eventsByUser.has(key)) eventsByUser.set(key, []);
+    eventsByUser.get(key)!.push(lineEvent);
+  });
 
-      if (!userMessage || !eventId) continue;
-
-      // 1. 強制去重 (關鍵防禦)
-      const { error: eventError } = await supabase
-        .from('processed_events')
-        .insert({ event_id: eventId });
-
-      if (eventError) {
-        console.log(`[Dedupe] Skipping already processed event: ${eventId}`);
-        continue;
+  await Promise.allSettled(
+    Array.from(eventsByUser.values()).map(async (userEvents) => {
+      for (const lineEvent of userEvents) {
+        await processLineEvent(lineEvent, settings, lineClient);
       }
+    })
+  );
 
-      // 2. 獲取當前狀態
-      const { data: userState } = await supabase.from('user_states').select('*').eq('line_user_id', userId).single();
-      let nickname = userState?.nickname || null;
-      let avatarUrl = userState?.avatar_url || null;
+  // 客人的回覆此時已經送出，這裡才把累積的收尾寫入一次做完。一定要在 return 之前，
+  // 容器 return 後就凍結了（見 deferWrite 的說明）。
+  await flushPendingWrites();
 
-      // 聯絡人紀錄：暱稱/大頭貼只在還沒抓過時才呼叫 LINE Profile API（之後都沿用快取，避免每則訊息都打 API），
-      // 但每則訊息都更新 last_message_at，讓「客製訊息發送」/「客戶資料」能查到所有聊過天的人，不限於有轉真人/訂房過的。
-      if (!nickname) {
-        try { const p = await lineClient.getProfile(userId); nickname = p.displayName; avatarUrl = p.pictureUrl || null; } catch (e) {}
-      }
-      try {
-        await supabase.from('user_states').upsert({
-          line_user_id: userId,
-          nickname,
-          avatar_url: avatarUrl,
-          last_message_at: new Date().toISOString(),
-          // first_message_at 只在第一次見到這個 userId 時寫入一次，之後 upsert 不會再覆蓋
-          ...(userState ? {} : { first_message_at: new Date().toISOString() }),
-        });
-      } catch (e) {
-        console.error('[Contacts] Failed to upsert user_states:', e);
-      }
-
-      await logConversation(userId, nickname, 'inbound', userMessage, 'user');
-
-      // 3. 關鍵字偵測 (轉真人客服)
-      const handoverKeywords = parseCsvKeywords(settings.handover_keywords);
-      const matchedKeyword = matchKeyword(userMessage, handoverKeywords);
-
-      if (matchedKeyword) {
-        console.log(`[Handover] Triggered by keyword: ${matchedKeyword}`);
-        try { const p = await lineClient.getProfile(userId); nickname = p.displayName; } catch (e) {}
-
-        const startedAt = new Date().toISOString();
-
-        await supabase.from('user_states').upsert({
-          line_user_id: userId,
-          nickname,
-          is_human_mode: true,
-          last_human_interaction: startedAt
-        });
-
-        await supabase.from('handover_logs').insert({
-          line_user_id: userId,
-          nickname,
-          triggered_keyword: matchedKeyword,
-          started_at: startedAt,
-          status: 'open',
-        });
-
-        const replyText = '已為您轉接真人客服，請稍候。';
-        await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
-        await logConversation(userId, nickname, 'outbound', replyText, 'system');
-
-        const agentIds = settings.agent_user_ids?.split(',').map((id: string) => id.trim()).filter(Boolean);
-        if (agentIds) {
-          for (const id of agentIds) {
-            try { await lineClient.pushMessage(id, { type: 'text', text: `🔔 真人通知：【${nickname}】正在呼叫專人。\n觸發字：${matchedKeyword}\n原文：${userMessage}` }); } catch (e) {}
-          }
-        }
-        continue;
-      }
-
-      // 4. 真人模式判斷
-      if (userState?.is_human_mode) {
-        const lastInteraction = new Date(userState.last_human_interaction).getTime();
-        const timeoutMs = (settings.handover_timeout_minutes || 30) * 60 * 1000;
-        if (new Date().getTime() - lastInteraction < timeoutMs) {
-          // 客人還在互動就延後計時——真人客服是直接在 LINE 官方帳號 App 裡回覆客人，這個系統
-          // 看不到真人本人有沒有在處理，只能靠客人是否還在傳訊息判斷「這通還沒結束」。
-          await supabase.from('user_states').update({ last_human_interaction: new Date().toISOString() }).eq('line_user_id', userId);
-          continue;
-        }
-
-        await supabase.from('user_states').update({ is_human_mode: false }).eq('line_user_id', userId);
-        await supabase
-          .from('handover_logs')
-          .update({ status: 'closed', ended_at: new Date().toISOString(), resolved_by: 'timeout_auto' })
-          .eq('line_user_id', userId)
-          .eq('status', 'open');
-      }
-
-      // 4.5 動態訂房流程：管理員在「訂房流程設定」自訂的多步驟對話（最多 5 步，每步最多擷取 3 個答案）。
-      if (settings.is_ai_enabled) {
-        const existingSession = loadBookingSession(userState, settings);
-        const activeFlows = await fetchActiveFlows();
-        const matchedFlow = activeFlows.find((f) => matchTriggerRules(userMessage, f.triggerRules));
-
-        if (matchedFlow) {
-          try {
-            await startBookingFlow(lineClient, lineEvent, settings, userId, nickname, matchedFlow);
-          } catch (e: any) {
-            console.error('[Booking] start flow failed:', e.message);
-          }
-          continue;
-        }
-        if (existingSession) {
-          try {
-            await continueBookingFlow(lineClient, lineEvent, settings, userId, nickname, userMessage, existingSession);
-          } catch (e: any) {
-            console.error('[Booking] continue flow failed:', e.message);
-          }
-          continue;
-        }
-        // session 曾經存在、但已經逾時被 loadBookingSession() 判定過期（不是這位客人從沒問過）：
-        // 不能悄悄把這句回覆丟給下面的 AI/知識庫，客人會覺得系統在答非所問，要明確告知重新開始。
-        if (userState?.booking_session) {
-          await clearBookingSession(userId);
-          const replyText = '不好意思，這次詢問已逾時，請重新輸入一次，謝謝您 🙏';
-          await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
-          await logConversation(userId, nickname, 'outbound', replyText, 'system');
-          continue;
-        }
-      }
-
-      // 5. 呼叫 AI
-      if (!settings.is_ai_enabled) continue;
-
-      const { data: kbItemsData } = await supabase.from('knowledge_base_items').select('*').eq('is_active', true);
-      const kbItems = kbItemsData || [];
-
-      let aiResult = '';
-      try {
-        if (settings.active_ai === 'gpt') aiResult = (await callGPT(settings, userMessage, kbItems)).text;
-        else aiResult = await callGemini(settings, userMessage, kbItems);
-      } catch (e: any) {
-        // 不能把原始錯誤訊息（API 金鑰失效、額度用完…）直接回給客人，客人看了只會一頭霧水；
-        // 客服也不會自動知道 AI 掛了，所以額外推播通知，不能只靠客人截圖來問才發現。
-        console.error('[AI] call failed:', e.message);
-        aiResult = '不好意思，目前系統忙線中，麻煩您稍後再試一次，或點選「真人客服」由專人為您服務 🙏';
-        for (const id of parseCsvKeywords(settings.agent_user_ids)) {
-          try {
-            await lineClient.pushMessage(id, { type: 'text', text: `⚠️ AI 呼叫失敗：【${nickname || '匿名用戶'}】\n錯誤訊息：${e.message}` });
-          } catch {}
-        }
-      }
-
-      if (aiResult) {
-        await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: aiResult });
-        await logConversation(userId, nickname, 'outbound', aiResult, settings.active_ai === 'gpt' ? 'ai_gpt' : 'ai_gemini');
-      }
-    }
-  }
   return { statusCode: 200, body: 'OK' };
 };
+
+async function processLineEvent(lineEvent: WebhookEvent, settings: any, lineClient: Client): Promise<void> {
+  if (!(lineEvent.type === 'message' && lineEvent.message.type === 'text')) return;
+
+  const userId = lineEvent.source.userId!;
+  const userMessage = (lineEvent.message.text || '').trim();
+  const eventId = (lineEvent as any).webhookEventId;
+
+  if (!userMessage || !eventId) return;
+
+  try {
+    // 1. 強制去重 (關鍵防禦) ＋ 2. 獲取當前狀態
+    // 兩者沒有先後依賴（狀態查詢是唯讀的，就算是重複事件也只是白查一次），平行發出省一個來回。
+    const [dedupeRes, userStateRes] = await Promise.all([
+      supabase.from('processed_events').insert({ event_id: eventId }),
+      supabase.from('user_states').select('*').eq('line_user_id', userId).single(),
+    ]);
+
+    if (dedupeRes.error) {
+      console.log(`[Dedupe] Skipping already processed event: ${eventId}`);
+      return;
+    }
+
+    const userState = userStateRes.data;
+    let nickname = userState?.nickname || null;
+    let avatarUrl = userState?.avatar_url || null;
+
+    // 聯絡人紀錄：暱稱/大頭貼只在還沒抓過時才呼叫 LINE Profile API（之後都沿用快取，避免每則訊息都打 API），
+    // 但每則訊息都更新 last_message_at，讓「客製訊息發送」/「客戶資料」能查到所有聊過天的人，不限於有轉真人/訂房過的。
+    if (!nickname) {
+      try { const p = await lineClient.getProfile(userId); nickname = p.displayName; avatarUrl = p.pictureUrl || null; } catch (e) {}
+    }
+    // 這筆 upsert 的結果沒有任何後續邏輯在等（下面用的是上面already查好的 userState），
+    // 延後到回覆送出後再寫，不要卡在客人前面。
+    const isFirstEverMessage = !userState;
+    deferWrite('user_states.upsert', () =>
+      supabase.from('user_states').upsert({
+        line_user_id: userId,
+        nickname,
+        avatar_url: avatarUrl,
+        last_message_at: new Date().toISOString(),
+        // first_message_at 只在第一次見到這個 userId 時寫入一次，之後 upsert 不會再覆蓋
+        ...(isFirstEverMessage ? { first_message_at: new Date().toISOString() } : {}),
+      })
+    );
+
+    logConversation(userId, nickname, 'inbound', userMessage, 'user');
+
+    // 3. 關鍵字偵測 (轉真人客服)
+    const handoverKeywords = parseCsvKeywords(settings.handover_keywords);
+    const matchedKeyword = matchKeyword(userMessage, handoverKeywords);
+
+    if (matchedKeyword) {
+      console.log(`[Handover] Triggered by keyword: ${matchedKeyword}`);
+      try { const p = await lineClient.getProfile(userId); nickname = p.displayName; } catch (e) {}
+
+      const startedAt = new Date().toISOString();
+
+      await supabase.from('user_states').upsert({
+        line_user_id: userId,
+        nickname,
+        is_human_mode: true,
+        last_human_interaction: startedAt
+      });
+
+      await supabase.from('handover_logs').insert({
+        line_user_id: userId,
+        nickname,
+        triggered_keyword: matchedKeyword,
+        started_at: startedAt,
+        status: 'open',
+      });
+
+      const replyText = '已為您轉接真人客服，請稍候。';
+      await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
+      await logConversation(userId, nickname, 'outbound', replyText, 'system');
+
+      const agentIds = settings.agent_user_ids?.split(',').map((id: string) => id.trim()).filter(Boolean);
+      if (agentIds) {
+        for (const id of agentIds) {
+          try { await lineClient.pushMessage(id, { type: 'text', text: `🔔 真人通知：【${nickname}】正在呼叫專人。\n觸發字：${matchedKeyword}\n原文：${userMessage}` }); } catch (e) {}
+        }
+      }
+      return;
+    }
+
+    // 4. 真人模式判斷
+    if (userState?.is_human_mode) {
+      const lastInteraction = new Date(userState.last_human_interaction).getTime();
+      const timeoutMs = (settings.handover_timeout_minutes || 30) * 60 * 1000;
+      if (new Date().getTime() - lastInteraction < timeoutMs) {
+        // 客人還在互動就延後計時——真人客服是直接在 LINE 官方帳號 App 裡回覆客人，這個系統
+        // 看不到真人本人有沒有在處理，只能靠客人是否還在傳訊息判斷「這通還沒結束」。
+        await supabase.from('user_states').update({ last_human_interaction: new Date().toISOString() }).eq('line_user_id', userId);
+        return;
+      }
+
+      await supabase.from('user_states').update({ is_human_mode: false }).eq('line_user_id', userId);
+      await supabase
+        .from('handover_logs')
+        .update({ status: 'closed', ended_at: new Date().toISOString(), resolved_by: 'timeout_auto' })
+        .eq('line_user_id', userId)
+        .eq('status', 'open');
+    }
+
+    // 4.5 動態訂房流程：管理員在「訂房流程設定」自訂的多步驟對話（最多 5 步，每步最多擷取 3 個答案）。
+    if (settings.is_ai_enabled) {
+      const existingSession = loadBookingSession(userState, settings);
+      const activeFlows = await fetchActiveFlows();
+      const matchedFlow = activeFlows.find((f) => matchTriggerRules(userMessage, f.triggerRules));
+
+      if (matchedFlow) {
+        try {
+          await startBookingFlow(lineClient, lineEvent, settings, userId, nickname, matchedFlow);
+        } catch (e: any) {
+          console.error('[Booking] start flow failed:', e.message);
+        }
+        return;
+      }
+      if (existingSession) {
+        try {
+          await continueBookingFlow(lineClient, lineEvent, settings, userId, nickname, userMessage, existingSession);
+        } catch (e: any) {
+          console.error('[Booking] continue flow failed:', e.message);
+        }
+        return;
+      }
+      // session 曾經存在、但已經逾時被 loadBookingSession() 判定過期（不是這位客人從沒問過）：
+      // 不能悄悄把這句回覆丟給下面的 AI/知識庫，客人會覺得系統在答非所問，要明確告知重新開始。
+      if (userState?.booking_session) {
+        await clearBookingSession(userId);
+        const replyText = '不好意思，這次詢問已逾時，請重新輸入一次，謝謝您 🙏';
+        await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
+        await logConversation(userId, nickname, 'outbound', replyText, 'system');
+        return;
+      }
+    }
+
+    // 5. 呼叫 AI
+    if (!settings.is_ai_enabled) return;
+
+    const [{ data: kbItemsData }, conversationContext] = await Promise.all([
+      supabase.from('knowledge_base_items').select('*').eq('is_active', true),
+      fetchConversationContext(userId, userMessage),
+    ]);
+    const kbItems = kbItemsData || [];
+
+    let aiResult = '';
+    try {
+      if (settings.active_ai === 'gpt') {
+        aiResult = (await callGPT(settings, userMessage, kbItems, undefined, conversationContext.history, conversationContext.recentBooking)).text;
+      } else {
+        aiResult = await callGemini(settings, userMessage, kbItems, undefined, conversationContext.history, conversationContext.recentBooking);
+      }
+    } catch (e: any) {
+      // 不能把原始錯誤訊息（API 金鑰失效、額度用完…）直接回給客人，客人看了只會一頭霧水；
+      // 客服也不會自動知道 AI 掛了，所以額外推播通知，不能只靠客人截圖來問才發現。
+      console.error('[AI] call failed:', e.message);
+      aiResult = '不好意思，目前系統忙線中，麻煩您稍後再試一次，或點選「真人客服」由專人為您服務 🙏';
+      for (const id of parseCsvKeywords(settings.agent_user_ids)) {
+        try {
+          await lineClient.pushMessage(id, { type: 'text', text: `⚠️ AI 呼叫失敗：【${nickname || '匿名用戶'}】\n錯誤訊息：${e.message}` });
+        } catch {}
+      }
+    }
+
+    if (aiResult) {
+      await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: aiResult });
+      await logConversation(userId, nickname, 'outbound', aiResult, settings.active_ai === 'gpt' ? 'ai_gpt' : 'ai_gemini');
+    }
+  } catch (e: any) {
+    console.error(`[Event] Unhandled error processing event ${eventId}:`, e.message);
+  }
+}
+
+// 一般 AI 問答（非訂房流程）本身不是多輪對話 API，每次呼叫都是獨立的——沒有這段，客人問完報價
+// 後續再問其他問題，AI 完全不知道剛剛聊過什麼。這裡把最近幾筆對話紀錄（conversations 表，本來就有
+// 記，只是沒被讀回來用）和這位客人最近一筆未取消的訂單/報價摘要（bookings 表）一起帶進去，
+// 讓 AI 至少能接得上「剛剛的報價」「訂單狀態」這類後續問題。
+const CONVERSATION_HISTORY_LIMIT = 10;
+
+async function fetchConversationContext(userId: string, currentMessage: string): Promise<{
+  history: { direction: string; content: string }[];
+  recentBooking: any | null;
+}> {
+  const [historyRes, bookingRes] = await Promise.all([
+    supabase
+      .from('conversations')
+      .select('direction, content')
+      .eq('line_user_id', userId)
+      .order('created_at', { ascending: false })
+      .limit(CONVERSATION_HISTORY_LIMIT + 1),
+    supabase
+      .from('bookings')
+      .select('order_number, checkin_date, checkout_date, headcount, whole_house, total_amount, status, room_type_label')
+      .eq('line_user_id', userId)
+      .neq('status', 'cancelled')
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle(),
+  ]);
+
+  const rows = (historyRes.data || []).reverse();
+  // 客人這句話本身的 inbound 記錄現在是延後寫入（見 deferWrite），正常情況還沒進資料庫，
+  // 所以不能無條件砍掉最後一筆。但萬一時序上它已經寫進去了，尾端就會多一筆跟當下訊息一模一樣的
+  // inbound——那才要拿掉，否則等於把同一句話重複塞兩次進 prompt。
+  while (rows.length) {
+    const last = rows[rows.length - 1];
+    if (last.direction === 'inbound' && last.content === currentMessage) rows.pop();
+    else break;
+  }
+  return { history: rows.slice(-CONVERSATION_HISTORY_LIMIT), recentBooking: bookingRes.data || null };
+}
 
 // ========================================================================
 // 動態訂房流程
 // 設計原則：日期判斷、晚數計算、金額計算全部交給 computeUnifiedMultiNightQuote()（純程式碼），
 // AI 只負責①依每個步驟定義的欄位擷取顧客回答、②把算好的報價結果包裝成罐頭訊息，絕不讓 AI 自己算晚數或金額。
-// 訂房紀錄以 Supabase `bookings` 表為主要來源，Google「報價」試算表只是盡力鏡射的備份，寫入失敗不影響主流程。
+// 訂房紀錄一律以 Supabase `bookings` 表為唯一來源（原本另外鏡射一份到 Google「報價」試算表，該功能已移除）。
 // ========================================================================
 
 const BOOKING_SESSION_TTL_MS = 30 * 60 * 1000; // in_flow／awaiting_confirmation：30 分鐘沒有新回覆，視為放棄這次詢問
@@ -421,18 +532,43 @@ async function clearBookingSession(userId: string) {
   }
 }
 
+// 訂房流程設定改動不頻繁，但過去每一則訊息都重新查兩次 DB（booking_flows + booking_flow_steps）。
+// 短 TTL 記憶體快取：同一個 Netlify function container 在 TTL 內重複用同一份結果，
+// 管理員改了流程設定最多晚 30 秒生效，換來每則訊息少兩次 DB 往返。
+const ACTIVE_FLOWS_CACHE_TTL_MS = 30 * 1000;
+let activeFlowsCache: { data: FlowDef[]; fetchedAt: number } | null = null;
+
 async function fetchActiveFlows(): Promise<FlowDef[]> {
+  const now = Date.now();
+  if (activeFlowsCache && now - activeFlowsCache.fetchedAt < ACTIVE_FLOWS_CACHE_TTL_MS) {
+    return activeFlowsCache.data;
+  }
   const { data: flows } = await supabase.from('booking_flows').select('*').eq('is_active', true).order('display_order');
-  if (!flows || !flows.length) return [];
+  if (!flows || !flows.length) {
+    activeFlowsCache = { data: [], fetchedAt: now };
+    return [];
+  }
   const { data: steps } = await supabase.from('booking_flow_steps').select('*').in('flow_id', flows.map((f: any) => f.id)).order('step_order');
-  return flows.map((f: any) => mapFlowRow(f, (steps || []).filter((s: any) => s.flow_id === f.id)));
+  const result = flows.map((f: any) => mapFlowRow(f, (steps || []).filter((s: any) => s.flow_id === f.id)));
+  activeFlowsCache = { data: result, fetchedAt: now };
+  return result;
 }
 
 async function fetchFlowById(flowId: string): Promise<FlowDef | null> {
-  const { data: flow } = await supabase.from('booking_flows').select('*').eq('id', flowId).single();
-  if (!flow) return null;
-  const { data: steps } = await supabase.from('booking_flow_steps').select('*').eq('flow_id', flowId).order('step_order');
-  return mapFlowRow(flow, steps || []);
+  // 進行中的流程幾乎一定就在剛剛查過的「啟用中流程」快取裡（processLineEvent 一定先呼叫過
+  // fetchActiveFlows()），直接命中就省掉兩次資料庫來回。
+  // 找不到時仍然照舊查資料庫，不能直接回 null——fetchActiveFlows() 只收 is_active=true，
+  // 而「流程進行到一半被後台停用」必須維持原本的行為（繼續走完，不是判定成流程壞掉轉真人）。
+  const cacheIsFresh = activeFlowsCache && Date.now() - activeFlowsCache.fetchedAt < ACTIVE_FLOWS_CACHE_TTL_MS;
+  const cached = cacheIsFresh ? activeFlowsCache!.data.find((f) => f.id === flowId) : undefined;
+  if (cached) return cached;
+
+  const [flowRes, stepsRes] = await Promise.all([
+    supabase.from('booking_flows').select('*').eq('id', flowId).single(),
+    supabase.from('booking_flow_steps').select('*').eq('flow_id', flowId).order('step_order'),
+  ]);
+  if (!flowRes.data) return null;
+  return mapFlowRow(flowRes.data, stepsRes.data || []);
 }
 
 function buildStepExtractionPrompt(todayIso: string, fields: FlowFieldDef[]): string {
@@ -629,12 +765,12 @@ async function renderFlowMessage(
 ): Promise<string> {
   if (!template || !template.includes('[')) return template;
   try {
-    const variables = await fetchMessageVariables();
-    let booking: any = null;
-    if (bookingId) {
-      const { data } = await supabase.from('bookings').select('*').eq('id', bookingId).maybeSingle();
-      booking = data;
-    }
+    // 變數定義與訂單資料互不相依，平行取，不要一個等一個（這段在每則流程訊息都會跑到）。
+    const [variables, bookingRes] = await Promise.all([
+      fetchMessageVariables(),
+      bookingId ? supabase.from('bookings').select('*').eq('id', bookingId).maybeSingle() : Promise.resolve({ data: null }),
+    ]);
+    const booking: any = bookingRes.data;
     return mergeTemplate(
       template,
       buildMergeFields(variables, {
@@ -683,13 +819,6 @@ function toRoomCapacityCounts(roomTypes: any[]): { capacity: number; count: numb
   return Array.from(counts.entries()).map(([capacity, count]) => ({ capacity, count }));
 }
 
-function formatAdultsKids(adults: number | null, kids: number | null, infants: number | null): string {
-  const a = adults ?? 0;
-  const k = kids ?? 0;
-  const i = infants ?? 0;
-  return `${a}大${k}小${i > 0 ? `${i}幼` : ''}`;
-}
-
 // 匯款截止時間：訂房確認當下起算 N 小時，N 是「系統設定」裡可調整的 payment_deadline_hours
 // （沒設定時預設 10 小時）。回傳真實時間戳，寫進 bookings.payment_deadline_at 供「排程管理」
 // 的自動取消逾期訂單使用；computePaymentDeadline() 是給訊息文字用的字串版本，
@@ -710,15 +839,6 @@ function computePaymentDeadline(settings: any): string {
   return `${y}/${m}/${d} ${hh}:${mm}`;
 }
 
-function toTaiwanSlashFromIso(iso: string | null): string {
-  if (!iso) return '';
-  const d = new Date(new Date(iso).getTime() + 8 * 60 * 60 * 1000);
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
-  const day = String(d.getUTCDate()).padStart(2, '0');
-  return `${y}/${m}/${day}`;
-}
-
 function mergeTemplate(template: string, fields: Record<string, string>): string {
   let result = template;
   for (const [key, value] of Object.entries(fields)) {
@@ -727,53 +847,24 @@ function mergeTemplate(template: string, fields: Record<string, string>): string
   return result;
 }
 
+// 變數定義表（[訂單編號] 這類佔位符對應到哪個欄位）幾乎不會變動，但每則要套版的流程訊息都會讀一次。
+// 比照 settings／流程設定用同一套短 TTL 記憶體快取。
+const MESSAGE_VARIABLES_CACHE_TTL_MS = 5 * 60 * 1000;
+let messageVariablesCache: { data: MessageVariable[]; fetchedAt: number } | null = null;
+
 async function fetchMessageVariables(): Promise<MessageVariable[]> {
+  const now = Date.now();
+  if (messageVariablesCache && now - messageVariablesCache.fetchedAt < MESSAGE_VARIABLES_CACHE_TTL_MS) {
+    return messageVariablesCache.data;
+  }
   const { data } = await supabase.from('message_variables').select('variable_name, source, field_key').order('display_order');
-  return (data as MessageVariable[]) || [];
+  const result = (data as MessageVariable[]) || [];
+  messageVariablesCache = { data: result, fetchedAt: now };
+  return result;
 }
 
 function toSlashDate(isoDate: string | null | undefined): string {
   return (isoDate || '').replace(/-/g, '/');
-}
-
-// 鏡射寫入 Google「報價」試算表（盡力而為，失敗不影響資料庫端的訂房流程）
-async function mirrorBookingToSheet(settings: any, booking: any) {
-  if (!settings.quote_sheet_id) return;
-  try {
-    const fields: Record<string, string> = {
-      訂單編號: booking.order_number || '',
-      LINE_USER_ID: booking.line_user_id,
-      LINE_NAME: booking.nickname || '',
-      訂房姓名: booking.name || '',
-      入住日期: toSlashDate(booking.checkin_date),
-      退房日期: toSlashDate(booking.checkout_date),
-      入住天數: booking.nights != null ? String(booking.nights) : '',
-      人數: booking.headcount != null ? String(booking.headcount) : '',
-      大人小孩: formatAdultsKids(booking.adults, booking.kids, booking.infants),
-      是否包棟: booking.whole_house == null ? '' : booking.whole_house ? '是' : '否',
-      房型: booking.room_type_label || '',
-      // 試算表沒有這些欄位標題時會自動略過（mergeUpdateQuoteSheetRow 只寫得出既有的標題），
-      // 想在試算表看到就自己加一欄標題即可，不用改程式。
-      房價: booking.room_amount != null ? String(booking.room_amount) : '',
-      押金: booking.security_deposit != null ? String(booking.security_deposit) : '',
-      訂金: booking.deposit != null ? String(booking.deposit) : '',
-      總金額: booking.total_amount != null ? String(booking.total_amount) : '',
-      預定日期: toTaiwanSlashFromIso(booking.reserved_at),
-      狀態: bookingStatusLabel(booking.status),
-    };
-    let rowNumber: number | null = booking.sheet_row_number ?? null;
-    if (!rowNumber) rowNumber = await findOpenQuoteSheetRow(settings.quote_sheet_id, settings.quote_sheet_gid || '0', booking.line_user_id);
-    if (rowNumber) {
-      await mergeUpdateQuoteSheetRow(settings.quote_sheet_id, settings.quote_sheet_gid || '0', rowNumber, fields);
-    } else {
-      rowNumber = await appendQuoteSheetRow(settings.quote_sheet_id, settings.quote_sheet_gid || '0', fields);
-    }
-    if (rowNumber && rowNumber !== booking.sheet_row_number) {
-      await supabase.from('bookings').update({ sheet_row_number: rowNumber }).eq('id', booking.id);
-    }
-  } catch (e: any) {
-    console.error('[Booking] mirror to sheet failed:', e.message);
-  }
 }
 
 // 不同顧客訂到同一天/同房型（或跟包棟）衝突檢查，比對所有「房間已鎖定」的狀態（待預定～已確認，
@@ -965,7 +1056,6 @@ async function startBookingFlow(
     } catch {}
     const data = await insertNewBooking({ line_user_id: userId, nickname: resolvedNickname, flow_id: flow.id, status: 'inquiring', collected_answers: {} });
     bookingId = data.id;
-    mirrorBookingToSheet(settings, data).catch(() => {});
   } else {
     await supabase.from('bookings').update({ flow_id: flow.id, status: 'inquiring' }).eq('id', bookingId);
   }
@@ -1193,13 +1283,10 @@ async function finishBookingFlow(
   if (!hasAllQuoteFields) {
     const name = pickByLabelHeuristic(collected, allFields, ['姓名', '名字']) || nickname;
     const phone = pickByLabelHeuristic(collected, allFields, ['電話', '手機', '聯絡']);
-    const { data: booking } = await supabase
+    await supabase
       .from('bookings')
       .update({ collected_answers: collected, name, phone, updated_at: new Date().toISOString() })
-      .eq('id', bookingId)
-      .select()
-      .single();
-    if (booking) mirrorBookingToSheet(settings, booking).catch(() => {});
+      .eq('id', bookingId);
 
     const DEFAULT_INCOMPLETE_MESSAGE = '感謝您提供的資訊！我們已經收到，將由客服人員盡快為您確認詳細報價，謝謝您的耐心等候 🙏';
     const replyText = await renderFlowMessage(flow.incompleteMessage || DEFAULT_INCOMPLETE_MESSAGE, settings, userId, nickname, bookingId);
@@ -1267,6 +1354,7 @@ async function finishBookingFlow(
       specialPrices: data.specialPrices,
       specialPriceStacksWithDiscounts: settings.special_price_stacks_with_discounts !== false,
       peakSeasonWeekdayTier: settings.peak_season_weekday_tier || 'peak',
+      weekdayRange: settings.weekday_range || 'sun_thu',
     });
 
     if (result.total == null) {
@@ -1322,9 +1410,8 @@ async function finishBookingFlow(
     const name = pickByLabelHeuristic(collected, allFields, ['姓名', '名字']) || nickname;
     const phone = pickByLabelHeuristic(collected, allFields, ['電話', '手機', '聯絡']);
 
-    // 報價引擎算出來的 total 是「房價」，押金與訂金在這裡一次算齊，
-    // 不再等到確認訂房時去 Google 試算表撈人工填的訂金。押金＝這張訂單開的每間房押金加總
-    // （不再分個別租房/包棟，這個模型下所有訂單都是「開了哪幾間房」）。
+    // 報價引擎算出來的 total 是「房價」，押金與訂金在這裡一次算齊。
+    // 押金＝這張訂單開的每間房押金加總（不再分個別租房/包棟，這個模型下所有訂單都是「開了哪幾間房」）。
     const roomDepositById = new Map(data.roomTypes.map((rt: any) => [rt.id, Number(rt.security_deposit ?? 0)]));
     const securityDeposit = openedRooms.rooms.reduce((sum, r) => sum + (roomDepositById.get(r.id) ?? 0), 0);
     const amounts = computeOrderAmounts(total, securityDeposit, Number(settings.deposit_percent ?? 0));
@@ -1352,8 +1439,6 @@ async function finishBookingFlow(
       .select()
       .single();
     if (updateError) throw updateError;
-
-    mirrorBookingToSheet(settings, updatedBooking).catch(() => {});
 
     const quoteVariables = await fetchMessageVariables();
     // 優先用流程自己的報價確認訊息；還沒設定（例如剛升級、欄位是 NULL）就退回 settings 的舊值。
@@ -1407,8 +1492,7 @@ async function handleBookingConfirmation(
   }
 
   if (isNo) {
-    const { data: booking } = await supabase.from('bookings').update({ status: 'cancelled', updated_at: new Date().toISOString() }).eq('id', session.bookingId).select().single();
-    if (booking) mirrorBookingToSheet(settings, booking).catch(() => {});
+    await supabase.from('bookings').update({ status: 'cancelled', updated_at: new Date().toISOString() }).eq('id', session.bookingId);
     const replyText = '好的，這次先不訂房沒關係！之後想重新試算歡迎再輸入訂房關鍵字，或直接點選「真人客服」讓我們協助您。';
     await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
     await logConversation(userId, nickname, 'outbound', replyText, 'system');
@@ -1440,8 +1524,7 @@ async function handleBookingConfirmation(
   }
 
   if (hasConflict) {
-    const { data: updated } = await supabase.from('bookings').update({ status: 'pending_manual_conflict', updated_at: new Date().toISOString() }).eq('id', booking.id).select().single();
-    if (updated) mirrorBookingToSheet(settings, updated).catch(() => {});
+    await supabase.from('bookings').update({ status: 'pending_manual_conflict', updated_at: new Date().toISOString() }).eq('id', booking.id);
     const replyText = '非常抱歉，這個日期範圍目前可能已經有其他訂單衝突，需要請真人客服為您確認實際空房狀況，我們會盡快與您聯繫，謝謝您的耐心等候 🙏';
     await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
     await logConversation(userId, nickname, 'outbound', replyText, 'system');
@@ -1463,12 +1546,10 @@ async function handleBookingConfirmation(
   const nowIso = new Date().toISOString();
   // payment_deadline_at 存真實時間戳（跟訊息裡 [匯款日時間] 顯示的是同一個截止時間），
   // 供「排程管理」的自動取消逾期未匯款訂單使用。
-  const { data: confirmed } = await supabase
+  await supabase
     .from('bookings')
     .update({ status: 'awaiting_deposit', reserved_at: nowIso, payment_deadline_at: computePaymentDeadlineDate(settings).toISOString(), updated_at: nowIso })
-    .eq('id', booking.id)
-    .select()
-    .single();
+    .eq('id', booking.id);
 
   if (quote.roomNights?.length) {
     const rows = quote.roomNights.flatMap((rn) => rn.roomTypeIds.map((roomTypeId) => ({ booking_id: booking.id, night_date: rn.date, room_type_id: roomTypeId })));
@@ -1481,10 +1562,7 @@ async function handleBookingConfirmation(
   // 訂房確認的當下就把布巾洗滌成本帶出來，管理員之後在訂單管理可以再調整。
   await generateLinenUsage(booking.id, quote.roomIds || [], booking.linen_change_count ?? 1);
 
-  if (confirmed) mirrorBookingToSheet(settings, confirmed).catch(() => {});
-
-  // 房價／押金／訂單總額／訂金在報價當下就一起算好寫進 bookings 了（見 finishBookingFlow），
-  // 這裡直接沿用，不需要再去 Google 試算表撈人工填的訂金。
+  // 房價／押金／訂單總額／訂金在報價當下就一起算好寫進 bookings 了（見 finishBookingFlow），這裡直接沿用。
   const confirmVariables = await fetchMessageVariables();
   const confirmFields = buildMergeFields(confirmVariables, {
     booking,
@@ -1529,8 +1607,6 @@ async function handleRemittanceReport(
     .eq('id', session.bookingId)
     .select()
     .single();
-  if (booking) mirrorBookingToSheet(settings, booking).catch(() => {});
-
   const startedAt = new Date().toISOString();
   await supabase.from('user_states').upsert({ line_user_id: userId, nickname, is_human_mode: true, last_human_interaction: startedAt });
   await supabase.from('handover_logs').insert({
@@ -1560,161 +1636,6 @@ async function handleRemittanceReport(
 }
 
 // ========================================================================
-// 「報價」試算表讀寫（Google Sheets，鏡射備份用，服務帳號需為 Editor 權限）
-// 不寫死欄位順序——一律先讀第一列（標題列）建立「欄位名稱 → 第幾欄」對照表。
-// ========================================================================
-
-let tokenCache: { token: string; expiresAt: number } | null = null;
-let quoteSheetHeaderCache: { key: string; title: string; headers: string[]; fetchedAt: number } | null = null;
-const QUOTE_SHEET_HEADER_CACHE_TTL_MS = 5 * 60 * 1000;
-
-function base64url(input: Buffer | string): string {
-  const buf = typeof input === 'string' ? Buffer.from(input) : input;
-  return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-
-async function getGoogleAccessToken(): Promise<string> {
-  const nowSec = Math.floor(Date.now() / 1000);
-  if (tokenCache && tokenCache.expiresAt - 60 > nowSec) return tokenCache.token;
-
-  const clientEmail = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
-  const rawKey = process.env.GOOGLE_PRIVATE_KEY;
-  if (!clientEmail || !rawKey) throw new Error('尚未設定 GOOGLE_SERVICE_ACCOUNT_EMAIL / GOOGLE_PRIVATE_KEY 環境變數');
-  const privateKey = rawKey.replace(/\\n/g, '\n');
-
-  const header = { alg: 'RS256', typ: 'JWT' };
-  const claim = {
-    iss: clientEmail,
-    scope: 'https://www.googleapis.com/auth/spreadsheets',
-    aud: 'https://oauth2.googleapis.com/token',
-    iat: nowSec,
-    exp: nowSec + 3600,
-  };
-  const unsigned = `${base64url(JSON.stringify(header))}.${base64url(JSON.stringify(claim))}`;
-  const signer = crypto.createSign('RSA-SHA256');
-  signer.update(unsigned);
-  signer.end();
-  const signature = base64url(signer.sign(privateKey));
-  const assertion = `${unsigned}.${signature}`;
-
-  const res = await fetch('https://oauth2.googleapis.com/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: `grant_type=${encodeURIComponent('urn:ietf:params:oauth:grant-type:jwt-bearer')}&assertion=${assertion}`,
-  });
-  const result: any = await res.json();
-  if (!res.ok || result.error) throw new Error(result.error_description || result.error || 'Google 授權失敗');
-
-  tokenCache = { token: result.access_token, expiresAt: nowSec + (result.expires_in || 3600) };
-  return result.access_token;
-}
-
-async function resolveSheetTitle(sheetId: string, gid: string, accessToken: string): Promise<string> {
-  const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}?fields=sheets.properties`, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
-  const result: any = await res.json();
-  if (!res.ok || result.error) throw new Error(result.error?.message || '讀取試算表結構失敗');
-  const sheets = result.sheets || [];
-  const target = sheets.find((s: any) => String(s.properties?.sheetId) === String(gid || '0'));
-  return (target || sheets[0])?.properties?.title || '工作表1';
-}
-
-async function getQuoteSheetHeaders(sheetId: string, gid: string, accessToken: string): Promise<{ title: string; headers: string[] }> {
-  const cacheKey = `${sheetId}:${gid}`;
-  const now = Date.now();
-  if (quoteSheetHeaderCache && quoteSheetHeaderCache.key === cacheKey && now - quoteSheetHeaderCache.fetchedAt < QUOTE_SHEET_HEADER_CACHE_TTL_MS) {
-    return { title: quoteSheetHeaderCache.title, headers: quoteSheetHeaderCache.headers };
-  }
-  const title = await resolveSheetTitle(sheetId, gid, accessToken);
-  const range = encodeURIComponent(`${title}!1:1`);
-  const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${range}`, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
-  const result: any = await res.json();
-  if (!res.ok || result.error) throw new Error(result.error?.message || '讀取「報價」試算表標題列失敗');
-  const headers: string[] = (result.values?.[0] || []).map((h: string) => (h || '').trim());
-  quoteSheetHeaderCache = { key: cacheKey, title, headers, fetchedAt: now };
-  return { title, headers };
-}
-
-async function findOpenQuoteSheetRow(sheetId: string, gid: string, userId: string): Promise<number | null> {
-  const accessToken = await getGoogleAccessToken();
-  const { title, headers } = await getQuoteSheetHeaders(sheetId, gid, accessToken);
-  const userIdx = headers.indexOf('LINE_USER_ID');
-  if (userIdx === -1) return null;
-  const totalIdx = headers.indexOf('總金額');
-  const range = encodeURIComponent(`${title}!A2:Z`);
-  const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${range}`, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
-  const result: any = await res.json();
-  if (!res.ok || result.error) throw new Error(result.error?.message || '讀取「報價」試算表資料失敗');
-  const rows: string[][] = result.values || [];
-  for (let i = rows.length - 1; i >= 0; i--) {
-    const r = rows[i];
-    if (r[userIdx] === userId && (totalIdx === -1 || !r[totalIdx])) {
-      return i + 2;
-    }
-  }
-  return null;
-}
-
-async function appendQuoteSheetRow(sheetId: string, gid: string, rowData: Record<string, string>): Promise<number> {
-  const accessToken = await getGoogleAccessToken();
-  const { title, headers } = await getQuoteSheetHeaders(sheetId, gid, accessToken);
-  const row = headers.map((h) => rowData[h] ?? '');
-  const range = encodeURIComponent(`${title}!A:Z`);
-  const res = await fetch(
-    `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${range}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
-    {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ values: [row] }),
-    }
-  );
-  const result: any = await res.json();
-  if (!res.ok || result.error) throw new Error(result.error?.message || '寫入「報價」試算表失敗');
-  const updatedRange: string = result.updates?.updatedRange || '';
-  const match = updatedRange.match(/![A-Za-z]+(\d+)/);
-  const rowNumber = match ? parseInt(match[1], 10) : 0;
-  if (!rowNumber) throw new Error('無法判斷新增資料所在的列號');
-  return rowNumber;
-}
-
-// 註：原本還有一個 getQuoteSheetRow()，用途是確認訂房時回試算表撈人工填的訂金。
-// 訂金改成由 computeOrderAmounts() 直接算（房價 × 訂金比例），那個函式就沒有呼叫者了，一併移除。
-// 試算表現在只剩「盡力鏡射寫入」這一個方向的用途。
-
-async function mergeUpdateQuoteSheetRow(sheetId: string, gid: string, rowNumber: number, newFields: Record<string, string>): Promise<void> {
-  const accessToken = await getGoogleAccessToken();
-  const { title, headers } = await getQuoteSheetHeaders(sheetId, gid, accessToken);
-  const range = encodeURIComponent(`${title}!A${rowNumber}:Z${rowNumber}`);
-
-  const readRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${range}`, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
-  const readResult: any = await readRes.json();
-  if (!readRes.ok || readResult.error) throw new Error(readResult.error?.message || '讀取「報價」試算表既有資料失敗');
-  const existingValues: string[] = readResult.values?.[0] || [];
-  const existing: Record<string, string> = {};
-  headers.forEach((h, i) => {
-    existing[h] = existingValues[i] ?? '';
-  });
-
-  const merged = { ...existing, ...newFields };
-  const row = headers.map((h) => merged[h] ?? '');
-
-  const writeRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${range}?valueInputOption=USER_ENTERED`, {
-    method: 'PUT',
-    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ values: [row] }),
-  });
-  const writeResult: any = await writeRes.json();
-  if (!writeRes.ok || writeResult.error) throw new Error(writeResult.error?.message || '更新「報價」試算表失敗');
-}
-
-// ========================================================================
 // AI 呼叫 (GPT / Gemini)
 // overrideSystemPrompt：訂房流程的欄位擷取／內部任務用，會完全取代知識庫 system prompt。
 // ========================================================================
@@ -1725,7 +1646,73 @@ async function mergeUpdateQuoteSheetRow(sheetId: string, gid: string, rowNumber:
 const KB_BOUNDARY_INSTRUCTION =
   '重要規則：只能根據下面「參考資料」裡的內容回答問題。參考資料沒有提到的事情，一律誠實回答「不好意思，這個問題我不清楚，建議您聯繫真人客服協助」，絕對不要用自己的知識猜測或編造答案，即使聽起來很合理也一樣。';
 
-async function callGPT(settings: any, currentMessage: string, kbItems: any[], overrideSystemPrompt?: string) {
+// 知識庫檔案型附件過去每一則訊息都重新下載一次內容，短 TTL 記憶體快取避免重複下載
+// （管理員換檔案後最多晚 5 分鐘生效，跟 quote sheet header 快取用同一個 TTL）。
+const KB_FILE_CACHE_TTL_MS = 5 * 60 * 1000;
+const kbFileTextCache = new Map<string, { text: string; fetchedAt: number }>();
+const kbFileBinaryCache = new Map<string, { data: string; mimeType: string; fetchedAt: number }>();
+
+async function fetchKbFileText(url: string): Promise<string> {
+  const cached = kbFileTextCache.get(url);
+  const now = Date.now();
+  if (cached && now - cached.fetchedAt < KB_FILE_CACHE_TTL_MS) return cached.text;
+  try {
+    const r = await fetch(url);
+    const text = r.ok ? await r.text() : '';
+    kbFileTextCache.set(url, { text, fetchedAt: now });
+    return text;
+  } catch (e) {
+    return '';
+  }
+}
+
+async function fetchKbFileBinary(url: string): Promise<{ data: string; mimeType: string } | null> {
+  const cached = kbFileBinaryCache.get(url);
+  const now = Date.now();
+  if (cached && now - cached.fetchedAt < KB_FILE_CACHE_TTL_MS) return cached;
+  try {
+    const r = await fetch(url);
+    if (!r.ok) return null;
+    const b = await r.arrayBuffer();
+    const result = { data: Buffer.from(b).toString('base64'), mimeType: url.endsWith('.pdf') ? 'application/pdf' : 'text/plain', fetchedAt: now };
+    kbFileBinaryCache.set(url, result);
+    return result;
+  } catch (e) {
+    return null;
+  }
+}
+
+// 一般問答（非流程內欄位擷取）用：把最近幾筆對話記錄接到 chat-completion 的訊息陣列裡，
+// 讓 AI 有「上一輪聊過什麼」的記憶，不再是每則訊息都當作全新的獨立對話。
+function buildHistoryMessages(history?: { direction: string; content: string }[]): { role: 'user' | 'assistant'; content: string }[] {
+  return (history || []).map((h) => ({ role: h.direction === 'inbound' ? 'user' as const : 'assistant' as const, content: h.content }));
+}
+
+// 把客人最近一筆未取消的訂單/報價摘要整理成一段話塞進 system prompt，讓 AI 回答「我的訂單」
+// 「剛剛算的價格」這類後續問題時有東西可以參考，而不是只能回「不清楚」。純參考用途，
+// 明確告訴 AI 不要拿這個當作要重新確認或重新計價的依據，避免它自作主張又跑一次訂房流程的邏輯。
+function bookingSummaryBlock(recentBooking: any | null | undefined): string {
+  if (!recentBooking) return '';
+  const parts = [
+    recentBooking.order_number ? `訂單編號 ${recentBooking.order_number}` : null,
+    recentBooking.checkin_date && recentBooking.checkout_date ? `入住 ${recentBooking.checkin_date} 至 ${recentBooking.checkout_date}` : null,
+    recentBooking.headcount ? `人數 ${recentBooking.headcount}` : null,
+    recentBooking.whole_house ? '包棟' : (recentBooking.room_type_label || null),
+    recentBooking.total_amount != null ? `總價 NT$${recentBooking.total_amount}` : null,
+    recentBooking.status ? `狀態 ${bookingStatusLabel(recentBooking.status)}` : null,
+  ].filter(Boolean).join('、');
+  if (!parts) return '';
+  return `這位客人最近一筆詢問／訂單資料（僅供回答問題時參考背景，不代表要重新確認或重新計價）：${parts}\n\n`;
+}
+
+async function callGPT(
+  settings: any,
+  currentMessage: string,
+  kbItems: any[],
+  overrideSystemPrompt?: string,
+  history?: { direction: string; content: string }[],
+  recentBooking?: any | null,
+) {
   const isGPT5 = settings.gpt_model_name.includes('gpt-5');
 
   let systemContent: string;
@@ -1735,18 +1722,21 @@ async function callGPT(settings: any, currentMessage: string, kbItems: any[], ov
     const textBlock = kbItems.filter((i) => i.type === 'text' && i.content).map((i) => `【${i.title}】\n${i.content}`).join('\n\n');
     let fileContent = '';
     for (const item of kbItems.filter((i) => i.type === 'file' && i.file_url)) {
-      try {
-        const r = await fetch(item.file_url);
-        if (r.ok) fileContent += `\n\n【${item.title}】\n${await r.text()}`;
-      } catch (e) {}
+      const text = await fetchKbFileText(item.file_url);
+      if (text) fileContent += `\n\n【${item.title}】\n${text}`;
     }
-    systemContent = `${settings.system_prompt}\n\n${KB_BOUNDARY_INSTRUCTION}\n\n參考資料：\n${textBlock}${fileContent}`;
+    systemContent = `${settings.system_prompt}\n\n${KB_BOUNDARY_INSTRUCTION}\n\n${bookingSummaryBlock(recentBooking)}參考資料：\n${textBlock}${fileContent}`;
   }
 
+  const historyMessages = overrideSystemPrompt ? [] : buildHistoryMessages(history);
+
   if (isGPT5) {
+    const transcript = [...historyMessages, { role: 'user' as const, content: currentMessage }]
+      .map((m) => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`)
+      .join('\n');
     const body: any = {
       model: settings.gpt_model_name,
-      input: `System: ${systemContent}\nUser: ${currentMessage}`,
+      input: `System: ${systemContent}\n${transcript}`,
       reasoning: { effort: settings.gpt_reasoning_effort || 'none' },
       text: { verbosity: settings.gpt_verbosity || 'medium' }
     };
@@ -1761,7 +1751,7 @@ async function callGPT(settings: any, currentMessage: string, kbItems: any[], ov
   }
 
   const openai = new OpenAI({ apiKey: settings.gpt_api_key });
-  const messages: any[] = [{ role: 'system', content: systemContent }, { role: 'user', content: currentMessage }];
+  const messages: any[] = [{ role: 'system', content: systemContent }, ...historyMessages, { role: 'user', content: currentMessage }];
   const params: any = { model: settings.gpt_model_name, messages };
   if (settings.gpt_model_name.startsWith('o1') || settings.gpt_model_name.startsWith('o3')) {
     params.max_completion_tokens = settings.gpt_max_tokens;
@@ -1773,26 +1763,32 @@ async function callGPT(settings: any, currentMessage: string, kbItems: any[], ov
   return { text: completion.choices[0].message.content || '' };
 }
 
-async function callGemini(settings: any, currentMessage: string, kbItems: any[], overrideSystemPrompt?: string) {
+async function callGemini(
+  settings: any,
+  currentMessage: string,
+  kbItems: any[],
+  overrideSystemPrompt?: string,
+  history?: { direction: string; content: string }[],
+  recentBooking?: any | null,
+) {
   if (overrideSystemPrompt) {
     const contents = [{ role: 'user', parts: [{ text: overrideSystemPrompt }, { text: `User: ${currentMessage}` }] }];
     return callGeminiRaw(settings, contents);
   }
 
   const textBlock = kbItems.filter((i) => i.type === 'text' && i.content).map((i) => `【${i.title}】\n${i.content}`).join('\n\n');
-  const userParts: any[] = [{ text: `System: ${settings.system_prompt}\n\n${KB_BOUNDARY_INSTRUCTION}\n\nReference: ${textBlock}` }];
+  const systemParts: any[] = [{ text: `System: ${settings.system_prompt}\n\n${KB_BOUNDARY_INSTRUCTION}\n\n${bookingSummaryBlock(recentBooking)}Reference: ${textBlock}` }];
 
   for (const item of kbItems.filter((i) => i.type === 'file' && i.file_url)) {
-    try {
-      const r = await fetch(item.file_url);
-      if (r.ok) {
-        const b = await r.arrayBuffer();
-        userParts.push({ inline_data: { data: Buffer.from(b).toString('base64'), mime_type: item.file_url.endsWith('.pdf') ? 'application/pdf' : 'text/plain' } });
-      }
-    } catch (e) {}
+    const file = await fetchKbFileBinary(item.file_url);
+    if (file) systemParts.push({ inline_data: { data: file.data, mime_type: file.mimeType } });
   }
-  userParts.push({ text: `User: ${currentMessage}` });
-  const contents = [{ role: 'user', parts: userParts }];
+
+  const contents: any[] = [{ role: 'user', parts: systemParts }];
+  for (const h of history || []) {
+    contents.push({ role: h.direction === 'inbound' ? 'user' : 'model', parts: [{ text: h.content }] });
+  }
+  contents.push({ role: 'user', parts: [{ text: `User: ${currentMessage}` }] });
   return callGeminiRaw(settings, contents);
 }
 

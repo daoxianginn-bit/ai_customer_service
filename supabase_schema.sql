@@ -1,7 +1,14 @@
 -- ============================================================
 -- AI 客服系統完整資料庫腳本（含訂房功能）
+--
+-- 這是專案唯一的資料庫腳本，沒有其他分散的 migration 檔案要另外執行。
 -- 全新 Supabase 專案：整份貼到 SQL Editor 執行一次即可。
--- 既有專案升級：一樣整份重新執行，全部語句都用 IF NOT EXISTS / DROP+CREATE，可重複執行不會出錯。
+-- 既有專案升級：一樣整份重新執行，全部語句都用 IF NOT EXISTS / DROP+CREATE / 條件式 UPDATE，
+--   可重複執行不會出錯，也不會重複套用同一筆資料補正。
+--
+-- 章節順序：1~8 建立資料表與欄位 → 9 RLS 權限 → 10~11 初始資料與儲存空間 → 12 既有資料補正。
+-- 新增欄位請放在對應章節的 ALTER 區塊；新增「改既有資料」的語句請放到第 12 節，
+-- 那裡的前提是所有表格欄位都已經建好。
 -- ============================================================
 
 -- 1. 設定表
@@ -270,9 +277,20 @@ ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS consecutive_stay_discount_c
 ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS consecutive_stay_discount_no_cleaning NUMERIC DEFAULT 0;
 ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS consecutive_stay_default_option TEXT DEFAULT 'no_cleaning';
 ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS peak_season_weekday_tier TEXT DEFAULT 'peak';
+-- 平日算到週幾：'sun_thu'＝日~四是平日、五六是小假日（原本唯一的行為）；'sun_fri'＝日~五是平日、只有週六算小假日。
+ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS weekday_range TEXT DEFAULT 'sun_thu';
 ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS booking_trigger_keywords TEXT DEFAULT '我要訂房,訂房';
+-- 【已停用】quote_sheet_id / quote_sheet_gid：原本用來鏡射寫入 Google「報價」試算表，
+-- 該功能已整個移除，程式不再讀寫這兩個欄位。保留欄位定義只是為了讓既有資料庫不需要跑破壞性的
+-- DROP COLUMN；確定不再需要時可以自行執行：
+--   ALTER TABLE public.settings DROP COLUMN IF EXISTS quote_sheet_id, DROP COLUMN IF EXISTS quote_sheet_gid;
 ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS quote_sheet_id TEXT DEFAULT '';
 ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS quote_sheet_gid TEXT DEFAULT '0';
+
+-- 訂房行事曆訂閱網址（netlify/functions/calendar-feed.ts）的通行碼。行事曆軟體訂閱時沒辦法帶
+-- Authorization 標頭，只能靠網址裡的 ?token= 驗證，所以這個值等同密碼，不要外流。
+-- 空字串＝功能關閉（不是「沒設定就公開」），要啟用請在「系統設定」頁產生一組。
+ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS calendar_feed_token TEXT DEFAULT '';
 ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS booking_welcome_message TEXT DEFAULT '🏡 LINE AI 訂房
 若您想先詢問空房或報價，請直接回覆以下資訊，我們會協助您確認：
 
@@ -488,7 +506,7 @@ UPDATE public.booking_flows
 SET confirm_message = (SELECT booking_confirm_message FROM public.settings LIMIT 1)
 WHERE confirm_message IS NULL;
 
--- 8.6 訂房紀錄（取代 Google「報價」試算表為主要資料來源；仍會盡力鏡射寫入試算表，寫入失敗不影響主流程）
+-- 8.6 訂房紀錄（唯一資料來源；原本另外鏡射一份到 Google「報價」試算表，該功能已移除）
 CREATE TABLE IF NOT EXISTS public.bookings (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     line_user_id TEXT NOT NULL,
@@ -508,7 +526,7 @@ CREATE TABLE IF NOT EXISTS public.bookings (
     deposit NUMERIC,
     status TEXT NOT NULL DEFAULT 'inquiring' CHECK (status IN ('inquiring', 'pending_confirmation', 'confirmed', 'cancelled', 'pending_manual_conflict')),
     collected_answers JSONB DEFAULT '{}',
-    sheet_row_number INTEGER,
+    sheet_row_number INTEGER, -- 【已停用】原本記錄這筆訂單鏡射到 Google「報價」試算表的第幾列，該功能已移除，程式不再讀寫
     reserved_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ DEFAULT now(),
     updated_at TIMESTAMPTZ DEFAULT now()
@@ -840,3 +858,39 @@ DROP POLICY IF EXISTS "Allow Auth Update" ON storage.objects;
 CREATE POLICY "Allow Auth Update" ON storage.objects FOR UPDATE TO authenticated USING (bucket_id = 'knowledge_base');
 DROP POLICY IF EXISTS "Allow Auth Delete" ON storage.objects;
 CREATE POLICY "Allow Auth Delete" ON storage.objects FOR DELETE TO authenticated USING (bucket_id = 'knowledge_base');
+
+-- ========================================================================
+-- 12. 既有資料補正
+-- 這一節動的是「資料」不是「結構」，所以放在最後——上面所有表格與欄位都建好之後才執行。
+-- 全新專案執行到這裡時資料表還是空的，這些語句只會影響 0 筆、不會出錯；
+-- 既有專案重新執行整份腳本時才會實際補到資料。每一段都必須可重複執行不重複套用。
+-- ========================================================================
+
+-- 12.1 幫「報價訂房」類型的流程補上常見問法的觸發關鍵字，避免客人問「還有空房嗎」
+-- 「一晚多少錢」這類問題時，繞過自動報價流程、掉進知識庫拿到一句「請提供資訊」
+-- 卻沒有真的進入自動算價（知識庫 FAQ 只當備援，不會記住客人接下來回的日期/人數）。
+--
+-- 只針對啟用中、類型是「報價訂房」(flow_type='quote') 的流程加關鍵字，用 IN 比對
+-- （客人句子裡出現就觸發），已經存在的關鍵字不會重複加。可重複執行不會出錯。
+--
+-- 關鍵字選字說明（避免跟其他常見問題誤觸發）：
+--   有空房 / 還有房：對應「有空房嗎」「還有房間嗎」，避免用單獨的「房間」兩字，
+--     因為「房間」也會出現在「房間設備壞了」「房間會打掃嗎」這類完全不相關的問題裡。
+--   房價 / 多少錢：對應「房價多少」「一晚多少錢」，避免用單獨的「多少」，理由同上。
+-- 執行完後建議自己到「LINE 自定訊息流程」頁打開這個流程看一下，確認關鍵字符合預期、
+-- 也沒有跟其他流程重疊（存檔時後台會自動提醒重疊，但這裡是直接改資料庫、不會經過那個提醒）。
+UPDATE public.booking_flows
+SET
+  trigger_rules = trigger_rules || COALESCE((
+    SELECT jsonb_agg(jsonb_build_object('keyword', k, 'match', 'contains'))
+    FROM unnest(ARRAY['有空房', '還有房', '房價', '多少錢']) AS k
+    WHERE NOT EXISTS (
+      SELECT 1 FROM jsonb_array_elements(trigger_rules) existing
+      WHERE existing->>'keyword' = k
+    )
+  ), '[]'::jsonb),
+  updated_at = now()
+WHERE flow_type = 'quote' AND is_active = true;
+
+-- 執行後查詢確認結果：
+-- SELECT name, trigger_rules FROM public.booking_flows WHERE flow_type = 'quote' AND is_active = true;

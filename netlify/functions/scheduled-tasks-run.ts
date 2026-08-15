@@ -21,8 +21,7 @@ type TaskExecutor = (config: Record<string, any>, settings: any) => Promise<{ ok
 
 // 取消逾期未匯款的訂單：status='awaiting_deposit' 且 payment_deadline_at 已過的訂單改成 cancelled。
 // 罐頭訊息裡寫「系統將自動取消訂房，不另行通知」是指不通知顧客本人，但客服還是要知道發生了什麼事，
-// 所以會推播給 agent_user_ids；沒有另外鏡射寫入 Google 試算表（那份邏輯整包在 line-webhook.ts，
-// 這裡不重複維護一份，試算表本來就是「盡力而為」的備份，下次該訂單被其他流程碰到時仍會補鏡射一次）。
+// 所以會推播給 agent_user_ids。
 async function cancelUnpaidBookings(_config: Record<string, any>, settings: any): Promise<{ ok: boolean; summary: string }> {
   const nowIso = new Date().toISOString();
   const { data: overdue, error } = await supabase

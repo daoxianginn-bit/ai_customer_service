@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Save, Bot, MessageCircle, UserCheck, Copy, FileSpreadsheet, Clock, SlidersHorizontal } from 'lucide-react';
+import { Save, Bot, MessageCircle, UserCheck, Copy, Clock, SlidersHorizontal, CalendarDays } from 'lucide-react';
 import { useSettings } from '../lib/useSettings';
 import { PageHeader, Button } from '../components/ui';
 
@@ -27,6 +27,24 @@ export default function SystemSettings() {
   const handleCopyWebhook = () => {
     navigator.clipboard.writeText(webhookUrl);
     alert('Webhook URL 已複製');
+  };
+
+  // 訂閱網址帶著 token 當通行碼（行事曆軟體沒辦法帶 Authorization 標頭），所以這串等同密碼。
+  const calendarFeedUrl = settings?.calendar_feed_token
+    ? `${window.location.origin}/.netlify/functions/calendar-feed?token=${encodeURIComponent(settings.calendar_feed_token)}`
+    : '';
+
+  const handleGenerateCalendarToken = () => {
+    if (settings?.calendar_feed_token && !confirm('重新產生後，原本已經訂閱舊網址的行事曆會失效，需要重新訂閱一次。確定要繼續嗎？')) return;
+    const bytes = new Uint8Array(24);
+    crypto.getRandomValues(bytes);
+    const token = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+    setSettings({ ...settings, calendar_feed_token: token });
+  };
+
+  const handleCopyCalendarUrl = () => {
+    navigator.clipboard.writeText(calendarFeedUrl);
+    alert('訂閱網址已複製');
   };
 
   if (loading) return <div>載入中...</div>;
@@ -157,21 +175,25 @@ export default function SystemSettings() {
           </div>
 
           <div className="border-t pt-6 space-y-4">
-            <h4 className="text-sm font-bold text-gray-600 flex items-center gap-2"><FileSpreadsheet className="w-4 h-4" />「報價」試算表（鏡射備份用）</h4>
+            <h4 className="text-sm font-bold text-gray-600 flex items-center gap-2"><CalendarDays className="w-4 h-4" />訂房行事曆訂閱</h4>
             <p className="text-sm text-gray-500">
-              訂房紀錄以資料庫為主要來源，這裡設定的試算表只是同步鏡射一份備份，寫入失敗不影響訂房流程本身。
-              這份試算表要分享給服務帳號（跟知識庫共用同一組），且權限要設為「編輯者」而不是「檢視者」。
+              把這個網址加進 Google 日曆／TimeTree／Apple 行事曆的「訂閱網址」，訂單就會直接顯示在手機日曆上。
+              資料直接讀資料庫，跟「訂單管理」「房況行事曆」完全一致。只會列出已鎖房的訂單（待預定～已確認），待報價和已取消的不會出現。
             </p>
-            <div className="flex flex-wrap gap-3">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">試算表 ID</label>
-                <input name="quote_sheet_id" value={settings.quote_sheet_id || ''} onChange={handleChange} className="w-80 px-4 py-2 border rounded-lg" placeholder="Google 試算表網址中 /d/ 後面那一段" />
+            <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+              ⚠️ 這個網址包含顧客姓名，且任何人拿到都能直接開啟，等同密碼，請勿外流或貼到公開群組。
+            </p>
+            {calendarFeedUrl ? (
+              <div className="flex gap-2 font-mono text-sm">
+                <input type="text" readOnly value={calendarFeedUrl} className="flex-1 px-4 py-2 border rounded-lg bg-gray-50" />
+                <button onClick={handleCopyCalendarUrl} className="p-2 border rounded-lg hover:bg-gray-100" title="複製訂閱網址"><Copy className="w-5 h-5" /></button>
               </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">工作表 GID</label>
-                <input name="quote_sheet_gid" value={settings.quote_sheet_gid || '0'} onChange={handleChange} className="w-28 px-4 py-2 border rounded-lg" placeholder="0" />
-              </div>
-            </div>
+            ) : (
+              <p className="text-sm text-gray-400">尚未啟用。點下方按鈕產生一組通行碼後記得按「儲存設定」。</p>
+            )}
+            <Button variant="secondary" onClick={handleGenerateCalendarToken}>
+              {settings.calendar_feed_token ? '重新產生通行碼' : '產生通行碼並啟用'}
+            </Button>
           </div>
         </div>
         )}
