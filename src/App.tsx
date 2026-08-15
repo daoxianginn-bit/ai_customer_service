@@ -1,5 +1,7 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { useEffect, useState } from 'react';
+import { ThemeProvider } from '@mui/material/styles';
+import { muiTheme } from './muiTheme';
 import { supabase } from './lib/supabase';
 import Login from './pages/Login';
 import Overview from './pages/Overview';
@@ -10,8 +12,6 @@ import AdminAccounts from './pages/AdminAccounts';
 import PricingOverview from './pages/pricing/Overview';
 import QuoteCalculator from './pages/pricing/QuoteCalculator';
 import FormulaSettings from './pages/pricing/FormulaSettings';
-import SpecialDates from './pages/pricing/SpecialDates';
-import Discounts from './pages/pricing/Discounts';
 import StandardMessages from './pages/StandardMessages';
 import MessageVariables from './pages/MessageVariables';
 import CustomMessageSending from './pages/CustomMessageSending';
@@ -89,6 +89,7 @@ function App() {
   }
 
   return (
+    <ThemeProvider theme={muiTheme}>
     <BrowserRouter>
       <Routes>
         <Route path="/login" element={!session ? <Login /> : <Navigate to="/" />} />
@@ -104,8 +105,6 @@ function App() {
           <Route path="/room-pricing" element={<PricingOverview />} />
           <Route path="/room-pricing/quote" element={<QuoteCalculator />} />
           <Route path="/room-pricing/formula" element={<FormulaSettings />} />
-          <Route path="/room-pricing/special-dates" element={<SpecialDates />} />
-          <Route path="/room-pricing/discounts" element={<Discounts />} />
           <Route path="/linens" element={<LinenManagement />} />
           {/* 舊路徑（改版前「耗材維護」獨立頁面）保留轉址，避免書籤失效 */}
           <Route path="/consumables" element={<Navigate to="/linens" replace />} />
@@ -122,6 +121,7 @@ function App() {
         <Route path="*" element={<Navigate to="/" />} />
       </Routes>
     </BrowserRouter>
+    </ThemeProvider>
   );
 }
 

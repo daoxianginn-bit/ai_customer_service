@@ -20,8 +20,6 @@ import {
   Shirt,
   Clock,
   SlidersHorizontal,
-  Sparkles,
-  Percent,
 } from 'lucide-react';
 
 type NavLink = { to: string; label: string; icon: any };
@@ -32,16 +30,8 @@ type NavEntry = ({ kind: 'link' } & NavLink) | ({ kind: 'group' } & NavGroup);
 const navEntries: NavEntry[] = [
   { kind: 'link', to: '/', label: '首頁總覽', icon: LayoutDashboard },
   { kind: 'link', to: '/orders', label: '訂單管理', icon: ClipboardList },
-  {
-    kind: 'group',
-    key: 'rooms',
-    label: '房型管理',
-    icon: DoorOpen,
-    children: [
-      { to: '/room-spaces', label: '房型與空間維護', icon: DoorOpen },
-      { to: '/room-calendar', label: '房況/行事曆', icon: CalendarDays },
-    ],
-  },
+  { kind: 'link', to: '/room-calendar', label: '行事曆', icon: CalendarDays },
+  { kind: 'link', to: '/room-spaces', label: '房型與空間維護', icon: DoorOpen },
   {
     kind: 'group',
     key: 'pricing',
@@ -51,8 +41,6 @@ const navEntries: NavEntry[] = [
       { to: '/room-pricing', label: '價格總覽', icon: LayoutDashboard },
       { to: '/room-pricing/quote', label: '試算報價', icon: Calculator },
       { to: '/room-pricing/formula', label: '計價公式設定', icon: SlidersHorizontal },
-      { to: '/room-pricing/special-dates', label: '特殊日期價格', icon: Sparkles },
-      { to: '/room-pricing/discounts', label: '促銷與折扣', icon: Percent },
     ],
   },
   {

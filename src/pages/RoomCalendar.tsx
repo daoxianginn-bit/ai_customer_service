@@ -1,17 +1,17 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Calendar, dateFnsLocalizer, Views } from 'react-big-calendar';
 import { format, parse, startOfWeek, getDay } from 'date-fns';
 import { zhTW } from 'date-fns/locale';
 import 'react-big-calendar/lib/css/react-big-calendar.css';
 import './RoomCalendar.css';
 import { supabase } from '../lib/supabase';
-import { CalendarDays, ChevronLeft, ChevronRight, SlidersHorizontal } from 'lucide-react';
-import { PageHeader, Modal, StatusBadge } from '../components/ui';
+import { Box, Paper, Stack, Typography, IconButton, Button, Tooltip, Chip, Dialog, DialogTitle, DialogContent } from '@mui/material';
+import { ChevronLeft, ChevronRight, CalendarDays, SlidersHorizontal, X } from 'lucide-react';
+import PageHeaderMui from '../components/ui-mui/PageHeaderMui';
 import { OCCUPYING_STATUSES, bookingStatusLabel } from '../lib/bookingStatus';
 import DateRangeSettingsModal from '../components/DateRangeSettingsModal';
 
-// 行事曆事件用實心色塊呈現，跟 StatusBadge 的淺色徽章不同視覺語言，這裡單獨定義（十六進位色碼，
-// 直接當 inline style 用，不依賴 Tailwind class 疊在 react-big-calendar 自己的樣式表上時的載入順序）。
+// 行事曆事件用實心色塊呈現，這裡單獨定義（十六進位色碼，直接當 MUI sx/style 用）。
 const STATUS_HEX: Record<string, string> = {
   awaiting_deposit: '#facc15',
   reserved: '#a855f7',
@@ -115,16 +115,39 @@ export default function RoomCalendar() {
   // 這個日期落在哪個「旺季」或「連假」區間，回傳命中的那幾筆（可能同時有多筆重疊，例如手動加的跟匯入的重複）。
   const specialRangesForDate = (iso: string) => dateRanges.filter((d) => iso >= d.start_date && iso <= d.end_date);
 
-  const dayPropGetter = useMemo(
-    () => (date: Date) => {
-      const iso = toIso(date.getFullYear(), date.getMonth(), date.getDate());
-      const special = specialRangesForDate(iso);
-      if (special.some((s) => s.range_type === '連假')) return { className: 'rbc-day-holiday' };
-      if (special.some((s) => s.range_type === '旺季')) return { className: 'rbc-day-peak' };
-      return {};
-    },
-    [dateRanges]
-  );
+  const dayPropGetter = (date: Date) => {
+    const iso = toIso(date.getFullYear(), date.getMonth(), date.getDate());
+    const special = specialRangesForDate(iso);
+    if (special.some((s) => s.range_type === '連假')) return { className: 'rbc-day-holiday' };
+    if (special.some((s) => s.range_type === '旺季')) return { className: 'rbc-day-peak' };
+    return {};
+  };
+
+  // 旺季/連假的日期格：日期數字下方加一個小 Chip 標示類型，整格用 Tooltip 包起來，
+  // 滑鼠移過去顯示完整說明（例如「連假：端午連假」），一般日期照舊只顯示數字。
+  const dateHeaderRenderer = ({ date, label }: { date: Date; label: string }) => {
+    const iso = toIso(date.getFullYear(), date.getMonth(), date.getDate());
+    const special = specialRangesForDate(iso);
+    if (special.length === 0) return <Typography variant="caption">{label}</Typography>;
+    const isHoliday = special.some((s) => s.range_type === '連假');
+    const tooltipText = special.map((s) => `${s.range_type}${s.label ? `：${s.label}` : ''}`).join('、');
+    return (
+      <Tooltip title={tooltipText} arrow placement="top">
+        <Stack alignItems="center" spacing={0.25} sx={{ cursor: 'help' }}>
+          <Typography variant="caption">{label}</Typography>
+          <Chip
+            label={isHoliday ? '連假' : '旺季'}
+            size="small"
+            sx={{
+              height: 16, fontSize: '0.6rem', px: 0, '& .MuiChip-label': { px: 0.5 },
+              bgcolor: isHoliday ? '#fecaca' : '#fed7aa',
+              color: isHoliday ? '#991b1b' : '#9a3412',
+            }}
+          />
+        </Stack>
+      </Tooltip>
+    );
+  };
 
   const eventPropGetter = (event: BookingEvent) => ({
     style: {
@@ -139,40 +162,40 @@ export default function RoomCalendar() {
   const goNextMonth = () => setCalendarDate(new Date(year, month + 1, 1));
 
   return (
-    <div className="max-w-6xl mx-auto space-y-4">
-      <PageHeader
-        icon={<CalendarDays className="w-6 h-6 text-green-600" />}
-        title="房況/行事曆"
-        description="每個色塊是一筆訂單（房客／房型），顏色代表訂單狀態；淺橘／淺紅底色代表旺季／連假。點色塊可以查看該筆訂單詳情。"
+    <Box sx={{ maxWidth: 1200, mx: 'auto', display: 'flex', flexDirection: 'column', gap: 2 }}>
+      <PageHeaderMui
+        icon={<CalendarDays size={26} color="#16a34a" />}
+        title="行事曆"
+        description="每個色塊是一筆訂單（房客／房型），顏色代表訂單狀態；旺季／連假日期會有標籤，滑鼠移過去可以看詳細說明。點色塊可以查看該筆訂單詳情。"
         action={
-          <div className="flex items-center gap-2">
-            <button onClick={goPrevMonth} className="p-2 border rounded-lg hover:bg-gray-50"><ChevronLeft className="w-4 h-4" /></button>
-            <span className="font-semibold text-gray-700 w-24 text-center">{year}年{month + 1}月</span>
-            <button onClick={goNextMonth} className="p-2 border rounded-lg hover:bg-gray-50"><ChevronRight className="w-4 h-4" /></button>
-            <button
-              onClick={() => setDateRangeModalOpen(true)}
-              className="flex items-center gap-1.5 bg-green-600 text-white px-3 py-2 rounded-lg text-sm hover:bg-green-700 ml-1"
-            >
-              <SlidersHorizontal className="w-4 h-4" /> 旺季/連假日期設定
-            </button>
-          </div>
+          <Stack direction="row" spacing={1} alignItems="center">
+            <IconButton onClick={goPrevMonth} size="small" sx={{ border: '1px solid', borderColor: 'divider' }}><ChevronLeft size={18} /></IconButton>
+            <Typography fontWeight={600} sx={{ width: 92, textAlign: 'center' }}>{year}年{month + 1}月</Typography>
+            <IconButton onClick={goNextMonth} size="small" sx={{ border: '1px solid', borderColor: 'divider' }}><ChevronRight size={18} /></IconButton>
+            <Button variant="contained" startIcon={<SlidersHorizontal size={16} />} onClick={() => setDateRangeModalOpen(true)} sx={{ ml: 1 }}>
+              旺季/連假日期設定
+            </Button>
+          </Stack>
         }
       />
 
-      <div className="flex flex-wrap gap-4 text-xs text-gray-500">
+      <Stack direction="row" flexWrap="wrap" gap={2} rowGap={1} alignItems="center">
         {CALENDAR_STATUSES.map((status) => (
-          <span key={status} className="flex items-center gap-1.5">
-            <span className="w-3 h-3 rounded" style={{ backgroundColor: STATUS_HEX[status] }} />
-            {bookingStatusLabel(status)}
-          </span>
+          <Stack key={status} direction="row" alignItems="center" spacing={0.75}>
+            <Box sx={{ width: 12, height: 12, borderRadius: 0.5, bgcolor: STATUS_HEX[status] }} />
+            <Typography variant="caption" color="text.secondary">{bookingStatusLabel(status)}</Typography>
+          </Stack>
         ))}
-        <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded border border-dashed" style={{ backgroundColor: QUOTED_HEX }} />已報價（未鎖房型）</span>
-        <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded bg-orange-100 border border-orange-300" />旺季</span>
-        <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded bg-red-100 border border-red-300" />連假</span>
-      </div>
+        <Stack direction="row" alignItems="center" spacing={0.75}>
+          <Box sx={{ width: 12, height: 12, borderRadius: 0.5, bgcolor: QUOTED_HEX, border: '1px dashed #fff', outline: '1px solid #d1d5db' }} />
+          <Typography variant="caption" color="text.secondary">已報價（未鎖房型）</Typography>
+        </Stack>
+        <Chip label="旺季" size="small" sx={{ height: 20, fontSize: '0.65rem', bgcolor: '#fed7aa', color: '#9a3412' }} />
+        <Chip label="連假" size="small" sx={{ height: 20, fontSize: '0.65rem', bgcolor: '#fecaca', color: '#991b1b' }} />
+      </Stack>
 
-      <div className="room-calendar bg-white rounded-xl shadow-sm border p-3" style={{ height: 720 }}>
-        {loading && <div className="text-center text-gray-400 text-sm py-2">載入中...</div>}
+      <Paper variant="outlined" className="room-calendar" sx={{ p: 1.5, height: 720 }}>
+        {loading && <Typography variant="body2" color="text.secondary" align="center" sx={{ py: 0.5 }}>載入中...</Typography>}
         <Calendar
           localizer={localizer}
           culture="zh-TW"
@@ -185,37 +208,50 @@ export default function RoomCalendar() {
           popup
           dayPropGetter={dayPropGetter}
           eventPropGetter={eventPropGetter as any}
+          components={{ month: { dateHeader: dateHeaderRenderer as any } }}
           onSelectEvent={(event: any) => setSelectedEvent(event)}
           messages={{ noEventsInRange: '這段期間沒有訂單', showMore: (total: number) => `還有 ${total} 筆` }}
           style={{ height: '100%' }}
         />
-      </div>
+      </Paper>
 
       {/* ============== 點色塊看訂單詳情 ============== */}
-      <Modal open={!!selectedEvent} title="訂單詳情" onClose={() => setSelectedEvent(null)}>
-        {selectedEvent && (
-          <div className="border rounded-lg p-3 text-sm flex justify-between items-center gap-3">
-            <div>
-              <p className="font-medium text-gray-800">{selectedEvent.booking.name || selectedEvent.booking.nickname || '未取得'}</p>
-              <p className="text-xs text-gray-500">
-                {selectedEvent.booking.whole_house ? '包棟' : selectedEvent.booking.room_type_label || '房型未定'}
-                {'　'}
-                {String(selectedEvent.booking.checkin_date).replace(/-/g, '/')} ~ {String(selectedEvent.booking.checkout_date).replace(/-/g, '/')}
-              </p>
-            </div>
-            <div className="text-right shrink-0">
-              {selectedEvent.booking.total_amount != null && <p className="text-gray-700 mb-1">NT$ {Number(selectedEvent.booking.total_amount).toLocaleString()}</p>}
-              <StatusBadge status={selectedEvent.status} />
-            </div>
-          </div>
-        )}
-      </Modal>
+      <Dialog open={!!selectedEvent} onClose={() => setSelectedEvent(null)} maxWidth="xs" fullWidth>
+        <DialogTitle sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          訂單詳情
+          <IconButton size="small" onClick={() => setSelectedEvent(null)}><X size={18} /></IconButton>
+        </DialogTitle>
+        <DialogContent sx={{ pb: 3 }}>
+          {selectedEvent && (
+            <Stack direction="row" justifyContent="space-between" alignItems="flex-start" spacing={2}>
+              <Box>
+                <Typography fontWeight={600}>{selectedEvent.booking.name || selectedEvent.booking.nickname || '未取得'}</Typography>
+                <Typography variant="caption" color="text.secondary" component="div">
+                  {selectedEvent.booking.whole_house ? '包棟' : selectedEvent.booking.room_type_label || '房型未定'}
+                  {'　'}
+                  {String(selectedEvent.booking.checkin_date).replace(/-/g, '/')} ~ {String(selectedEvent.booking.checkout_date).replace(/-/g, '/')}
+                </Typography>
+              </Box>
+              <Box sx={{ textAlign: 'right', flexShrink: 0 }}>
+                {selectedEvent.booking.total_amount != null && (
+                  <Typography variant="body2" sx={{ mb: 0.5 }}>NT$ {Number(selectedEvent.booking.total_amount).toLocaleString()}</Typography>
+                )}
+                <Chip
+                  label={bookingStatusLabel(selectedEvent.status)}
+                  size="small"
+                  sx={{ bgcolor: selectedEvent.quoted ? QUOTED_HEX : STATUS_HEX[selectedEvent.status] || '#9ca3af', color: '#fff' }}
+                />
+              </Box>
+            </Stack>
+          )}
+        </DialogContent>
+      </Dialog>
 
       <DateRangeSettingsModal
         open={dateRangeModalOpen}
         onClose={() => setDateRangeModalOpen(false)}
         onSaved={fetchDateRanges}
       />
-    </div>
+    </Box>
   );
 }

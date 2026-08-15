@@ -201,7 +201,7 @@ export default function PricingOverview() {
               })}
             </div>
           )}
-          <Link to="/room-pricing/discounts" className="text-xs text-green-700 hover:underline inline-flex items-center gap-1">
+          <Link to="/room-pricing/formula" className="text-xs text-green-700 hover:underline inline-flex items-center gap-1">
             管理所有促銷方案 <ArrowRight className="w-3 h-3" />
           </Link>
         </div>
