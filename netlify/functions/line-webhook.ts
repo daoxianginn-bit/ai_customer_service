@@ -250,6 +250,63 @@ const BOOKING_SESSION_TTL_MS = 30 * 60 * 1000; // in_flow／awaiting_confirmatio
 const REMITTANCE_SESSION_BUFFER_MS = 24 * 60 * 60 * 1000;
 const BOOKING_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
+// 答案欄位設成「日期」格式時，接受這些寫法（民國年可以帶分隔符也可以不帶；沒有年份就
+// 直接帶入今年，不像算價欄位的 checkin/checkout 會有「已過today就推到明年」那套邏輯——
+// 這裡是通用格式檢查，不是訂房日期本身，不需要那個假設）：
+//   20260601／2026/06/01／2026-06-01（西元）
+//   115/06/01／1150601（民國，年份 1~3 碼，換算西元 ＝ 民國年 + 1911）
+//   0601／06/01（只有月日，年份帶入今年）
+// 驗證失敗（月份超過 12、日期超過當月天數等）一律回傳 null，呼叫端會當作格式錯誤重新請顧客輸入。
+function buildValidatedIsoDate(year: number, month: number, day: number): string | null {
+  if (!(month >= 1 && month <= 12)) return null;
+  const d = new Date(year, month - 1, day);
+  if (d.getFullYear() !== year || d.getMonth() !== month - 1 || d.getDate() !== day) return null; // 例如 2/30 會被 JS 自動進位，視為無效
+  return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+}
+
+function normalizeDateInput(raw: string): string | null {
+  const trimmed = raw.trim();
+  const todayYear = taiwanToday().getFullYear();
+
+  // 有分隔符（/、-、.）：年/月/日 或 月/日
+  const withSeparator = trimmed.match(/^(\d{1,4})[/\-.](\d{1,2})[/\-.](\d{1,2})$/);
+  if (withSeparator) {
+    const [, yStr, mStr, dStr] = withSeparator;
+    const year = yStr.length === 4 ? Number(yStr) : Number(yStr) + 1911; // 4 碼＝西元，1~3 碼＝民國
+    return buildValidatedIsoDate(year, Number(mStr), Number(dStr));
+  }
+  const monthDayOnly = trimmed.match(/^(\d{1,2})[/\-.](\d{1,2})$/);
+  if (monthDayOnly) {
+    const [, mStr, dStr] = monthDayOnly;
+    return buildValidatedIsoDate(todayYear, Number(mStr), Number(dStr));
+  }
+
+  // 純數字、無分隔符：8 碼＝西元 YYYYMMDD，7 碼＝民國 YYYMMDD，4 碼＝ MMDD（今年）
+  if (/^\d{8}$/.test(trimmed)) {
+    return buildValidatedIsoDate(Number(trimmed.slice(0, 4)), Number(trimmed.slice(4, 6)), Number(trimmed.slice(6, 8)));
+  }
+  if (/^\d{7}$/.test(trimmed)) {
+    return buildValidatedIsoDate(Number(trimmed.slice(0, 3)) + 1911, Number(trimmed.slice(3, 5)), Number(trimmed.slice(5, 7)));
+  }
+  if (/^\d{4}$/.test(trimmed)) {
+    return buildValidatedIsoDate(todayYear, Number(trimmed.slice(0, 2)), Number(trimmed.slice(2, 4)));
+  }
+
+  return null;
+}
+
+// 答案欄位的格式檢查／正規化：value_type 沒設定＝不限，只要有擷取到內容就算通過、原樣帶回。
+// 'date' 會把上面接受的各種寫法統一轉成 YYYY-MM-DD 存進 collected，不是只驗證格式；
+// 'number' 檢查是否為純數字；'string' 只要求非空白文字，不額外限制內容。
+// 回傳 null 代表格式不符，呼叫端要當作沒收集到、請顧客重新輸入。
+function normalizeFieldValue(valueType: FlowFieldDef['value_type'], raw: string): string | null {
+  const trimmed = String(raw ?? '').trim();
+  if (!trimmed) return null;
+  if (valueType === 'date') return normalizeDateInput(trimmed);
+  if (valueType === 'number') return Number.isNaN(Number(trimmed)) ? null : trimmed;
+  return trimmed;
+}
+
 function bookingSessionTtlMs(phase: BookingSession['phase'], settings: any): number {
   if (phase !== 'awaiting_remittance') return BOOKING_SESSION_TTL_MS;
   const hours = Number(settings?.payment_deadline_hours) > 0 ? Number(settings.payment_deadline_hours) : 10;
@@ -263,6 +320,9 @@ interface FlowFieldDef {
   // quote_field='room_count' 時代表這是「幾人房」的間數，例如 2 就是 2 人房要開幾間。
   // 這個值不影響價格（價格仍由 bookingEngine 決定），只用來決定實際開哪幾間房。
   room_capacity?: number | null;
+  // 顧客回覆的格式限制：null/undefined＝不限（沿用既有行為）。擷取到的值不符合格式時，
+  // 不會當作已收集，會回「OO格式錯誤，請重新輸入」讓顧客重打，不會進到下一步。
+  value_type?: 'date' | 'number' | 'string' | null;
 }
 interface FlowStepDef {
   step_order: number;
@@ -980,7 +1040,30 @@ async function continueBookingFlow(
           console.error('[Booking] step extraction failed:', e.message);
           return {} as Record<string, string>;
         });
+  // 格式不符的欄位當作沒收集到（從 extracted 移除，不會寫進 collected），跟「完全沒提到」
+  // 分開回覆，讓顧客知道是格式錯誤要重打，不是漏答。'date' 類型會順便把值正規化成 YYYY-MM-DD
+  // 存回 extracted，後面算價/確認訊息用到的就是統一格式，不管顧客當初打哪種寫法。
+  const invalidFields: FlowFieldDef[] = [];
+  for (const f of currentStep.fields) {
+    if (extracted[f.key] === undefined) continue;
+    const normalized = normalizeFieldValue(f.value_type, extracted[f.key]);
+    if (normalized === null) {
+      invalidFields.push(f);
+      delete extracted[f.key];
+    } else {
+      extracted[f.key] = normalized;
+    }
+  }
+
   const collected = { ...session.collected, ...extracted };
+
+  if (invalidFields.length > 0) {
+    await saveBookingSession(userId, { ...session, collected });
+    const replyText = `${invalidFields.map((f) => f.label).join('、')}格式錯誤，請重新輸入`;
+    await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
+    await logConversation(userId, nickname, 'outbound', replyText, 'system');
+    return;
+  }
 
   const missingFields = currentStep.fields.filter((f) => !collected[f.key]);
   if (missingFields.length > 0) {

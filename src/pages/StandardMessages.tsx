@@ -54,9 +54,10 @@ function decodeQuoteField(value: string): { quote_field: string | null; room_cap
   return { quote_field: value || null, room_capacity: null };
 }
 
-// 這四個算價欄位全部收集齊，流程走完才算得出金額、才會進到報價確認與付款確認；
-// 少任何一個都會轉真人客服，那兩段訊息永遠不會送出。
-const QUOTE_REQUIRED_FIELDS = ['checkin_date', 'checkout_date', 'headcount', 'whole_house'];
+// 這三個算價欄位全部收集齊，流程走完才算得出金額、才會進到報價確認與付款確認；
+// 少任何一個都會轉真人客服，那兩段訊息永遠不會送出。公式改成不分包棟/個別房的統一公式後，
+// 「是否包棟」不再是必要欄位，這裡要跟 line-webhook.ts 的 hasAllQuoteFields 保持一致。
+const QUOTE_REQUIRED_FIELDS = ['checkin_date', 'checkout_date', 'headcount'];
 
 const MAX_STEPS = 5;
 const MAX_FIELDS_PER_STEP = 10;
@@ -87,7 +88,16 @@ function findOverlappingFlowName(rules: TriggerRule[], excludeId: string, otherF
   return null;
 }
 
-type FlowField = { key: string; label: string; quote_field: string };
+// value_type：顧客回覆的格式限制，''＝不限。擷取到的值不符合格式時系統會請顧客重新輸入，
+// 不會當作已收集（跟「用途」quote_field 是兩件事：用途決定值拿去做什麼，格式決定值長怎樣才算數）。
+type FlowField = { key: string; label: string; quote_field: string; value_type: string };
+
+const VALUE_TYPE_OPTIONS: { value: string; label: string }[] = [
+  { value: '', label: '格式不限' },
+  { value: 'date', label: '格式：日期' },
+  { value: 'number', label: '格式：數字' },
+  { value: 'string', label: '格式：字串' },
+];
 type FlowStep = { step_order: number; message_template: string; fields: FlowField[] };
 type FlowType = 'quote' | 'collect' | 'query';
 type Flow = {
@@ -125,7 +135,7 @@ const emptyFlow = (displayOrder: number): Flow => ({
   not_found_message: '',
   is_active: true,
   display_order: displayOrder,
-  steps: [{ step_order: 1, message_template: '', fields: [{ key: newId(), label: '', quote_field: '' }] }],
+  steps: [{ step_order: 1, message_template: '', fields: [{ key: newId(), label: '', quote_field: '', value_type: '' }] }],
 });
 
 function collectedQuoteFields(flow: Flow): Set<string> {
@@ -286,6 +296,7 @@ export default function StandardMessages() {
             key: f.key,
             label: f.label,
             quote_field: encodeQuoteField(f.quote_field, f.room_capacity),
+            value_type: f.value_type || '',
           })),
         })),
     }));
@@ -349,7 +360,7 @@ export default function StandardMessages() {
   const addStep = () => {
     if (!draft || draft.steps.length >= MAX_STEPS) return;
     patchDraft({
-      steps: [...draft.steps, { step_order: draft.steps.length + 1, message_template: '', fields: [{ key: newId(), label: '', quote_field: '' }] }],
+      steps: [...draft.steps, { step_order: draft.steps.length + 1, message_template: '', fields: [{ key: newId(), label: '', quote_field: '', value_type: '' }] }],
     });
   };
   const removeStep = (i: number) =>
@@ -359,7 +370,7 @@ export default function StandardMessages() {
 
   const addField = (si: number) => {
     if (!draft || draft.steps[si].fields.length >= MAX_FIELDS_PER_STEP) return;
-    updateStep(si, { fields: [...draft.steps[si].fields, { key: newId(), label: '', quote_field: '' }] });
+    updateStep(si, { fields: [...draft.steps[si].fields, { key: newId(), label: '', quote_field: '', value_type: '' }] });
   };
   const removeField = (si: number, fi: number) =>
     draft && updateStep(si, { fields: draft.steps[si].fields.filter((_, x) => x !== fi) });
@@ -423,7 +434,7 @@ export default function StandardMessages() {
         flow_id: flowId,
         step_order: s.step_order,
         message_template: s.message_template,
-        fields: s.fields.map((f) => ({ key: f.key, label: f.label.trim(), ...decodeQuoteField(f.quote_field) })),
+        fields: s.fields.map((f) => ({ key: f.key, label: f.label.trim(), value_type: f.value_type || null, ...decodeQuoteField(f.quote_field) })),
       }));
       const { error: stepsError } = await supabase.from('booking_flow_steps').insert(stepRows);
       if (stepsError) throw stepsError;
@@ -740,6 +751,16 @@ export default function StandardMessages() {
                                       className="flex-1 px-2 py-1.5 border rounded text-sm"
                                       placeholder="答案名稱，例如：入住日期"
                                     />
+                                    <select
+                                      value={field.value_type}
+                                      onChange={(e) => updateField(si, fi, { value_type: e.target.value })}
+                                      title="限制顧客回覆必須符合的格式，不符合會請顧客重新輸入"
+                                      className="w-32 px-2 py-1.5 border rounded text-sm bg-white shrink-0"
+                                    >
+                                      {VALUE_TYPE_OPTIONS.map((o) => (
+                                        <option key={o.value} value={o.value}>{o.label}</option>
+                                      ))}
+                                    </select>
                                     {/* 一般收集型沒有下游用途可選（純收集），不顯示用途下拉，讓畫面單純一點 */}
                                     {draft!.flow_type !== 'collect' && (
                                       <>
@@ -763,6 +784,11 @@ export default function StandardMessages() {
                                   </div>
                                 ))}
                               </div>
+                              {step.fields.some((f) => f.value_type === 'date') && (
+                                <p className="text-xs text-gray-400 mt-1.5">
+                                  格式：日期會接受 20260601、2026/06/01、115/06/01（民國）、1150601、0601、06/01 這幾種寫法，沒寫年份就當作今年，統一轉成 YYYY-MM-DD 存起來。
+                                </p>
+                              )}
                             </div>
                           </div>
                         </div>
@@ -794,6 +820,11 @@ export default function StandardMessages() {
                                     {f.quote_field && (
                                       <span className="text-gray-400">
                                         （{f.quote_field.startsWith('room_count:') ? '決定開房' : f.quote_field === 'order_number' ? '查詢依據' : '算價'}）
+                                      </span>
+                                    )}
+                                    {f.value_type && (
+                                      <span className="text-gray-400">
+                                        （{VALUE_TYPE_OPTIONS.find((o) => o.value === f.value_type)?.label}）
                                       </span>
                                     )}
                                   </span>
