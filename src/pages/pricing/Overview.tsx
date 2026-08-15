@@ -2,15 +2,17 @@ import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { supabase } from '../../lib/supabase';
 import { OCCUPYING_STATUSES } from '../../lib/bookingStatus';
-import { LayoutDashboard, DoorOpen, Sparkles, Percent, DollarSign, Save, ArrowRight, Lightbulb } from 'lucide-react';
-import { PageHeader, Button, StatCard } from '../../components/ui';
+import { Box, Paper, Stack, Typography, Chip, Divider, Table, TableHead, TableBody, TableRow, TableCell, TableContainer } from '@mui/material';
+import { LayoutDashboard, DoorOpen, Sparkles, Percent, DollarSign, ArrowRight, Lightbulb, CalendarDays } from 'lucide-react';
+import PageHeaderMui from '../../components/ui-mui/PageHeaderMui';
+import StatCardMui from '../../components/ui-mui/StatCardMui';
 
 function promotionLabel(p: any): string {
   return p.discount_type === 'amount' ? `${p.name}（折抵 NT$${(p.discount_amount || 0).toLocaleString()}）` : `${p.name}（${p.discount_percent}%）`;
 }
 
 const TIPS = [
-  '所有設定改完記得按右上角「儲存所有設定」，畫面上的修改才會真正寫入資料庫。',
+  '每個設定分頁都是唯讀顯示，點「編輯」才能修改，各自獨立儲存，不會互相影響。',
   '特殊日期價格優先於一般日期加價設定，命中時會直接覆蓋整段計算。',
   '低於「最少接待人數」的詢問，LINE 對話流程會自動轉真人客服，不會自動報價。',
   '促銷方案同時間只會有一筆生效中（單選），不是多筆同時疊加。',
@@ -18,7 +20,6 @@ const TIPS = [
 
 export default function PricingOverview() {
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
 
   const [settingsId, setSettingsId] = useState<string | null>(null);
   const [bedBaseRate, setBedBaseRate] = useState(1000);
@@ -79,185 +80,158 @@ export default function PricingOverview() {
     setLoading(false);
   };
 
-  const handleSave = async () => {
-    if (!settingsId) return;
-    setSaving(true);
-    try {
-      await supabase
-        .from('settings')
-        .update({
-          bed_base_rate: bedBaseRate,
-          full_occupancy_bonus: fullOccupancyBonus,
-          min_group_headcount: minGroupHeadcount,
-          date_surcharge_small_holiday: dateSurchargeSmall,
-          date_surcharge_peak: dateSurchargePeak,
-          date_surcharge_long_holiday: dateSurchargeHoliday,
-          active_promotion_id: activePromotionId || null,
-        })
-        .eq('id', settingsId);
-      await fetchAll();
-      alert('已儲存！');
-    } catch (err: any) {
-      alert(`儲存失敗：${err.message}`);
-    } finally {
-      setSaving(false);
-    }
+  // 促銷方案是單選、低風險、立即可逆的切換，點了就直接寫入，不用另外按儲存
+  // （其餘會實際改動金額欄位的設定，一律只在「計價公式設定」的對應區塊編輯）。
+  const selectActivePromotion = async (id: string) => {
+    const next = activePromotionId === id ? '' : id;
+    setActivePromotionId(next);
+    if (settingsId) await supabase.from('settings').update({ active_promotion_id: next || null }).eq('id', settingsId);
   };
 
   const activeRoomCount = roomTypes.filter((r) => r.is_active !== false).length;
 
-  if (loading) return <div className="p-8 text-center text-gray-500">載入中...</div>;
+  if (loading) return <Box sx={{ p: 8, textAlign: 'center', color: 'text.secondary' }}>載入中...</Box>;
 
   return (
-    <div className="max-w-6xl mx-auto space-y-4">
-      <PageHeader
-        icon={<LayoutDashboard className="w-6 h-6 text-green-600" />}
-        title="價格設定總覽"
-        description="快速管理房型、促銷與特殊日期設定。以下是常用設定的捷徑，完整內容請到左側「價格設定」子選單各頁面管理。"
-        action={
-          <Button onClick={handleSave} loading={saving} icon={<Save className="w-4 h-4" />}>
-            {saving ? '儲存中...' : '儲存所有設定'}
-          </Button>
-        }
+    <Box sx={{ maxWidth: 1200, mx: 'auto', display: 'flex', flexDirection: 'column', gap: 2 }}>
+      <PageHeaderMui
+        icon={<LayoutDashboard size={26} color="#16a34a" />}
+        title="價格總覽"
+        description="快速預覽房型、公式與促銷設定目前的狀態。這裡都是唯讀捷徑，實際修改請點連結到「計價公式設定」對應區塊進行。"
       />
 
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <StatCard icon={<DoorOpen className="w-4 h-4" />} label="房型總數" value={activeRoomCount} />
-        <StatCard icon={<Sparkles className="w-4 h-4" />} label="特殊日期" value={specialPriceCount} />
-        <StatCard icon={<Percent className="w-4 h-4" />} label="促銷方案" value={promotions.length} />
-        <StatCard
-          icon={<DollarSign className="w-4 h-4" />}
+      <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr 1fr', md: '1fr 1fr 1fr 1fr' }, gap: 2 }}>
+        <StatCardMui icon={<DoorOpen size={16} />} label="房型總數" value={activeRoomCount} />
+        <StatCardMui icon={<Sparkles size={16} />} label="特殊日期" value={specialPriceCount} />
+        <StatCardMui icon={<Percent size={16} />} label="促銷方案" value={promotions.length} />
+        <StatCardMui
+          icon={<DollarSign size={16} />}
           label="預估本月營收"
           value={`NT$ ${monthRevenue.toLocaleString()}`}
-          valueClassName="text-green-600"
+          valueColor="#16a34a"
           sublabel="依本月入住日、佔用中訂單的房價加總"
         />
-      </div>
+      </Box>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        <div className="bg-white rounded-xl shadow-sm border p-6 space-y-3">
-          <p className="text-sm font-medium text-gray-700">快速設定</p>
-          <div className="space-y-3">
-            <div>
-              <label className="block text-xs text-gray-500 mb-1">每床基礎價</label>
-              <input type="number" value={bedBaseRate} onChange={(e) => setBedBaseRate(Number(e.target.value))} className="w-full px-3 py-2 border rounded-lg" />
-            </div>
-            <div>
-              <label className="block text-xs text-gray-500 mb-1">滿載獎勵</label>
-              <input type="number" value={fullOccupancyBonus} onChange={(e) => setFullOccupancyBonus(Number(e.target.value))} className="w-full px-3 py-2 border rounded-lg" />
-            </div>
-            <div>
-              <label className="block text-xs text-gray-500 mb-1">最少接待人數</label>
-              <input type="number" min={1} value={minGroupHeadcount} onChange={(e) => setMinGroupHeadcount(Number(e.target.value))} className="w-full px-3 py-2 border rounded-lg" />
-            </div>
-          </div>
-          <p className="text-xs text-gray-400">此設定將套用於所有房型，加開房費/房型押金請到「計價公式設定」調整。</p>
-          <Link to="/room-pricing/formula" className="text-xs text-green-700 hover:underline inline-flex items-center gap-1">
-            查看完整計價公式設定 <ArrowRight className="w-3 h-3" />
+      <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', lg: '1fr 1fr 1fr' }, gap: 2, alignItems: 'stretch' }}>
+        <Paper variant="outlined" sx={{ p: 3, display: 'flex', flexDirection: 'column', gap: 1.5 }}>
+          <Typography fontWeight={600}>計價公式</Typography>
+          <Typography variant="body2" color="text.secondary">
+            每床基礎價 <strong>NT$ {bedBaseRate.toLocaleString()}</strong><br />
+            滿載獎勵 <strong>NT$ {fullOccupancyBonus.toLocaleString()}</strong><br />
+            最少接待人數 <strong>{minGroupHeadcount} 人</strong>
+          </Typography>
+          <Link to="/room-pricing/formula#pricing-formula-section" style={{ fontSize: 12, color: '#15803d', display: 'inline-flex', alignItems: 'center', gap: 4, textDecoration: 'none' }}>
+            前往計價公式設定 <ArrowRight size={12} />
           </Link>
-        </div>
+        </Paper>
 
-        <div className="bg-white rounded-xl shadow-sm border p-6 space-y-3">
-          <p className="text-sm font-medium text-gray-700">日期加價設定</p>
-          <div className="space-y-3">
-            <div className="flex items-center justify-between gap-3">
-              <label className="text-sm text-gray-600">小假日</label>
-              <input type="number" value={dateSurchargeSmall} onChange={(e) => setDateSurchargeSmall(Number(e.target.value))} className="w-28 px-3 py-2 border rounded-lg text-right" />
-            </div>
-            <div className="flex items-center justify-between gap-3">
-              <label className="text-sm text-gray-600">連假</label>
-              <input type="number" value={dateSurchargeHoliday} onChange={(e) => setDateSurchargeHoliday(Number(e.target.value))} className="w-28 px-3 py-2 border rounded-lg text-right" />
-            </div>
-            <div className="flex items-center justify-between gap-3">
-              <label className="text-sm text-gray-600">旺季</label>
-              <input type="number" value={dateSurchargePeak} onChange={(e) => setDateSurchargePeak(Number(e.target.value))} className="w-28 px-3 py-2 border rounded-lg text-right" />
-            </div>
-          </div>
-          <Link to="/room-calendar" className="text-xs text-green-700 hover:underline inline-flex items-center gap-1">
-            到「房況/行事曆」設定旺季/連假日期 <ArrowRight className="w-3 h-3" />
-          </Link>
-        </div>
+        <Paper variant="outlined" sx={{ p: 3, display: 'flex', flexDirection: 'column', gap: 1.5 }}>
+          <Typography fontWeight={600}>日期加價</Typography>
+          <Typography variant="body2" color="text.secondary">
+            小假日 <strong>+{dateSurchargeSmall.toLocaleString()}</strong><br />
+            連假 <strong>+{dateSurchargeHoliday.toLocaleString()}</strong><br />
+            旺季 <strong>+{dateSurchargePeak.toLocaleString()}</strong>
+          </Typography>
+          <Stack spacing={0.5}>
+            <Link to="/room-pricing/formula#pricing-formula-section" style={{ fontSize: 12, color: '#15803d', display: 'inline-flex', alignItems: 'center', gap: 4, textDecoration: 'none' }}>
+              調整加價金額 <ArrowRight size={12} />
+            </Link>
+            <Link to="/room-calendar" style={{ fontSize: 12, color: '#15803d', display: 'inline-flex', alignItems: 'center', gap: 4, textDecoration: 'none' }}>
+              <CalendarDays size={12} /> 到「行事曆」設定旺季/連假日期區間 <ArrowRight size={12} />
+            </Link>
+          </Stack>
+        </Paper>
 
-        <div className="bg-white rounded-xl shadow-sm border p-6 space-y-3">
-          <p className="text-sm font-medium text-gray-700">促銷方案</p>
+        <Paper variant="outlined" sx={{ p: 3, display: 'flex', flexDirection: 'column', gap: 1.5 }}>
+          <Typography fontWeight={600}>促銷方案</Typography>
           {promotions.length === 0 ? (
-            <p className="text-sm text-gray-400">尚未設定促銷方案</p>
+            <Typography variant="body2" color="text.disabled">尚未設定促銷方案</Typography>
           ) : (
-            <div className="space-y-2">
+            <Stack spacing={1}>
               {promotions.map((p) => {
                 const active = activePromotionId === p.id;
                 return (
-                  <button
+                  <Box
                     key={p.id}
-                    onClick={() => setActivePromotionId(active ? '' : p.id)}
-                    className={`w-full flex items-center justify-between gap-2 px-3 py-2 rounded-lg border text-left text-sm transition-colors ${
-                      active ? 'border-green-400 bg-green-50 text-green-700' : 'border-gray-200 text-gray-600 hover:bg-gray-50'
-                    }`}
+                    onClick={() => selectActivePromotion(p.id)}
+                    sx={{
+                      display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 1,
+                      px: 1.5, py: 1, borderRadius: 1.5, border: '1px solid', cursor: 'pointer',
+                      borderColor: active ? 'success.light' : 'divider',
+                      bgcolor: active ? 'success.50' : 'transparent',
+                      color: active ? 'success.dark' : 'text.secondary',
+                      fontSize: 13,
+                      '&:hover': { bgcolor: active ? 'success.50' : 'action.hover' },
+                    }}
                   >
-                    <span className="truncate">{promotionLabel(p)}</span>
-                    {active && <span className="text-xs shrink-0">目前套用</span>}
-                  </button>
+                    <Typography variant="body2" noWrap sx={{ color: 'inherit' }}>{promotionLabel(p)}</Typography>
+                    {active && <Chip label="目前套用" size="small" color="success" sx={{ height: 20, fontSize: 11 }} />}
+                  </Box>
                 );
               })}
-            </div>
+            </Stack>
           )}
-          <Link to="/room-pricing/formula" className="text-xs text-green-700 hover:underline inline-flex items-center gap-1">
-            管理所有促銷方案 <ArrowRight className="w-3 h-3" />
+          <Link to="/room-pricing/formula#promotions-section" style={{ fontSize: 12, color: '#15803d', display: 'inline-flex', alignItems: 'center', gap: 4, textDecoration: 'none' }}>
+            管理所有促銷方案 <ArrowRight size={12} />
           </Link>
-        </div>
-      </div>
+        </Paper>
+      </Box>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        <div className="lg:col-span-2 bg-white rounded-xl shadow-sm border overflow-hidden">
-          <div className="p-6 border-b flex flex-wrap items-center justify-between gap-3">
-            <p className="text-sm font-medium text-gray-700">房型概覽</p>
-            <Link to="/room-spaces" className="text-xs text-green-700 hover:underline inline-flex items-center gap-1">
-              管理房型 <ArrowRight className="w-3 h-3" />
+      <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', lg: '2fr 1fr' }, gap: 2, alignItems: 'stretch' }}>
+        <Paper variant="outlined" sx={{ overflow: 'hidden' }}>
+          <Stack direction="row" justifyContent="space-between" alignItems="center" flexWrap="wrap" gap={1} sx={{ p: 2.5, borderBottom: '1px solid', borderColor: 'divider' }}>
+            <Typography fontWeight={600}>房型概覽</Typography>
+            <Link to="/room-spaces" style={{ fontSize: 12, color: '#15803d', display: 'inline-flex', alignItems: 'center', gap: 4, textDecoration: 'none' }}>
+              管理房型 <ArrowRight size={12} />
             </Link>
-          </div>
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-sm">
-              <thead className="bg-gray-50 border-b">
-                <tr className="text-gray-600">
-                  <th className="py-2 px-4">房型</th>
-                  <th className="py-2 px-4">容納人數</th>
-                  <th className="py-2 px-4">押金</th>
-                  <th className="py-2 px-4">該容量加開房費</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100">
+          </Stack>
+          <TableContainer>
+            <Table size="small">
+              <TableHead>
+                <TableRow>
+                  <TableCell>房型</TableCell>
+                  <TableCell>容納人數</TableCell>
+                  <TableCell>押金</TableCell>
+                  <TableCell>該容量加開房費</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
                 {roomTypes.map((r) => (
-                  <tr key={r.id}>
-                    <td className="py-2 px-4 font-medium">{r.floor ? `${r.floor}-` : ''}{r.name}</td>
-                    <td className="py-2 px-4">{r.capacity} 人</td>
-                    <td className="py-2 px-4">NT$ {Number(r.security_deposit || 0).toLocaleString()}</td>
-                    <td className="py-2 px-4">NT$ {(capacityFees.find((c) => c.capacity === r.capacity)?.extra_room_fee ?? 0).toLocaleString()}</td>
-                  </tr>
+                  <TableRow key={r.id}>
+                    <TableCell sx={{ fontWeight: 500 }}>{r.floor ? `${r.floor}-` : ''}{r.name}</TableCell>
+                    <TableCell>{r.capacity} 人</TableCell>
+                    <TableCell>NT$ {Number(r.security_deposit || 0).toLocaleString()}</TableCell>
+                    <TableCell>NT$ {(capacityFees.find((c) => c.capacity === r.capacity)?.extra_room_fee ?? 0).toLocaleString()}</TableCell>
+                  </TableRow>
                 ))}
                 {roomTypes.length === 0 && (
-                  <tr>
-                    <td colSpan={4} className="py-6 text-center text-gray-400">尚未設定任何房型</td>
-                  </tr>
+                  <TableRow>
+                    <TableCell colSpan={4} align="center" sx={{ color: 'text.disabled', py: 3 }}>尚未設定任何房型</TableCell>
+                  </TableRow>
                 )}
-              </tbody>
-            </table>
-          </div>
-          <div className="px-6 py-3 border-t">
-            <Link to="/room-pricing/formula" className="text-xs text-green-700 hover:underline inline-flex items-center gap-1">
-              調整加開房費 <ArrowRight className="w-3 h-3" />
+              </TableBody>
+            </Table>
+          </TableContainer>
+          <Divider />
+          <Box sx={{ px: 2.5, py: 1.5 }}>
+            <Link to="/room-pricing/formula#pricing-formula-section" style={{ fontSize: 12, color: '#15803d', display: 'inline-flex', alignItems: 'center', gap: 4, textDecoration: 'none' }}>
+              調整加開房費/押金 <ArrowRight size={12} />
             </Link>
-          </div>
-        </div>
+          </Box>
+        </Paper>
 
-        <div className="bg-white rounded-xl shadow-sm border p-6 space-y-3">
-          <p className="text-sm font-medium text-gray-700 flex items-center gap-1.5"><Lightbulb className="w-4 h-4 text-amber-500" />價格設定小提醒</p>
-          <ul className="space-y-2 text-xs text-gray-500 list-disc pl-4">
+        <Paper variant="outlined" sx={{ p: 3, display: 'flex', flexDirection: 'column', gap: 1.5 }}>
+          <Typography fontWeight={600} sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}>
+            <Lightbulb size={16} color="#f59e0b" />價格設定小提醒
+          </Typography>
+          <Box component="ul" sx={{ m: 0, pl: 2.5, display: 'flex', flexDirection: 'column', gap: 1 }}>
             {TIPS.map((tip, i) => (
-              <li key={i}>{tip}</li>
+              <Typography key={i} component="li" variant="caption" color="text.secondary">{tip}</Typography>
             ))}
-          </ul>
-        </div>
-      </div>
-    </div>
+          </Box>
+        </Paper>
+      </Box>
+    </Box>
   );
 }

@@ -1,4 +1,5 @@
 import { useState, useEffect, ReactNode } from 'react';
+import { useLocation } from 'react-router-dom';
 import { supabase } from '../../lib/supabase';
 import {
   Box, Paper, Stack, Typography, Button, IconButton, TextField, MenuItem, Chip, Tooltip, Divider,
@@ -112,9 +113,19 @@ export default function FormulaSettings() {
   const [savingPromotions, setSavingPromotions] = useState(false);
   const [pendingPromotionDeletes, setPendingPromotionDeletes] = useState<{ table: string; id: string }[]>([]);
 
+  const location = useLocation();
+
   useEffect(() => {
     fetchAll();
   }, []);
+
+  // 從「價格總覽」點連結過來時（例如 #promotions-section）自動捲到對應分組，
+  // 不用讓管理員自己在長頁面裡找。
+  useEffect(() => {
+    if (loading || !location.hash) return;
+    const el = document.getElementById(location.hash.slice(1));
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, [loading, location.hash]);
 
   // silent=true 給「取消」「儲存後刷新」用，不會讓整頁閃一次「載入中」。
   const fetchAll = async (opts?: { silent?: boolean }) => {
@@ -288,6 +299,8 @@ export default function FormulaSettings() {
         description="所有人數統一用這套公式自動報價：標準房型（依人數湊出的床位數）× 每床基礎價 ＋ 滿載獎勵 ＋ 加開房費 ＋ 日期加價。每個區塊預設唯讀，點「編輯」才能修改，各自獨立儲存。房型基本資料（名稱/樓層/容納人數）請到「房型與空間維護」調整。"
       />
 
+      <Box id="pricing-formula-section" sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+      <Typography variant="h6" fontWeight={700}>計價公式</Typography>
       <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: '1fr 1fr' }, gap: 2, alignItems: 'stretch' }}>
         <EditableCard
           title="基礎公式"
@@ -420,7 +433,10 @@ export default function FormulaSettings() {
           </TableContainer>
         }
       />
+      </Box>
 
+      <Box id="promotions-section" sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+      <Typography variant="h6" fontWeight={700}>促銷與折扣</Typography>
       <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: '1fr 1fr' }, gap: 2, alignItems: 'stretch' }}>
         <EditableCard
           title="連住折扣"
@@ -529,6 +545,7 @@ export default function FormulaSettings() {
           </Box>
         </Stack>
       </Paper>
+      </Box>
 
       <SpecialDatesModal
         open={specialDatesModalOpen}

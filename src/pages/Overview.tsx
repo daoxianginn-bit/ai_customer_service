@@ -85,7 +85,7 @@ export default function Overview() {
         </Link>
         <Link to="/room-calendar" className="bg-white p-5 rounded-xl shadow-sm border hover:border-green-400 hover:bg-green-50 transition-colors flex items-center gap-3">
           <CalendarDays className="w-5 h-5 text-green-600" />
-          <span className="font-medium text-gray-700">房況/行事曆</span>
+          <span className="font-medium text-gray-700">行事曆</span>
         </Link>
         <Link to="/customers" className="bg-white p-5 rounded-xl shadow-sm border hover:border-green-400 hover:bg-green-50 transition-colors flex items-center gap-3">
           <Users className="w-5 h-5 text-green-600" />
