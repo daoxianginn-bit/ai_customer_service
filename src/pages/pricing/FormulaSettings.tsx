@@ -98,6 +98,7 @@ export default function FormulaSettings() {
   const [dateSurchargeSmall, setDateSurchargeSmall] = useState(5000);
   const [dateSurchargePeak, setDateSurchargePeak] = useState(8000);
   const [dateSurchargeHoliday, setDateSurchargeHoliday] = useState(12000);
+  const [weekdayRange, setWeekdayRange] = useState<'sun_thu' | 'sun_fri'>('sun_thu');
   const [editingDateSurcharge, setEditingDateSurcharge] = useState(false);
   const [savingDateSurcharge, setSavingDateSurcharge] = useState(false);
 
@@ -156,7 +157,7 @@ export default function FormulaSettings() {
       supabase
         .from('settings')
         .select(
-          'id, bed_base_rate, full_occupancy_bonus, min_group_headcount, date_surcharge_small_holiday, date_surcharge_peak, date_surcharge_long_holiday, consecutive_stay_discount_cleaning, consecutive_stay_discount_no_cleaning, consecutive_stay_default_option, deposit_percent, whole_house_security_deposit, special_price_stacks_with_discounts, active_promotion_id'
+          'id, bed_base_rate, full_occupancy_bonus, min_group_headcount, date_surcharge_small_holiday, date_surcharge_peak, date_surcharge_long_holiday, weekday_range, consecutive_stay_discount_cleaning, consecutive_stay_discount_no_cleaning, consecutive_stay_default_option, deposit_percent, whole_house_security_deposit, special_price_stacks_with_discounts, active_promotion_id'
         )
         .single(),
       supabase.from('room_types').select('*').eq('type', '房間').order('display_order'),
@@ -171,6 +172,7 @@ export default function FormulaSettings() {
     setDateSurchargeSmall(st.data?.date_surcharge_small_holiday ?? 5000);
     setDateSurchargePeak(st.data?.date_surcharge_peak ?? 8000);
     setDateSurchargeHoliday(st.data?.date_surcharge_long_holiday ?? 12000);
+    setWeekdayRange(st.data?.weekday_range ?? 'sun_thu');
     setDiscountCleaning(st.data?.consecutive_stay_discount_cleaning ?? 0);
     setDiscountNoCleaning(st.data?.consecutive_stay_discount_no_cleaning ?? 0);
     setConsecutiveStayDefaultOption(st.data?.consecutive_stay_default_option ?? 'no_cleaning');
@@ -230,7 +232,7 @@ export default function FormulaSettings() {
   const handleSaveDateSurcharge = async () => {
     setSavingDateSurcharge(true);
     try {
-      if (settingsId) await supabase.from('settings').update({ date_surcharge_small_holiday: dateSurchargeSmall, date_surcharge_peak: dateSurchargePeak, date_surcharge_long_holiday: dateSurchargeHoliday }).eq('id', settingsId);
+      if (settingsId) await supabase.from('settings').update({ date_surcharge_small_holiday: dateSurchargeSmall, date_surcharge_peak: dateSurchargePeak, date_surcharge_long_holiday: dateSurchargeHoliday, weekday_range: weekdayRange }).eq('id', settingsId);
       await fetchAll({ silent: true });
       setEditingDateSurcharge(false);
     } catch (e: any) {
@@ -393,7 +395,7 @@ export default function FormulaSettings() {
           onSave={handleSaveDateSurcharge}
           view={
             <Typography variant="body2" color="text.secondary">
-              平日 +0　小假日 <strong>+{dateSurchargeSmall.toLocaleString()}</strong>　連假 <strong>+{dateSurchargeHoliday.toLocaleString()}</strong>　旺季 <strong>+{dateSurchargePeak.toLocaleString()}</strong>
+              平日（{weekdayRange === 'sun_fri' ? '日~五' : '日~四'}）+0　小假日 <strong>+{dateSurchargeSmall.toLocaleString()}</strong>　連假 <strong>+{dateSurchargeHoliday.toLocaleString()}</strong>　旺季 <strong>+{dateSurchargePeak.toLocaleString()}</strong>
             </Typography>
           }
           edit={
@@ -403,6 +405,13 @@ export default function FormulaSettings() {
                 <TextField label="連假 +" type="number" size="small" value={dateSurchargeHoliday} onChange={(e) => setDateSurchargeHoliday(Number(e.target.value))} sx={{ width: 140 }} />
                 <TextField label="旺季 +" type="number" size="small" value={dateSurchargePeak} onChange={(e) => setDateSurchargePeak(Number(e.target.value))} sx={{ width: 140 }} />
               </Stack>
+              <Box>
+                <Typography variant="body2" fontWeight={500} sx={{ mb: 0.5 }}>平日範圍</Typography>
+                <RadioGroup row value={weekdayRange} onChange={(e) => setWeekdayRange(e.target.value as 'sun_thu' | 'sun_fri')}>
+                  <FormControlLabel value="sun_thu" control={<Radio size="small" />} label="日~四是平日，五、六是小假日" />
+                  <FormControlLabel value="sun_fri" control={<Radio size="small" />} label="日~五是平日，只有週六是小假日" />
+                </RadioGroup>
+              </Box>
               <Typography variant="caption" color="text.secondary">旺季／連假的日期區間，請到「行事曆」頁右上角「旺季/連假日期設定」調整。</Typography>
             </Stack>
           }

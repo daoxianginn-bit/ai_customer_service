@@ -144,26 +144,34 @@ function toDateStr(date: Date): string {
 
 export type PeakSeasonWeekdayTier = 'peak' | 'weekday';
 
+// 平日的範圍：'sun_thu'＝日~四是平日、五六是小假日（原本唯一的行為，預設值維持不變）；
+// 'sun_fri'＝日~五是平日、只有週六算小假日。
+export type WeekdayRange = 'sun_thu' | 'sun_fri';
+
 /**
  * 判斷某日期落在哪個定價 tier。
- * 優先順序：旺季 > 連假 > 依星期幾（五、六＝小假日，其餘＝平日）。
+ * 優先順序：旺季 > 連假 > 依星期幾（平日/小假日的分界由 weekdayRange 決定）。
  *
- * peakSeasonWeekdayTier：旺季期間的「平日」（日~四）要算旺季價還是平日價。
+ * peakSeasonWeekdayTier：旺季期間的「平日」要算旺季價還是平日價。
  * 預設 'peak'（維持原本行為，旺季期間不分平假日一律旺季價）；設為 'weekday' 時，
- * 旺季期間的平日改算平日價，旺季的小假日（五、六）不受影響仍是旺季價。
+ * 旺季期間的平日改算平日價，旺季的小假日不受影響仍是旺季價。
  * 這個設定同時套用在個別租房與包棟的 tier 判斷（兩者共用這個函式)。
+ *
+ * weekdayRange：平日算到週幾，預設 'sun_thu'（維持原本行為）。這個分界同時影響
+ * 上面 peakSeasonWeekdayTier 判斷用的 isWeekday，兩者共用同一套「平日」定義。
  */
 export function resolvePricingTier(
   date: Date,
   dateRanges: DateRange[],
-  peakSeasonWeekdayTier: PeakSeasonWeekdayTier = 'peak'
+  peakSeasonWeekdayTier: PeakSeasonWeekdayTier = 'peak',
+  weekdayRange: WeekdayRange = 'sun_thu'
 ): string {
   const dateStr = toDateStr(date);
   const inRange = (type: string) =>
     dateRanges.some((r) => r.range_type === type && dateStr >= r.start_date && dateStr <= r.end_date);
 
   const day = date.getDay(); // 0=Sun ... 6=Sat
-  const isWeekday = day !== 5 && day !== 6;
+  const isWeekday = weekdayRange === 'sun_fri' ? day !== 6 : day !== 5 && day !== 6;
 
   if (inRange(TIER_PEAK_SEASON)) {
     if (peakSeasonWeekdayTier === 'weekday' && isWeekday) return TIER_WEEKDAY;
@@ -809,6 +817,7 @@ export interface UnifiedQuoteInput {
   specialPrices?: SpecialPrice[];
   specialPriceStacksWithDiscounts?: boolean; // 預設 true
   peakSeasonWeekdayTier?: PeakSeasonWeekdayTier;
+  weekdayRange?: WeekdayRange; // 預設 'sun_thu'，見 resolvePricingTier() 說明
 }
 
 export interface UnifiedMultiNightQuoteResult {
@@ -843,7 +852,7 @@ export function computeUnifiedMultiNightQuote(input: UnifiedQuoteInput): Unified
   for (let i = 0; i < input.nights; i++) {
     const date = new Date(input.checkInDate);
     date.setDate(date.getDate() + i);
-    const tier = resolvePricingTier(date, input.dateRanges, input.peakSeasonWeekdayTier);
+    const tier = resolvePricingTier(date, input.dateRanges, input.peakSeasonWeekdayTier, input.weekdayRange);
     const isFirstNight = i === 0;
 
     const special = getSpecialPrice(date, input.headcount, input.specialPrices || []);

@@ -53,6 +53,7 @@ export default function QuoteCalculator() {
   const [dateSurchargePeak, setDateSurchargePeak] = useState(8000);
   const [dateSurchargeHoliday, setDateSurchargeHoliday] = useState(12000);
   const [peakSeasonWeekdayTier, setPeakSeasonWeekdayTier] = useState<'peak' | 'weekday'>('peak');
+  const [weekdayRange, setWeekdayRange] = useState<'sun_thu' | 'sun_fri'>('sun_thu');
   const [discountCleaning, setDiscountCleaning] = useState(0);
   const [discountNoCleaning, setDiscountNoCleaning] = useState(0);
   const [specialPriceStacksWithDiscounts, setSpecialPriceStacksWithDiscounts] = useState(true);
@@ -87,7 +88,7 @@ export default function QuoteCalculator() {
       supabase
         .from('settings')
         .select(
-          'bed_base_rate, full_occupancy_bonus, min_group_headcount, date_surcharge_small_holiday, date_surcharge_peak, date_surcharge_long_holiday, peak_season_weekday_tier, consecutive_stay_discount_cleaning, consecutive_stay_discount_no_cleaning, consecutive_stay_default_option, active_promotion_id, special_price_stacks_with_discounts'
+          'bed_base_rate, full_occupancy_bonus, min_group_headcount, date_surcharge_small_holiday, date_surcharge_peak, date_surcharge_long_holiday, peak_season_weekday_tier, weekday_range, consecutive_stay_discount_cleaning, consecutive_stay_discount_no_cleaning, consecutive_stay_default_option, active_promotion_id, special_price_stacks_with_discounts'
         )
         .single(),
       supabase.from('room_types').select('*').eq('type', '房間').order('display_order'),
@@ -103,6 +104,7 @@ export default function QuoteCalculator() {
     setDateSurchargePeak(st.data?.date_surcharge_peak ?? 8000);
     setDateSurchargeHoliday(st.data?.date_surcharge_long_holiday ?? 12000);
     setPeakSeasonWeekdayTier(st.data?.peak_season_weekday_tier ?? 'peak');
+    setWeekdayRange(st.data?.weekday_range ?? 'sun_thu');
     setDiscountCleaning(st.data?.consecutive_stay_discount_cleaning ?? 0);
     setDiscountNoCleaning(st.data?.consecutive_stay_discount_no_cleaning ?? 0);
     setSpecialPriceStacksWithDiscounts(st.data?.special_price_stacks_with_discounts ?? true);
@@ -168,6 +170,7 @@ export default function QuoteCalculator() {
       promotion: selectedPromotion,
       consecutiveStayDiscountPerNight,
       peakSeasonWeekdayTier,
+      weekdayRange,
       specialPrices: specialPrices.map((s) => ({ start_date: s.start_date, end_date: s.end_date, occupancy: s.occupancy, price: s.price })),
       specialPriceStacksWithDiscounts,
     });
