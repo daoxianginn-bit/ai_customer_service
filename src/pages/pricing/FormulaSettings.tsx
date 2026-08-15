@@ -8,9 +8,31 @@ import {
 import { SlidersHorizontal, Pencil, Sparkles, Plus, Trash2, Info } from 'lucide-react';
 import PageHeaderMui from '../../components/ui-mui/PageHeaderMui';
 import SpecialDatesModal from '../../components/SpecialDatesModal';
+import { computeStandardRoomLayout, RoomCapacityCount, CapacityLayout } from '../../lib/bookingEngine';
 
 function newId(): string {
   return crypto.randomUUID();
+}
+
+// 6~16 人的「標準房型組合＋平日基準價」對照表：純粹是基礎公式/各容量加開房費的參考預覽，
+// 不落地存資料庫，畫面上編輯這兩張卡片（就算還沒按儲存）都會即時反映在這張表上。
+const REFERENCE_HEADCOUNTS = Array.from({ length: 11 }, (_, i) => i + 6); // 6,7,...,16
+
+function roomCapacityCounts(roomTypes: any[]): RoomCapacityCount[] {
+  const counts = new Map<number, number>();
+  for (const r of roomTypes) {
+    if (r.is_active === false || !r.capacity) continue;
+    counts.set(r.capacity, (counts.get(r.capacity) || 0) + 1);
+  }
+  return Array.from(counts.entries()).map(([capacity, count]) => ({ capacity, count }));
+}
+
+function layoutLabel(layout: CapacityLayout): string {
+  const parts = Object.entries(layout)
+    .filter(([, count]) => count > 0)
+    .sort((a, b) => Number(a[0]) - Number(b[0]))
+    .map(([cap, count]) => `${cap}人房×${count}`);
+  return parts.join('、') || '—';
 }
 
 function promotionLabel(p: any): string {
@@ -180,6 +202,15 @@ export default function FormulaSettings() {
   const distinctCapacities = Array.from(new Set(roomTypes.filter((r) => r.is_active !== false).map((r) => r.capacity)))
     .filter((c): c is number => typeof c === 'number' && c > 0)
     .sort((a, b) => a - b);
+
+  // 6~16 人對照表：用畫面上目前的（含未儲存的）基礎公式/各容量加開房費即時算，
+  // 不是另外呼叫報價引擎、也不落地存資料庫，純預覽用。
+  const capacityInventory = roomCapacityCounts(roomTypes);
+  const referenceRows = REFERENCE_HEADCOUNTS.map((headcount) => {
+    const layout = computeStandardRoomLayout(headcount, capacityInventory);
+    const price = layout.success ? layout.beds * bedBaseRate + (headcount === layout.beds ? fullOccupancyBonus : 0) : null;
+    return { headcount, layout, price };
+  });
 
   // ---------------- 各區塊儲存 ----------------
   const handleSaveFormula = async () => {
@@ -433,6 +464,35 @@ export default function FormulaSettings() {
           </TableContainer>
         }
       />
+
+      <Paper variant="outlined" sx={{ p: 3 }}>
+        <Stack direction="row" alignItems="center" spacing={0.75} sx={{ mb: 1.5 }}>
+          <Typography fontWeight={600}>6~16 人基本配置對照表</Typography>
+          <InfoHint text="用畫面上目前的基礎公式跟各容量加開房費即時算出來，就算上面兩張卡片還沒按儲存也會反映在這裡；只顯示平日、不含加開房費／特殊日期／促銷，純粹是「這個人數系統會湊出哪種標準房型、基本價多少」的參考。" />
+        </Stack>
+        <TableContainer>
+          <Table size="small">
+            <TableHead>
+              <TableRow>
+                <TableCell>人數</TableCell>
+                <TableCell>標準房型組合</TableCell>
+                <TableCell>床位數</TableCell>
+                <TableCell>平日基準價</TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {referenceRows.map((row) => (
+                <TableRow key={row.headcount}>
+                  <TableCell>{row.headcount} 人</TableCell>
+                  <TableCell>{row.layout.success ? layoutLabel(row.layout.layout) : <Typography variant="body2" color="text.disabled">房型庫存不足</Typography>}</TableCell>
+                  <TableCell>{row.layout.success ? `${row.layout.beds} 床` : '—'}</TableCell>
+                  <TableCell>{row.price != null ? `NT$ ${row.price.toLocaleString()}` : '—'}</TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </TableContainer>
+      </Paper>
       </Box>
 
       <Box id="promotions-section" sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
