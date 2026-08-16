@@ -1587,8 +1587,10 @@ async function handleBookingConfirmation(
 }
 
 // 顧客在 awaiting_remittance 階段傳的第一句話：能抓到末五碼就先寫進訂單，
-// 不管抓不抓得到都直接轉真人——這個階段收到任何訊息，代表顧客覺得他該通知我們了
-// （已經匯款、或有匯款相關的問題），交給真人核對最保險，不要再由 AI 猜測回覆。
+// 不強制轉真人——這個階段收到任何訊息，代表顧客覺得他該通知我們了（已經匯款、或有匯款相關的問題），
+// 但不需要因此讓 is_human_mode 卡住這位客人後續的訊息：真人會自己去「訂單管理」核對這筆訂單，
+// 核對後在「訂單管理」把狀態改成已預定即可，不需要透過即時對話接手。這裡只推播通知＋回覆客人，
+// 讓客人接下來仍然可以正常使用 AI／知識庫問答，不會被晾在旁邊沒人理。
 async function handleRemittanceReport(
   lineClient: Client,
   lineEvent: any,
@@ -1607,17 +1609,8 @@ async function handleRemittanceReport(
     .eq('id', session.bookingId)
     .select()
     .single();
-  const startedAt = new Date().toISOString();
-  await supabase.from('user_states').upsert({ line_user_id: userId, nickname, is_human_mode: true, last_human_interaction: startedAt });
-  await supabase.from('handover_logs').insert({
-    line_user_id: userId,
-    nickname,
-    triggered_keyword: '匯款回報',
-    started_at: startedAt,
-    status: 'open',
-  });
 
-  const replyText = '好的請稍等，已轉接給真人確認請稍等。';
+  const replyText = '好的，已收到您的匯款回報，我們核對後會盡快為您確認訂房，謝謝您的耐心等候 🙏';
   await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
   await logConversation(userId, nickname, 'outbound', replyText, 'system');
 
