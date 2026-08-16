@@ -6,10 +6,16 @@
   font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
 }
 
+/* 注意：這裡原本是 Vite 專案範本預設的 `display: flex; place-items: center;`。
+   body 一旦變成 flex 容器，#root 就成了「縮到內容大小」的 flex item——實測在 1280px 的
+   視窗下 #root 只有 496px，整個後台被擠在畫面左半邊。後台是滿版排版，body 要維持
+   一般區塊流，讓 #root 自己撐滿寬高。 */
 body {
   margin: 0;
-  display: flex;
-  place-items: center;
   min-width: 320px;
+}
+
+#root {
+  width: 100%;
   min-height: 100vh;
 }

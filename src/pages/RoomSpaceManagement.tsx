@@ -129,7 +129,7 @@ export default function RoomSpaceManagement() {
   };
 
   return (
-    <div className="max-w-4xl mx-auto space-y-6">
+    <div className="w-full space-y-6">
       <PageHeader
         icon={<DoorOpen className="w-6 h-6 text-green-600" />}
         title="房型與空間維護"

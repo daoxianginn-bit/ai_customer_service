@@ -497,7 +497,7 @@ export default function OrderManagement() {
   const formStatusOptions = form.status === SYSTEM_ONLY_STATUS.value ? [SYSTEM_ONLY_STATUS, ...BOOKING_STATUS_OPTIONS] : BOOKING_STATUS_OPTIONS;
 
   return (
-    <div className="max-w-6xl mx-auto space-y-6">
+    <div className="w-full space-y-6">
       <PageHeader
         icon={<ClipboardList className="w-6 h-6 text-green-600" />}
         title="訂單管理"

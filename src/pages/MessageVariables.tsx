@@ -129,7 +129,7 @@ export default function MessageVariables() {
   };
 
   return (
-    <div className="max-w-4xl mx-auto space-y-6">
+    <div className="w-full space-y-6">
       <PageHeader
         icon={<Variable className="w-6 h-6 text-green-600" />}
         title="訊息變數資料維護"

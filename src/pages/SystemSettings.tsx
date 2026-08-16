@@ -51,7 +51,7 @@ export default function SystemSettings() {
   if (!settings) return <div>找不到設定檔</div>;
 
   return (
-    <div className="max-w-4xl mx-auto space-y-6 pb-20">
+    <div className="w-full space-y-6 pb-20">
       <PageHeader
         icon={<SlidersHorizontal className="w-6 h-6 text-green-600" />}
         title="基本設定"

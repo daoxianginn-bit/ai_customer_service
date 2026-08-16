@@ -1,7 +1,9 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { useEffect, useState } from 'react';
 import { ThemeProvider } from '@mui/material/styles';
-import { muiTheme } from './muiTheme';
+import CssBaseline from '@mui/material/CssBaseline';
+import { SnackbarProvider } from 'notistack';
+import { enterpriseTheme } from './muiTheme';
 import { supabase } from './lib/supabase';
 import Login from './pages/Login';
 import Overview from './pages/Overview';
@@ -89,7 +91,17 @@ function App() {
   }
 
   return (
-    <ThemeProvider theme={muiTheme}>
+    <ThemeProvider theme={enterpriseTheme}>
+    {/* CssBaseline 會套用 theme 的 background.default 到 body，並正規化瀏覽器預設樣式。
+        注意 index.css 仍負責 #root 撐滿寬高——那是 Vite 範本殘留的 body flex 造成的問題，
+        CssBaseline 不會處理，兩者各司其職。 */}
+    <CssBaseline />
+    {/* 規範的「輕量非阻塞」回饋層：右上角浮動 Toast、3 秒自動消失 */}
+    <SnackbarProvider
+      maxSnack={3}
+      autoHideDuration={3000}
+      anchorOrigin={{ vertical: 'top', horizontal: 'right' }}
+    >
     <BrowserRouter>
       <Routes>
         <Route path="/login" element={!session ? <Login /> : <Navigate to="/" />} />
@@ -121,6 +133,7 @@ function App() {
         <Route path="*" element={<Navigate to="/" />} />
       </Routes>
     </BrowserRouter>
+    </SnackbarProvider>
     </ThemeProvider>
   );
 }

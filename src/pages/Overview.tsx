@@ -40,7 +40,7 @@ export default function Overview() {
   if (!settings) return <div>找不到設定檔</div>;
 
   return (
-    <div className="max-w-5xl mx-auto space-y-8 pb-20">
+    <div className="w-full space-y-8 pb-20">
       <PageHeader icon={<LayoutDashboard className="w-6 h-6 text-green-600" />} title="首頁總覽" description="AI 客服系統目前運作狀態" />
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">

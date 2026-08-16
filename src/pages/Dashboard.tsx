@@ -96,7 +96,7 @@ export default function Dashboard() {
   if (!settings) return <div>找不到設定檔</div>;
 
   return (
-    <div className="max-w-4xl mx-auto space-y-8 pb-20">
+    <div className="w-full space-y-8 pb-20">
       <div className="flex justify-between items-center bg-white p-6 rounded-xl shadow-sm border">
         <div>
           <h2 className="text-2xl font-bold text-gray-800">系統主控台</h2>

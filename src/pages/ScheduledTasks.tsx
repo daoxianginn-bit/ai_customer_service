@@ -218,7 +218,7 @@ export default function ScheduledTasks() {
   if (loading) return <div className="p-8 text-center text-gray-500">載入中...</div>;
 
   return (
-    <div className="max-w-5xl mx-auto space-y-4">
+    <div className="w-full space-y-4">
       <PageHeader
         icon={<Clock className="w-6 h-6 text-green-600" />}
         title="排程管理"

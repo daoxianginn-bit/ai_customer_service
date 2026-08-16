@@ -485,7 +485,7 @@ export default function StandardMessages() {
   const quoteCapable = missing.length === 0;
 
   return (
-    <div className="max-w-6xl mx-auto space-y-4">
+    <div className="w-full space-y-4">
       <PageHeader
         icon={<MessageSquareText className="w-6 h-6 text-green-600" />}
         title="LINE 自定訊息流程"

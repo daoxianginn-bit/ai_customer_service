@@ -296,7 +296,7 @@ export default function CustomerDirectory() {
   ];
 
   return (
-    <div className="max-w-7xl mx-auto space-y-6">
+    <div className="w-full space-y-6">
       <PageHeader icon={<Users className="w-6 h-6 text-green-600" />} title="客戶資料" description="所有跟 LINE 官方帳號互動過的聯絡人，可查看基本資料、訂單紀錄與對話紀錄。" />
 
       {queryError && (
