@@ -382,6 +382,9 @@ export default function ScheduledTasks() {
                 </div>
                 <Switch checked={row.is_active} onChange={() => toggleActive(row)} title={row.is_active ? '啟用中' : '已停用'} />
               </div>
+              {taskTypeOption(row.task_type)?.description && (
+                <p className="text-xs text-gray-500 leading-relaxed">{taskTypeOption(row.task_type)?.description}</p>
+              )}
               <p className="text-xs text-gray-500">
                 {describeSchedule({ recurrence: row.recurrence, runAtTime: row.run_at_time, runAtDate: row.run_at_date, weekday: row.weekday, dayOfMonth: row.day_of_month })}
                 {row.is_active && row.next_run_at && <span className="text-gray-400 block mt-0.5">下次執行約 {formatDateTime(row.next_run_at)}</span>}
