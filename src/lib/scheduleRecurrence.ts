@@ -12,14 +12,20 @@
 // 台灣沒有日光節約時間，固定位移 8 小時永遠正確。
 // ========================================================================
 
-export type Recurrence = 'once' | 'daily' | 'weekly' | 'monthly';
+export type Recurrence = 'once' | 'every_n_minutes' | 'hourly' | 'daily' | 'weekly' | 'monthly';
+
+// 心跳頻率下限：scheduled-tasks-run.ts 這支 ticker 函式的執行間隔寫死在 netlify.toml
+// （*/15 * * * *），後台沒辦法動態改。every_n_minutes 設得比這個更短也不會真的更密集執行，
+// 只是白白讓下一次時間落在兩次心跳中間、被延後到下一次心跳才處理，所以直接鎖下限。
+export const MIN_INTERVAL_MINUTES = 15;
 
 export interface ScheduleConfig {
   recurrence: Recurrence;
-  runAtTime: string; // 'HH:MM'，24 小時制，台灣時間
+  runAtTime: string; // 'HH:MM'，24 小時制，台灣時間；recurrence='hourly' 時只有 MM（分鐘）有意義，HH 忽略，'every_n_minutes' 不使用
   runAtDate?: string | null; // recurrence='once' 專用，'YYYY-MM-DD'
   weekday?: number | null; // recurrence='weekly' 專用，0=週日...6=週六
   dayOfMonth?: number | null; // recurrence='monthly' 專用，1-31；當月天數不足時自動用該月最後一天
+  intervalMinutes?: number | null; // recurrence='every_n_minutes' 專用，實際下限見 MIN_INTERVAL_MINUTES
 }
 
 const TAIWAN_OFFSET_MS = 8 * 60 * 60 * 1000;
@@ -69,7 +75,21 @@ export function computeNextRunAt(cfg: ScheduleConfig, fromMs: number = Date.now(
     return at.getTime() > fromMs ? at : null;
   }
 
+  if (cfg.recurrence === 'every_n_minutes') {
+    const minutes = Math.max(MIN_INTERVAL_MINUTES, cfg.intervalMinutes || MIN_INTERVAL_MINUTES);
+    return new Date(fromMs + minutes * 60 * 1000);
+  }
+
   const now = toTaiwanParts(fromMs);
+
+  if (cfg.recurrence === 'hourly') {
+    // 只有「第幾分」有意義，小時永遠是「現在這一小時」：先算出這一小時的目標分鐘，
+    // 已經過了就直接 +1 小時——固定加 3600000ms 就對了，不用重新走進位邏輯，
+    // 台灣沒有日光節約時間，加一小時永遠對應到當地時間的下一個整點。
+    let at = taiwanWallTimeToUtc(now.y, now.m, now.d, now.hh, mm);
+    if (at.getTime() <= fromMs) at = new Date(at.getTime() + 60 * 60 * 1000);
+    return at;
+  }
 
   if (cfg.recurrence === 'daily') {
     let at = taiwanWallTimeToUtc(now.y, now.m, now.d, hh, mm);
@@ -106,6 +126,12 @@ export function describeSchedule(cfg: ScheduleConfig): string {
   switch (cfg.recurrence) {
     case 'once':
       return cfg.runAtDate ? `${cfg.runAtDate.replace(/-/g, '/')} ${time} 執行一次` : '尚未設定日期';
+    case 'every_n_minutes': {
+      const minutes = Math.max(MIN_INTERVAL_MINUTES, cfg.intervalMinutes || MIN_INTERVAL_MINUTES);
+      return `每 ${minutes} 分鐘${minutes !== cfg.intervalMinutes ? `（已自動調整為 ${MIN_INTERVAL_MINUTES} 分鐘下限）` : ''}`;
+    }
+    case 'hourly':
+      return `每小時第 ${time.slice(3, 5)} 分`;
     case 'daily':
       return `每天 ${time}`;
     case 'weekly':

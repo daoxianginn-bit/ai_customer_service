@@ -2,13 +2,19 @@ import { useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import { Clock, Plus, Pencil, Trash2, AlertTriangle, CheckCircle2, XCircle } from 'lucide-react';
 import { PageHeader, Button, Modal, ConfirmDialog, Switch, EmptyState } from '../components/ui';
-import { Recurrence, ScheduleConfig, computeNextRunAt, describeSchedule } from '../lib/scheduleRecurrence';
+import { Recurrence, ScheduleConfig, computeNextRunAt, describeSchedule, MIN_INTERVAL_MINUTES } from '../lib/scheduleRecurrence';
 
 // 排程類型清單：之後新增排程類型（定時寄信、到期通知、LINE 分眾發送...）只需要在這裡多加一筆，
 // 不用改頁面其他邏輯或資料表結構。
 // 每一筆都要在 netlify/functions/scheduled-tasks-run.ts 的 TASK_EXECUTORS 有對應實作，
 // 否則排程到期時只會記錄一句「未知的排程類型」。
-const TASK_TYPE_OPTIONS = [
+//
+// needsTemplate：這個類型會直接通知客人本人，要在下面選一個「客製訊息範本」，套用跟訂房流程
+//   罐頭訊息同一套 [變數] 合併欄位系統。
+// needsGroup：這個類型是彙整多筆訂單、通知內部/廠商用的「通知名單」，格式固定（標題＋清單），
+//   不走範本系統——這類訊息本來就是狀態報告，不是要客製化的顧客訊息。
+// 兩者都要的（例如尾款排程）表示同時做兩件事：通知客人本人 + 彙整清單通知內部名單。
+const TASK_TYPE_OPTIONS: { value: string; label: string; description: string; needsTemplate?: boolean; needsGroup?: boolean }[] = [
   {
     value: 'cancel_unpaid_bookings',
     label: '訂單自動取消',
@@ -19,10 +25,73 @@ const TASK_TYPE_OPTIONS = [
     label: '訂單完成統計推播',
     description: '把已經過退房日的訂單整理成統計，推播給「廠商用」與「團隊內部用」官方帳號的所有聯絡人。每筆訂單只會推播一次。建議設定為每天執行一次。',
   },
+  {
+    value: 'advance_to_awaiting_balance',
+    label: '訂單狀態：已預定→待收尾款',
+    description: '入住日剩 3 天的「已預定」訂單，自動轉為「待收尾款」。純狀態轉換，不會發送任何訊息。建議設定為每天 00:00。',
+  },
+  {
+    value: 'advance_to_checked_in',
+    label: '訂單狀態：待入住→入住中',
+    description: '入住日就是今天的「待入住」訂單，自動轉為「入住中」。純狀態轉換，不會發送任何訊息。建議設定為每天 13:00。',
+  },
+  {
+    value: 'advance_to_deposit_processing',
+    label: '訂單狀態：入住中→押金處理',
+    description: '退房日就是今天的「入住中」訂單，自動轉為「押金處理」。純狀態轉換，不會發送任何訊息。建議設定為每天 12:00。',
+  },
+  {
+    value: 'balance_reminder',
+    label: '尾款提醒排程',
+    description: '入住日在 3 天內、狀態仍是「待收尾款」的訂單：直接提醒客人本人繳尾款，同時把整批清單彙整通知給通知名單。建議設定為每天執行。',
+    needsTemplate: true,
+    needsGroup: true,
+  },
+  {
+    value: 'deposit_awaiting_notice',
+    label: '待預定匯款通知',
+    description: '狀態仍是「待預定」、且是昨天建立的訂單，提醒客人本人該匯款了。建議設定為每天 09:00。',
+    needsTemplate: true,
+  },
+  {
+    value: 'awaiting_confirmation_notice',
+    label: '待確認訂單通知',
+    description: '狀態為「待確認」（客人已回報匯款、待核對到帳）的訂單，彙整清單通知給通知名單。建議設定為每天 09:00。',
+    needsGroup: true,
+  },
+  {
+    value: 'checkin_notice',
+    label: '入住通知排程',
+    description: '入住日就是今天的「待入住」訂單，通知客人本人（範本裡可以用 [入住密碼] 帶入訂單管理設定的入住密碼）。建議設定為每天 09:00。',
+    needsTemplate: true,
+  },
+  {
+    value: 'deposit_processing_notice',
+    label: '押金處理通知',
+    description: '狀態為「押金處理」的訂單，彙整清單通知給通知名單去核對退還押金。建議設定為每天 15:00。',
+    needsGroup: true,
+  },
+  {
+    value: 'laundry_notice',
+    label: '洗滌排程',
+    description: '退房日就是今天、狀態為「押金處理」的訂單，彙整清單通知給通知名單安排布巾送洗。建議設定為每天 12:00。',
+    needsGroup: true,
+  },
+  {
+    value: 'sync_calendars',
+    label: '行事曆整合同步',
+    description: '兩步驟：(1) 抓取「第三方平台」頁面設定的 Airbnb／Booking.com／Agoda／Trip 匯入網址，同步新增/更新/取消對應訂單（狀態顯示為「外部平台已訂」），偵測到跟其他訂單撞期時推播提醒真人客服，不會自動處理。(2) 把整合後、目前所有佔用中的訂單（不分來源）同步寫入「基本設定」設定好的 Google 行事曆。不會發送任何訊息給客人。建議設定為每 15~30 分鐘執行一次。',
+  },
 ];
+
+function taskTypeOption(value: string) {
+  return TASK_TYPE_OPTIONS.find((t) => t.value === value);
+}
 
 const RECURRENCE_OPTIONS: { value: Recurrence; label: string }[] = [
   { value: 'once', label: '單次' },
+  { value: 'every_n_minutes', label: '每 N 分鐘' },
+  { value: 'hourly', label: '每小時' },
   { value: 'daily', label: '每天' },
   { value: 'weekly', label: '每週' },
   { value: 'monthly', label: '每月' },
@@ -34,11 +103,13 @@ interface ScheduledTask {
   id: string;
   name: string;
   task_type: string;
+  config: Record<string, any> | null;
   recurrence: Recurrence;
   run_at_time: string;
   run_at_date: string | null;
   weekday: number | null;
   day_of_month: number | null;
+  interval_minutes: number | null;
   is_active: boolean;
   next_run_at: string | null;
   last_run_at: string | null;
@@ -55,6 +126,10 @@ type TaskForm = {
   run_at_date: string;
   weekday: number;
   day_of_month: number;
+  interval_minutes: number;
+  // 排程類型專屬參數（見 TASK_TYPE_OPTIONS 的 needsTemplate / needsGroup），存進 scheduled_tasks.config。
+  template_id: string;
+  notification_group_id: string;
 };
 
 const emptyForm = (): TaskForm => ({
@@ -65,6 +140,9 @@ const emptyForm = (): TaskForm => ({
   run_at_date: '',
   weekday: 1,
   day_of_month: 1,
+  interval_minutes: MIN_INTERVAL_MINUTES,
+  template_id: '',
+  notification_group_id: '',
 });
 
 function formToConfig(form: TaskForm): ScheduleConfig {
@@ -74,11 +152,23 @@ function formToConfig(form: TaskForm): ScheduleConfig {
     runAtDate: form.run_at_date || null,
     weekday: form.weekday,
     dayOfMonth: form.day_of_month,
+    intervalMinutes: form.interval_minutes,
   };
 }
 
+// 排程類型專屬參數，存進 scheduled_tasks.config（JSONB）。跟上面的 formToConfig 是兩件不同的事——
+// 那個是「什麼時候跑」，這個是「跑的時候要用哪個範本/通知名單」。只存這個類型真的用得到的欄位，
+// 不相關的欄位不寫入，避免舊資料殘留造成混淆。
+function buildTaskConfig(form: TaskForm): Record<string, any> {
+  const opt = taskTypeOption(form.task_type);
+  const config: Record<string, any> = {};
+  if (opt?.needsTemplate) config.template_id = form.template_id || null;
+  if (opt?.needsGroup) config.notification_group_id = form.notification_group_id || null;
+  return config;
+}
+
 function taskTypeLabel(taskType: string): string {
-  return TASK_TYPE_OPTIONS.find((t) => t.value === taskType)?.label || taskType;
+  return taskTypeOption(taskType)?.label || taskType;
 }
 
 function formatDateTime(iso: string | null): string {
@@ -86,10 +176,17 @@ function formatDateTime(iso: string | null): string {
   return new Date(iso).toLocaleString('zh-TW', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
 }
 
+interface TemplateOption { id: string; title: string }
+interface GroupOption { id: string; name: string; channel_id: string }
+
 export default function ScheduledTasks() {
   const [rows, setRows] = useState<ScheduledTask[]>([]);
   const [loading, setLoading] = useState(true);
   const [errorMsg, setErrorMsg] = useState('');
+
+  const [templates, setTemplates] = useState<TemplateOption[]>([]);
+  const [groups, setGroups] = useState<GroupOption[]>([]);
+  const [channelNameById, setChannelNameById] = useState<Record<string, string>>({});
 
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -102,6 +199,7 @@ export default function ScheduledTasks() {
 
   useEffect(() => {
     fetchRows();
+    fetchTemplateAndGroupOptions();
   }, []);
 
   const fetchRows = async () => {
@@ -115,6 +213,19 @@ export default function ScheduledTasks() {
       setRows(data || []);
     }
     setLoading(false);
+  };
+
+  // 「客製訊息範本」跟「通知名單」的下拉選單資料，跟 scheduled_tasks 本身無關，
+  // 獨立查一次即可，不用每次開表單都重查。
+  const fetchTemplateAndGroupOptions = async () => {
+    const [templateRes, groupRes, channelRes] = await Promise.all([
+      supabase.from('custom_message_templates').select('id, title').order('created_at'),
+      supabase.from('notification_recipient_groups').select('id, name, channel_id').order('created_at', { ascending: false }),
+      supabase.from('line_channels').select('id, name'),
+    ]);
+    setTemplates(templateRes.data || []);
+    setGroups(groupRes.data || []);
+    setChannelNameById(Object.fromEntries((channelRes.data || []).map((c: any) => [c.id, c.name])));
   };
 
   const openNew = () => {
@@ -135,14 +246,21 @@ export default function ScheduledTasks() {
       run_at_date: row.run_at_date || '',
       weekday: row.weekday ?? 1,
       day_of_month: row.day_of_month ?? 1,
+      interval_minutes: row.interval_minutes ?? MIN_INTERVAL_MINUTES,
+      template_id: row.config?.template_id || '',
+      notification_group_id: row.config?.notification_group_id || '',
     });
     setFormError('');
     setShowForm(true);
   };
 
+  const currentTaskType = taskTypeOption(form.task_type);
+
   const handleSave = async () => {
     if (!form.name.trim()) return setFormError('請輸入排程名稱');
     if (form.recurrence === 'once' && !form.run_at_date) return setFormError('請選擇執行日期');
+    if (currentTaskType?.needsTemplate && !form.template_id) return setFormError('這個排程類型需要選擇一個客製訊息範本');
+    if (currentTaskType?.needsGroup && !form.notification_group_id) return setFormError('這個排程類型需要選擇一個通知名單');
 
     const nextRunAt = computeNextRunAt(formToConfig(form), Date.now());
     if (!nextRunAt) return setFormError('算不出下一次執行時間，單次排程的日期時間必須在現在之後');
@@ -153,12 +271,13 @@ export default function ScheduledTasks() {
       const payload = {
         name: form.name.trim(),
         task_type: form.task_type,
-        config: {},
+        config: buildTaskConfig(form),
         recurrence: form.recurrence,
         run_at_time: form.run_at_time,
         run_at_date: form.recurrence === 'once' ? form.run_at_date : null,
         weekday: form.recurrence === 'weekly' ? form.weekday : null,
         day_of_month: form.recurrence === 'monthly' ? form.day_of_month : null,
+        interval_minutes: form.recurrence === 'every_n_minutes' ? form.interval_minutes : null,
         is_active: true,
         next_run_at: nextRunAt.toISOString(),
         updated_at: new Date().toISOString(),
@@ -202,7 +321,10 @@ export default function ScheduledTasks() {
     const patch: Record<string, any> = { is_active: nextActive, updated_at: new Date().toISOString() };
     if (nextActive) {
       const nextRunAt = computeNextRunAt(
-        { recurrence: row.recurrence, runAtTime: row.run_at_time, runAtDate: row.run_at_date, weekday: row.weekday, dayOfMonth: row.day_of_month },
+        {
+          recurrence: row.recurrence, runAtTime: row.run_at_time, runAtDate: row.run_at_date,
+          weekday: row.weekday, dayOfMonth: row.day_of_month, intervalMinutes: row.interval_minutes,
+        },
         Date.now()
       );
       if (!nextRunAt) {
@@ -304,11 +426,49 @@ export default function ScheduledTasks() {
 
         <div>
           <label className="block text-xs text-gray-500 mb-1">排程類型</label>
-          <select value={form.task_type} onChange={(e) => setForm({ ...form, task_type: e.target.value })} className="w-full px-3 py-2 border rounded-lg bg-white">
+          <select value={form.task_type} onChange={(e) => setForm({ ...form, task_type: e.target.value, template_id: '', notification_group_id: '' })} className="w-full px-3 py-2 border rounded-lg bg-white">
             {TASK_TYPE_OPTIONS.map((t) => (<option key={t.value} value={t.value}>{t.label}</option>))}
           </select>
-          <p className="text-xs text-gray-400 mt-1">{TASK_TYPE_OPTIONS.find((t) => t.value === form.task_type)?.description}</p>
+          <p className="text-xs text-gray-400 mt-1">{currentTaskType?.description}</p>
         </div>
+
+        {currentTaskType?.needsTemplate && (
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">
+              客製訊息範本<span className="text-red-500"> *</span>
+            </label>
+            {templates.length === 0 ? (
+              <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                還沒有任何範本，請先到「客製訊息發送」頁新增一個。
+              </p>
+            ) : (
+              <select value={form.template_id} onChange={(e) => setForm({ ...form, template_id: e.target.value })} className="w-full px-3 py-2 border rounded-lg bg-white">
+                <option value="">請選擇範本</option>
+                {templates.map((t) => (<option key={t.id} value={t.id}>{t.title}</option>))}
+              </select>
+            )}
+            <p className="text-xs text-gray-400 mt-1">這則訊息會直接發給訂單本人，範本裡可以用「訊息變數資料維護」設定的 [變數]。</p>
+          </div>
+        )}
+
+        {currentTaskType?.needsGroup && (
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">
+              通知名單<span className="text-red-500"> *</span>
+            </label>
+            {groups.length === 0 ? (
+              <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                還沒有任何通知名單，請先到「系統設定 → LINE 串接設定」新增一個。
+              </p>
+            ) : (
+              <select value={form.notification_group_id} onChange={(e) => setForm({ ...form, notification_group_id: e.target.value })} className="w-full px-3 py-2 border rounded-lg bg-white">
+                <option value="">請選擇通知名單</option>
+                {groups.map((g) => (<option key={g.id} value={g.id}>{g.name}（{channelNameById[g.channel_id] || '未知帳號'}）</option>))}
+              </select>
+            )}
+            <p className="text-xs text-gray-400 mt-1">這是彙整清單通知，格式固定（標題＋筆數＋逐筆列出），不套用範本系統。</p>
+          </div>
+        )}
 
         <div className="grid grid-cols-2 gap-3">
           <div>
@@ -317,10 +477,24 @@ export default function ScheduledTasks() {
               {RECURRENCE_OPTIONS.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
             </select>
           </div>
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">時間</label>
-            <input type="time" value={form.run_at_time} onChange={(e) => setForm({ ...form, run_at_time: e.target.value })} className="w-full px-3 py-2 border rounded-lg" />
-          </div>
+          {form.recurrence === 'every_n_minutes' ? (
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">每幾分鐘</label>
+              <input
+                type="number" min={MIN_INTERVAL_MINUTES} step={MIN_INTERVAL_MINUTES}
+                value={form.interval_minutes}
+                onChange={(e) => setForm({ ...form, interval_minutes: Math.max(MIN_INTERVAL_MINUTES, Number(e.target.value) || MIN_INTERVAL_MINUTES) })}
+                className="w-full px-3 py-2 border rounded-lg"
+              />
+              <p className="text-xs text-gray-400 mt-1">下限 {MIN_INTERVAL_MINUTES} 分鐘——排程檢查心跳本身固定每 {MIN_INTERVAL_MINUTES} 分鐘一次，設更短也不會更密集執行。</p>
+            </div>
+          ) : (
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">{form.recurrence === 'hourly' ? '每小時第幾分' : '時間'}</label>
+              <input type="time" value={form.run_at_time} onChange={(e) => setForm({ ...form, run_at_time: e.target.value })} className="w-full px-3 py-2 border rounded-lg" />
+              {form.recurrence === 'hourly' && <p className="text-xs text-gray-400 mt-1">選「每小時」時只有分鐘數有效，小時欄位會被忽略。</p>}
+            </div>
+          )}
         </div>
 
         {form.recurrence === 'once' && (

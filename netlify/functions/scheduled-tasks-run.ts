@@ -1,9 +1,12 @@
 import { Handler } from '@netlify/functions';
 import { Client } from '@line/bot-sdk';
 import { createClient } from '@supabase/supabase-js';
-import { parseCsvKeywords } from '../../src/lib/messageVariables';
+import { randomUUID, createSign } from 'crypto';
+import { parseCsvKeywords, buildMergeFields, MessageVariable } from '../../src/lib/messageVariables';
 import { computeNextRunAt, ScheduleConfig } from '../../src/lib/scheduleRecurrence';
-import { OCCUPYING_STATUSES } from '../../src/lib/bookingStatus';
+import { OCCUPYING_STATUSES, BALANCE_PAID_STATUSES } from '../../src/lib/bookingStatus';
+import { parseIcsEvents } from '../../src/lib/icsParser';
+import { otaPlatformLabel } from '../../src/lib/otaChannels';
 
 // ========================================================================
 // 排程執行器（ticker）
@@ -162,9 +165,684 @@ async function notifyCheckoutCompleted(_config: Record<string, any>): Promise<{ 
   return { ok: true, summary: `推播 ${completed.length} 筆已退房訂單統計給 ${pushed} 位收件人` };
 }
 
+// ========================================================================
+// 訂單狀態自動轉換排程（三個時間點各自獨立，各自對應一種狀態轉換）
+// ========================================================================
+
+function taiwanTodayIso(): string {
+  return new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+
+function addDaysIso(iso: string, days: number): string {
+  const d = new Date(`${iso}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+// 已預定(reserved) → 待收尾款(awaiting_balance)：今天 = 入住日 - 3 天。00:00 執行。
+async function advanceToAwaitingBalance(): Promise<{ ok: boolean; summary: string }> {
+  const targetCheckin = addDaysIso(taiwanTodayIso(), 3);
+  const { data, error } = await supabase.from('bookings').select('id').eq('status', 'reserved').eq('checkin_date', targetCheckin);
+  if (error) return { ok: false, summary: `查詢失敗：${error.message}` };
+  if (!data?.length) return { ok: true, summary: '沒有需要轉為待收尾款的訂單' };
+  const { error: updateError } = await supabase.from('bookings').update({ status: 'awaiting_balance', updated_at: new Date().toISOString() }).in('id', data.map((b) => b.id));
+  if (updateError) return { ok: false, summary: `更新失敗：${updateError.message}` };
+  return { ok: true, summary: `${data.length} 筆訂單已轉為待收尾款` };
+}
+
+// 待入住(awaiting_checkin) → 入住中(checked_in)：今天 = 入住日。下午 1 點執行。
+async function advanceToCheckedIn(): Promise<{ ok: boolean; summary: string }> {
+  const today = taiwanTodayIso();
+  const { data, error } = await supabase.from('bookings').select('id').eq('status', 'awaiting_checkin').eq('checkin_date', today);
+  if (error) return { ok: false, summary: `查詢失敗：${error.message}` };
+  if (!data?.length) return { ok: true, summary: '沒有今日入住、需要轉為入住中的訂單' };
+  const { error: updateError } = await supabase.from('bookings').update({ status: 'checked_in', updated_at: new Date().toISOString() }).in('id', data.map((b) => b.id));
+  if (updateError) return { ok: false, summary: `更新失敗：${updateError.message}` };
+  return { ok: true, summary: `${data.length} 筆訂單已轉為入住中` };
+}
+
+// 入住中(checked_in) → 押金處理(deposit_processing)：今天 = 退房日。中午 12 點執行。
+async function advanceToDepositProcessing(): Promise<{ ok: boolean; summary: string }> {
+  const today = taiwanTodayIso();
+  const { data, error } = await supabase.from('bookings').select('id').eq('status', 'checked_in').eq('checkout_date', today);
+  if (error) return { ok: false, summary: `查詢失敗：${error.message}` };
+  if (!data?.length) return { ok: true, summary: '沒有今日退房、需要轉為押金處理的訂單' };
+  const { error: updateError } = await supabase.from('bookings').update({ status: 'deposit_processing', updated_at: new Date().toISOString() }).in('id', data.map((b) => b.id));
+  if (updateError) return { ok: false, summary: `更新失敗：${updateError.message}` };
+  return { ok: true, summary: `${data.length} 筆訂單已轉為押金處理` };
+}
+
+// ========================================================================
+// 通知排程共用小工具
+// ========================================================================
+
+function mergeTemplate(template: string, fields: Record<string, string>): string {
+  let result = template;
+  for (const [key, value] of Object.entries(fields)) result = result.split(`[${key}]`).join(value ?? '');
+  return result;
+}
+
+async function fetchTemplateBody(templateId?: string): Promise<string | null> {
+  if (!templateId) return null;
+  const { data } = await supabase.from('custom_message_templates').select('body').eq('id', templateId).maybeSingle();
+  return data?.body ?? null;
+}
+
+async function fetchMessageVariablesList(): Promise<MessageVariable[]> {
+  const { data } = await supabase.from('message_variables').select('variable_name, source, field_key').order('display_order');
+  return (data || []) as MessageVariable[];
+}
+
+async function fetchNotificationGroup(groupId?: string): Promise<any | null> {
+  if (!groupId) return null;
+  const { data } = await supabase.from('notification_recipient_groups').select('*').eq('id', groupId).maybeSingle();
+  return data || null;
+}
+
+// 直接推播給訂單本人（客戶用帳號），依「訊息變數資料維護」的設定把範本裡的 [變數] 換成這張訂單的資料——
+// 跟 LINE 自動訂房流程的報價/確認訊息用同一套合併欄位系統，管理員在別處學過的變數在這裡一樣能用。
+// 沒設定範本就整批略過，不用猜一份預設文字硬發給客人。
+async function pushToCustomersWithTemplate(
+  bookings: any[],
+  templateId: string | undefined,
+  settings: any,
+  extraFields?: (b: any) => Record<string, string>
+): Promise<{ pushed: number; failed: number; skippedNoTemplate: boolean }> {
+  const templateBody = await fetchTemplateBody(templateId);
+  if (!templateBody) return { pushed: 0, failed: 0, skippedNoTemplate: true };
+
+  const [variables, customerChannel] = await Promise.all([fetchMessageVariablesList(), fetchCustomerChannel()]);
+  if (!customerChannel?.channel_access_token) return { pushed: 0, failed: bookings.length, skippedNoTemplate: false };
+
+  const client = new Client({ channelAccessToken: customerChannel.channel_access_token, channelSecret: customerChannel.channel_secret });
+  let pushed = 0;
+  let failed = 0;
+  for (const b of bookings) {
+    if (!b.line_user_id) { failed++; continue; }
+    const fields = {
+      ...buildMergeFields(variables, { booking: b, customer: { nickname: b.nickname, line_user_id: b.line_user_id }, settings }),
+      ...(extraFields ? extraFields(b) : {}),
+    };
+    const text = mergeTemplate(templateBody, fields);
+    try {
+      await client.pushMessage(b.line_user_id, { type: 'text', text });
+      pushed++;
+    } catch (e: any) {
+      console.error('[ScheduledTasks] customer push failed:', e.message);
+      failed++;
+    }
+  }
+  return { pushed, failed, skippedNoTemplate: false };
+}
+
+// 推播一份彙整清單給某個通知名單（不是單一客人）——格式固定（標題＋筆數＋逐行清單），
+// 比照既有的 notify_checkout_completed 寫法，不走 buildMergeFields：這些訊息本來就是「這批訂單的
+// 狀態報告」，不是針對單一顧客資料客製化的訊息，用固定格式反而比硬套變數系統更清楚好維護。
+async function pushSummaryToGroup(
+  bookings: any[],
+  groupId: string | undefined,
+  title: string,
+  lineFormatter: (b: any) => string
+): Promise<{ pushed: number; skipped: string | null }> {
+  if (!groupId) return { pushed: 0, skipped: '尚未設定通知名單' };
+  const group = await fetchNotificationGroup(groupId);
+  if (!group) return { pushed: 0, skipped: '通知名單不存在或已被刪除' };
+  if (!group.line_user_ids?.length) return { pushed: 0, skipped: '通知名單裡沒有任何聯絡人' };
+
+  const { data: channel } = await supabase.from('line_channels').select('*').eq('id', group.channel_id).maybeSingle();
+  if (!channel?.channel_access_token) return { pushed: 0, skipped: '通知名單所屬官方帳號憑證未設定' };
+
+  const text = `${title}\n共 ${bookings.length} 筆\n\n${bookings.map(lineFormatter).join('\n')}`;
+  const client = new Client({ channelAccessToken: channel.channel_access_token, channelSecret: channel.channel_secret });
+  let pushed = 0;
+  for (const id of group.line_user_ids) {
+    try {
+      await client.pushMessage(id, { type: 'text', text });
+      pushed++;
+    } catch (e: any) {
+      console.error('[ScheduledTasks] group push failed:', e.message);
+    }
+  }
+  return { pushed, skipped: null };
+}
+
+// ========================================================================
+// 通知排程（六種）
+// config.template_id：直接通知客人用的「客製訊息範本」（custom_message_templates.id）。
+// config.notification_group_id：彙整通知用的「通知名單」（notification_recipient_groups.id）。
+// ========================================================================
+
+// 尾款排程：入住日在「今天～今天+2天」內、狀態仍是待收尾款的訂單。
+// 同時做兩件事：(1) 直接提醒客人本人繳尾款 (2) 把整批清單彙整通知給通知名單，方便客服追。
+async function balanceReminder(config: Record<string, any>, settings: any): Promise<{ ok: boolean; summary: string }> {
+  const today = taiwanTodayIso();
+  const until = addDaysIso(today, 2);
+  const { data, error } = await supabase
+    .from('bookings')
+    .select('id, order_number, name, nickname, line_user_id, checkin_date, checkout_date, headcount, room_type_label, total_amount, deposit, status')
+    .eq('status', 'awaiting_balance')
+    .gte('checkin_date', today)
+    .lte('checkin_date', until);
+  if (error) return { ok: false, summary: `查詢失敗：${error.message}` };
+  if (!data?.length) return { ok: true, summary: '沒有 3 天內入住、尚未收尾款的訂單' };
+
+  const direct = await pushToCustomersWithTemplate(data, config.template_id, settings);
+  const group = await pushSummaryToGroup(
+    data,
+    config.notification_group_id,
+    '💰 尾款提醒：以下訂單即將入住，尚未收到尾款',
+    (b) => `・${b.order_number || b.id.slice(0, 8)}　${b.name || b.nickname || '未知'}　${b.checkin_date}~${b.checkout_date}`
+  );
+
+  const parts = [`${data.length} 筆符合條件`];
+  parts.push(direct.skippedNoTemplate ? '未設定客人提醒範本，略過直接通知' : `直接通知客人 ${direct.pushed} 位成功、${direct.failed} 位失敗`);
+  parts.push(group.skipped ? group.skipped : `名單通知 ${group.pushed} 位`);
+  return { ok: true, summary: parts.join('；') };
+}
+
+// 待預定匯款通知：客戶用帳號底下，狀態仍是待預定、且是「昨天」建立的訂單——提醒客人該匯款了。
+async function depositAwaitingNotice(config: Record<string, any>, settings: any): Promise<{ ok: boolean; summary: string }> {
+  const yesterday = addDaysIso(taiwanTodayIso(), -1);
+  const today = taiwanTodayIso();
+  const { data, error } = await supabase
+    .from('bookings')
+    .select('id, order_number, name, nickname, line_user_id, checkin_date, checkout_date, total_amount, deposit, status, created_at')
+    .eq('status', 'awaiting_deposit')
+    .gte('created_at', `${yesterday}T00:00:00+08:00`)
+    .lt('created_at', `${today}T00:00:00+08:00`);
+  if (error) return { ok: false, summary: `查詢失敗：${error.message}` };
+  if (!data?.length) return { ok: true, summary: '沒有昨天建立、仍待預定的訂單' };
+
+  const result = await pushToCustomersWithTemplate(data, config.template_id, settings);
+  if (result.skippedNoTemplate) return { ok: true, summary: `${data.length} 筆符合條件，但尚未設定訊息範本，略過發送` };
+  return { ok: true, summary: `${data.length} 筆符合條件，通知客人 ${result.pushed} 位成功、${result.failed} 位失敗` };
+}
+
+// 待確認訂單通知：客戶用帳號底下，客人已回報匯款、待客服核對的訂單，彙整通知給通知名單。
+async function awaitingConfirmationNotice(config: Record<string, any>): Promise<{ ok: boolean; summary: string }> {
+  const { data, error } = await supabase
+    .from('bookings')
+    .select('id, order_number, name, nickname, checkin_date, checkout_date, remit_last5')
+    .eq('status', 'awaiting_confirmation')
+    .order('updated_at');
+  if (error) return { ok: false, summary: `查詢失敗：${error.message}` };
+  if (!data?.length) return { ok: true, summary: '沒有待確認的訂單' };
+
+  const result = await pushSummaryToGroup(
+    data,
+    config.notification_group_id,
+    '📋 待確認訂單通知：以下訂單客人已回報匯款，待核對到帳',
+    (b) => `・${b.order_number || b.id.slice(0, 8)}　${b.name || b.nickname || '未知'}　末五碼:${b.remit_last5 || '未提供'}`
+  );
+  return { ok: true, summary: result.skipped ? `${data.length} 筆待確認訂單，${result.skipped}` : `${data.length} 筆待確認訂單，通知 ${result.pushed} 位` };
+}
+
+// 入住排程：狀態為待入住、且入住日就是今天的訂單，通知客人本人（含入住密碼——這是唯一會把
+// check_in_password 帶進訊息的地方，走 [入住密碼] 這個特殊變數，不透過一般的欄位白名單機制，
+// 見 messageVariables.ts 的 ALWAYS_AVAILABLE_VARIABLES 說明）。
+async function checkinNotice(config: Record<string, any>, settings: any): Promise<{ ok: boolean; summary: string }> {
+  const today = taiwanTodayIso();
+  const { data, error } = await supabase
+    .from('bookings')
+    .select('id, order_number, name, nickname, line_user_id, checkin_date, checkout_date, room_type_label, check_in_password')
+    .eq('status', 'awaiting_checkin')
+    .eq('checkin_date', today);
+  if (error) return { ok: false, summary: `查詢失敗：${error.message}` };
+  if (!data?.length) return { ok: true, summary: '沒有今日入住的訂單' };
+
+  const result = await pushToCustomersWithTemplate(data, config.template_id, settings, (b) => ({ 入住密碼: b.check_in_password || '（尚未設定，請聯繫客服）' }));
+  if (result.skippedNoTemplate) return { ok: true, summary: `${data.length} 筆今日入住，但尚未設定訊息範本，略過發送` };
+  return { ok: true, summary: `${data.length} 筆今日入住，通知客人 ${result.pushed} 位成功、${result.failed} 位失敗` };
+}
+
+// 押金處理通知：客戶用帳號底下，狀態為押金處理中的訂單，彙整通知給通知名單去核對退還。
+async function depositProcessingNotice(config: Record<string, any>): Promise<{ ok: boolean; summary: string }> {
+  const { data, error } = await supabase
+    .from('bookings')
+    .select('id, order_number, name, nickname, checkin_date, checkout_date, security_deposit')
+    .eq('status', 'deposit_processing')
+    .order('checkout_date');
+  if (error) return { ok: false, summary: `查詢失敗：${error.message}` };
+  if (!data?.length) return { ok: true, summary: '沒有押金處理中的訂單' };
+
+  const result = await pushSummaryToGroup(
+    data,
+    config.notification_group_id,
+    '💵 押金處理通知：以下訂單已退房，待核對退還押金',
+    (b) => `・${b.order_number || b.id.slice(0, 8)}　${b.name || b.nickname || '未知'}　押金:NT$${Number(b.security_deposit ?? 0).toLocaleString()}`
+  );
+  return { ok: true, summary: result.skipped ? `${data.length} 筆押金處理中，${result.skipped}` : `${data.length} 筆押金處理中，通知 ${result.pushed} 位` };
+}
+
+// 洗滌排程：狀態為押金處理、且退房日就是今天的訂單（跟「入住中→押金處理」排程同一天觸發），
+// 通知布巾洗滌相關人員安排送洗。
+async function laundryNotice(config: Record<string, any>): Promise<{ ok: boolean; summary: string }> {
+  const today = taiwanTodayIso();
+  const { data, error } = await supabase
+    .from('bookings')
+    .select('id, order_number, name, nickname, checkin_date, checkout_date, room_type_label, linen_change_count')
+    .eq('status', 'deposit_processing')
+    .eq('checkout_date', today);
+  if (error) return { ok: false, summary: `查詢失敗：${error.message}` };
+  if (!data?.length) return { ok: true, summary: '沒有今日退房、需要洗滌的訂單' };
+
+  const result = await pushSummaryToGroup(
+    data,
+    config.notification_group_id,
+    '🧺 洗滌排程：以下訂單今日退房，請安排布巾洗滌',
+    (b) => `・${b.order_number || b.id.slice(0, 8)}　${b.name || b.nickname || '未知'}　${b.room_type_label || ''}　換洗${b.linen_change_count ?? 1}次`
+  );
+  return { ok: true, summary: result.skipped ? `${data.length} 筆今日退房需洗滌，${result.skipped}` : `${data.length} 筆今日退房需洗滌，通知 ${result.pushed} 位` };
+}
+
+// ========================================================================
+// OTA 平台 iCal 匯入排程（sync_ota_calendars）
+//
+// 抓取所有啟用中、有設定 import_ics_url 的 ota_channels，解析後跟 bookings 做 upsert：
+//   - external_channel_id + external_uid 是這筆外部事件在本系統的穩定識別鍵（見 schema 的
+//     partial unique index：idx_bookings_external_uid），同一個 UID 再次匯入只更新日期，
+//     不會重複建立。
+//   - 來源事件消失（平台那邊取消了）時，把對應的 bookings 列改成 cancelled——沿用一般
+//     「取消」語意，不整批刪除，保留歷史紀錄可查。
+//   - 匯入的日期跟其他現有訂單（不分來源，含其他 OTA 頻道）重疊時，只推播提醒
+//     agent_user_ids，不自動處理——雙重預訂的實際狀況需要人工核實是哪一邊要改，
+//     系統不擅自取消任何一方。只在「新建立」或「日期變動」時檢查一次，避免同一筆
+//     沒有變化的既有衝突每次排程執行都重複轟炸客服。
+// ========================================================================
+
+// 跟 line-webhook.ts 的 checkBookingConflict 同一套邏輯（日期重疊 + whole_house/booking_rooms
+// 房型比對），這裡另外排除自己這筆（更新既有匯入事件時，不該把自己算成衝突對象）。
+async function checkOtaConflict(channel: any, ev: { startIso: string; endIso: string }, selfBookingId: string | null): Promise<boolean> {
+  let query = supabase
+    .from('bookings')
+    .select('id, whole_house')
+    .in('status', OCCUPYING_STATUSES)
+    .lt('checkin_date', ev.endIso)
+    .gt('checkout_date', ev.startIso);
+  if (selfBookingId) query = query.neq('id', selfBookingId);
+  const { data: overlapping } = await query;
+  if (!overlapping?.length) return false;
+
+  if (!channel.room_type_id) return true; // 整棟頻道：任何日期重疊都算衝突
+  if (overlapping.some((b: any) => b.whole_house)) return true;
+
+  const individualIds = overlapping.filter((b: any) => !b.whole_house).map((b: any) => b.id);
+  if (!individualIds.length) return false;
+  const { data: roomLinks } = await supabase
+    .from('booking_rooms')
+    .select('booking_id')
+    .eq('room_type_id', channel.room_type_id)
+    .in('booking_id', individualIds);
+  return !!(roomLinks && roomLinks.length);
+}
+
+async function syncOneOtaChannel(channel: any): Promise<{ summary: string; conflictLines: string[] }> {
+  const nowIso = new Date().toISOString();
+  let icsText: string;
+  try {
+    const res = await fetch(channel.import_ics_url);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    icsText = await res.text();
+  } catch (e: any) {
+    const msg = `抓取失敗：${e.message}`;
+    await supabase.from('ota_channels').update({ last_imported_at: nowIso, last_import_status: 'failed', last_import_summary: msg }).eq('id', channel.id);
+    return { summary: `${channel.name}：${msg}`, conflictLines: [] };
+  }
+
+  const events = parseIcsEvents(icsText);
+  const seenUids = new Set(events.map((e) => e.uid));
+
+  const { data: existingRows } = await supabase
+    .from('bookings')
+    .select('id, external_uid, checkin_date, checkout_date')
+    .eq('external_channel_id', channel.id);
+  const existingByUid = new Map((existingRows || []).map((r: any) => [r.external_uid, r]));
+
+  let created = 0;
+  let updated = 0;
+  const conflictLines: string[] = [];
+
+  for (const ev of events) {
+    const existing = existingByUid.get(ev.uid);
+
+    if (existing) {
+      const changed = existing.checkin_date !== ev.startIso || existing.checkout_date !== ev.endIso;
+      if (changed) {
+        await supabase.from('bookings').update({ checkin_date: ev.startIso, checkout_date: ev.endIso, status: 'external_synced', updated_at: nowIso }).eq('id', existing.id);
+        updated++;
+        if (await checkOtaConflict(channel, ev, existing.id)) {
+          conflictLines.push(`・${channel.name}　${ev.startIso}~${ev.endIso}`);
+        }
+      }
+      continue;
+    }
+
+    if (await checkOtaConflict(channel, ev, null)) {
+      conflictLines.push(`・${channel.name}　${ev.startIso}~${ev.endIso}`);
+    }
+
+    // 訂單編號用「頻道名稱-短碼」，讓後台列表跟 Google 行事曆上都能一眼看出這筆是從哪個
+    // 平台/頻道匯入的（頻道名稱本來就是管理員在「第三方平台 iCal 同步」自訂的，例如
+    // 「Airbnb 整棟」「Booking - 2樓雅房」）。短碼用預先產生的 UUID 前 8 碼確保不重複
+    // （order_number 有 UNIQUE 限制），同一顆 UUID 順便當這筆訂單的主鍵，insert 完不用再多查一次。
+    const newId = randomUUID();
+    const { error: insertError } = await supabase
+      .from('bookings')
+      .insert({
+        id: newId,
+        line_user_id: '', // 外部匯入沒有 LINE 身分，比照「訂單管理」人工建單的空字串慣例
+        checkin_date: ev.startIso,
+        checkout_date: ev.endIso,
+        whole_house: !channel.room_type_id,
+        status: 'external_synced',
+        booking_source: channel.platform,
+        external_channel_id: channel.id,
+        external_uid: ev.uid,
+        order_number: `${channel.name}-${newId.slice(0, 8)}`,
+        name: `${otaPlatformLabel(channel.platform)} 訂單`,
+        room_type_label: channel.room_type_id ? channel.name : null,
+      });
+    if (insertError) continue;
+    created++;
+
+    // 綁定特定房型的頻道：連動寫進 booking_rooms，讓房型層級的檔期衝突檢查（fetchOccupiedRoomIds
+    // 等既有邏輯）看得到這筆外部訂單佔用了哪個房型，跟人工建單（OrderManagement.tsx）同一套機制。
+    if (channel.room_type_id) {
+      await supabase.from('booking_rooms').insert({ booking_id: newId, room_type_id: channel.room_type_id });
+    }
+  }
+
+  // 來源已消失的事件（平台那邊取消/刪除了）：標記為取消，不整批刪除。
+  const disappeared = (existingRows || []).filter((r: any) => r.external_uid && !seenUids.has(r.external_uid));
+  if (disappeared.length) {
+    await supabase.from('bookings').update({ status: 'cancelled', updated_at: nowIso }).in('id', disappeared.map((r: any) => r.id));
+  }
+
+  const parts = [`新增 ${created} 筆`, `更新 ${updated} 筆`];
+  if (disappeared.length) parts.push(`來源移除 ${disappeared.length} 筆（已標記取消）`);
+  if (conflictLines.length) parts.push(`⚠️ ${conflictLines.length} 筆疑似撞期`);
+  const summary = parts.join('、');
+
+  await supabase.from('ota_channels').update({ last_imported_at: nowIso, last_import_status: 'success', last_import_summary: summary }).eq('id', channel.id);
+
+  return { summary: `${channel.name}：${summary}`, conflictLines };
+}
+
+// ========================================================================
+// Google 行事曆同步：把目前所有「佔用中」的訂單（不分來源，直接訂房＋各 OTA 頻道匯入的都算）
+// 直接寫入管理員指定的 Google 行事曆，取代舊版「產生一個 .ics 訂閱網址、讓 Google/TimeTree/
+// Apple 自己來拉」的做法——這裡改成主動 push，管理員不用手動訂閱，資料改變後幾乎即時反映。
+//
+// 用服務帳號（settings.google_service_account_json）走 JWT Bearer flow 換 access token，
+// 不引入 googleapis / google-auth-library 這類套件：只需要「簽一個 JWT、換 token、打三支
+// events API」，Node 內建的 crypto 就做得到 RS256 簽章，跟這個專案一貫「小範圍需求手刻，
+// 不為了一兩個功能多背一個大套件」的原則一致（ICS 解析器、iCal 產生器都是同樣的考量）。
+//
+// 服務帳號要先被管理員手動「分享」到目標 Google 行事曆（在金鑰的 client_email 那組信箱，
+// 權限設「可以變更活動」），這是一次性的設定步驟，沒辦法用程式自動做，需要在後台文案裡說清楚。
+// ========================================================================
+
+function base64url(input: Buffer | string): string {
+  const buf = typeof input === 'string' ? Buffer.from(input) : input;
+  return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+async function getGoogleAccessToken(serviceAccountJson: string): Promise<string> {
+  const creds = JSON.parse(serviceAccountJson);
+  const now = Math.floor(Date.now() / 1000);
+  const signingInput = `${base64url(JSON.stringify({ alg: 'RS256', typ: 'JWT' }))}.${base64url(
+    JSON.stringify({
+      iss: creds.client_email,
+      scope: 'https://www.googleapis.com/auth/calendar',
+      aud: 'https://oauth2.googleapis.com/token',
+      iat: now,
+      exp: now + 3600,
+    })
+  )}`;
+  const signature = createSign('RSA-SHA256').update(signingInput).sign(creds.private_key);
+  const jwt = `${signingInput}.${base64url(signature)}`;
+
+  const res = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: `grant_type=${encodeURIComponent('urn:ietf:params:oauth:grant-type:jwt-bearer')}&assertion=${encodeURIComponent(jwt)}`,
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status} ${await res.text()}`);
+  const data = await res.json();
+  return data.access_token;
+}
+
+interface GoogleEventInput {
+  summary: string;
+  description: string;
+  start: string; // YYYY-MM-DD
+  end: string; // YYYY-MM-DD，不含這一天（跟本系統的 checkout_date 語意一致）
+}
+
+async function googleCalendarRequest(accessToken: string, calendarId: string, method: string, eventId: string | null, body?: any): Promise<any> {
+  const base = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events`;
+  const url = eventId ? `${base}/${encodeURIComponent(eventId)}` : base;
+  const res = await fetch(url, {
+    method,
+    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    const err: any = new Error(`HTTP ${res.status} ${await res.text()}`);
+    err.status = res.status;
+    throw err;
+  }
+  return res.status === 204 ? null : res.json();
+}
+
+async function insertGoogleEvent(accessToken: string, calendarId: string, ev: GoogleEventInput): Promise<string> {
+  const data = await googleCalendarRequest(accessToken, calendarId, 'POST', null, {
+    summary: ev.summary, description: ev.description, start: { date: ev.start }, end: { date: ev.end },
+  });
+  return data.id;
+}
+
+async function patchGoogleEvent(accessToken: string, calendarId: string, eventId: string, ev: GoogleEventInput): Promise<void> {
+  await googleCalendarRequest(accessToken, calendarId, 'PATCH', eventId, {
+    summary: ev.summary, description: ev.description, start: { date: ev.start }, end: { date: ev.end },
+  });
+}
+
+async function deleteGoogleEvent(accessToken: string, calendarId: string, eventId: string): Promise<void> {
+  try {
+    await googleCalendarRequest(accessToken, calendarId, 'DELETE', eventId);
+  } catch (e: any) {
+    if (e.status !== 404 && e.status !== 410) throw e; // 404/410＝Google 那邊已經沒有這個事件，當作成功
+  }
+}
+
+function formatAdultsKidsGCal(adults: number | null, kids: number | null, infants: number | null): string {
+  const a = adults ?? 0; const k = kids ?? 0; const i = infants ?? 0;
+  return `${a}大${k}小${i > 0 ? `${i}幼` : ''}`;
+}
+
+async function pushBookingsToGoogleCalendar(settings: any): Promise<string> {
+  const calendarId = settings.google_calendar_id;
+  const serviceAccountJson = settings.google_service_account_json;
+  if (!calendarId || !serviceAccountJson) return 'Google 行事曆尚未設定，略過推送';
+
+  let accessToken: string;
+  try {
+    accessToken = await getGoogleAccessToken(serviceAccountJson);
+  } catch (e: any) {
+    const msg = `Google 授權失敗：${e.message}`;
+    await supabase.from('settings').update({ google_calendar_last_synced_at: new Date().toISOString(), google_calendar_last_sync_status: 'failed', google_calendar_last_sync_summary: msg }).eq('id', settings.id);
+    return msg;
+  }
+
+  const nowIso = new Date().toISOString();
+  // 跟 calendar-feed.ts 的 PAST_WINDOW_DAYS 同一個考量：只處理近期與未來的訂單，避免查詢範圍無限成長。
+  const pastWindowIso = new Date(Date.now() - 180 * 86400000).toISOString().slice(0, 10);
+
+  const { data: bookings, error: bookingsError } = await supabase
+    .from('bookings')
+    .select('id, order_number, name, nickname, checkin_date, checkout_date, headcount, adults, kids, infants, whole_house, room_type_label, status, notes, booking_source, external_channel_id, google_event_id, google_synced_at, updated_at')
+    .in('status', OCCUPYING_STATUSES)
+    .not('checkin_date', 'is', null)
+    .not('checkout_date', 'is', null)
+    .gte('checkout_date', pastWindowIso);
+  if (bookingsError) return `查詢訂單失敗：${bookingsError.message}`;
+
+  // PostgREST 沒辦法在查詢條件裡比較兩個欄位（updated_at > google_synced_at），改成整批抓回來後
+  // 在這裡用 JS 過濾——這個專案的訂單量不大，這樣做比另外寫一個資料庫函式簡單很多。
+  const toPush = (bookings || []).filter(
+    (b: any) => !b.google_synced_at || new Date(b.updated_at).getTime() > new Date(b.google_synced_at).getTime()
+  );
+
+  const channelIds = [...new Set(toPush.filter((b: any) => b.external_channel_id).map((b: any) => b.external_channel_id))];
+  let channelNameById: Record<string, string> = {};
+  if (channelIds.length) {
+    const { data: channels } = await supabase.from('ota_channels').select('id, name').in('id', channelIds);
+    channelNameById = Object.fromEntries((channels || []).map((c: any) => [c.id, c.name]));
+  }
+
+  let created = 0;
+  let updated = 0;
+  let removed = 0;
+  let failed = 0;
+
+  for (const b of toPush) {
+    const isExternal = b.booking_source !== 'direct';
+    // 外部平台來源的事件標題直接標示頻道名稱（管理員在「第三方平台 iCal 同步」自訂的名字，
+    // 例如「Airbnb 整棟」），讓 Google 行事曆上一眼看得出是哪個平台/頻道來的，不用自己再去猜。
+    const summaryParts = isExternal
+      ? [`[${channelNameById[b.external_channel_id] || otaPlatformLabel(b.booking_source)}] 已預訂`]
+      : [`${b.name || b.nickname || '未填姓名'} ${b.headcount ?? ''}人`.trim()];
+    if (!isExternal && b.whole_house) summaryParts.push('·包棟');
+    if (!isExternal && !BALANCE_PAID_STATUSES.includes(b.status)) summaryParts.push(' ⚠️尾款未收');
+    const summary = summaryParts.join('');
+
+    const descParts = [`訂單編號: ${b.order_number || ''}`];
+    if (isExternal) {
+      descParts.push(`來源平台: ${otaPlatformLabel(b.booking_source)}`);
+    } else {
+      descParts.push(`大人小孩: ${formatAdultsKidsGCal(b.adults, b.kids, b.infants)}`);
+      if (b.room_type_label) descParts.push(`房型: ${b.room_type_label}`);
+      if (b.notes) descParts.push(`備註: ${b.notes}`);
+    }
+
+    const eventInput: GoogleEventInput = {
+      summary, description: descParts.join('\n'),
+      start: String(b.checkin_date).slice(0, 10), end: String(b.checkout_date).slice(0, 10),
+    };
+
+    try {
+      let eventId: string | null = b.google_event_id;
+      let isNew = false;
+      if (eventId) {
+        try {
+          await patchGoogleEvent(accessToken, calendarId, eventId, eventInput);
+        } catch (e: any) {
+          if (e.status !== 404 && e.status !== 410) throw e;
+          eventId = await insertGoogleEvent(accessToken, calendarId, eventInput); // Google 那邊的事件被手動刪掉了，補建一筆
+          isNew = true;
+        }
+      } else {
+        eventId = await insertGoogleEvent(accessToken, calendarId, eventInput);
+        isNew = true;
+      }
+      if (isNew) created++; else updated++;
+      await supabase.from('bookings').update({ google_event_id: eventId, google_synced_at: nowIso }).eq('id', b.id);
+    } catch (e: any) {
+      failed++;
+      console.error(`[GoogleCalendar] push failed for booking ${b.id}:`, e.message);
+    }
+  }
+
+  // 先前同步過、但後來離開佔用狀態的訂單（取消/退款等）：把對應的 Google 事件刪掉。
+  const { data: toRemove } = await supabase
+    .from('bookings')
+    .select('id, google_event_id')
+    .not('google_event_id', 'is', null)
+    .not('status', 'in', `(${OCCUPYING_STATUSES.join(',')})`);
+  for (const b of toRemove || []) {
+    try {
+      await deleteGoogleEvent(accessToken, calendarId, b.google_event_id);
+      await supabase.from('bookings').update({ google_event_id: null, google_synced_at: null }).eq('id', b.id);
+      removed++;
+    } catch (e: any) {
+      failed++;
+      console.error(`[GoogleCalendar] delete failed for booking ${b.id}:`, e.message);
+    }
+  }
+
+  const parts = [`新增 ${created} 筆`, `更新 ${updated} 筆`];
+  if (removed) parts.push(`移除 ${removed} 筆`);
+  if (failed) parts.push(`⚠️ ${failed} 筆失敗`);
+  const summary = parts.join('、');
+  const anySuccess = created + updated + removed > 0;
+  await supabase.from('settings').update({
+    google_calendar_last_synced_at: nowIso,
+    google_calendar_last_sync_status: failed > 0 && !anySuccess ? 'failed' : 'success',
+    google_calendar_last_sync_summary: summary,
+  }).eq('id', settings.id);
+
+  return summary;
+}
+
+// 排程管理頁的「第三方平台 iCal 同步」排程：先把各 OTA 頻道的最新資料匯入，整合完
+// （不分來源的完整佔用狀態）再一次推送到 Google 行事曆。兩步驟包在同一個排程類型裡，
+// 管理員只要設定一筆排程（建議每 15~30 分鐘）就能同時涵蓋「匯入」跟「同步到 Google」，
+// 不用自己再另外排一個順序、猜兩個排程誰先跑。
+async function syncCalendars(_config: Record<string, any>, settings: any): Promise<{ ok: boolean; summary: string }> {
+  const { data: channels, error } = await supabase
+    .from('ota_channels')
+    .select('*')
+    .eq('is_active', true)
+    .not('import_ics_url', 'is', null);
+  if (error) return { ok: false, summary: `查詢頻道失敗：${error.message}` };
+
+  const results: string[] = [];
+  const conflictAlerts: string[] = [];
+  if (channels?.length) {
+    for (const channel of channels) {
+      const { summary, conflictLines } = await syncOneOtaChannel(channel);
+      results.push(summary);
+      conflictAlerts.push(...conflictLines);
+    }
+  } else {
+    results.push('沒有設定匯入網址的啟用中頻道');
+  }
+
+  if (conflictAlerts.length) {
+    const customerChannel = await fetchCustomerChannel();
+    if (customerChannel?.channel_access_token) {
+      try {
+        const lineClient = new Client({ channelAccessToken: customerChannel.channel_access_token, channelSecret: customerChannel.channel_secret });
+        const text = `⚠️ 第三方平台同步偵測到 ${conflictAlerts.length} 筆疑似撞期，請人工核實：\n${conflictAlerts.join('\n')}`;
+        for (const id of parseCsvKeywords(settings.agent_user_ids)) {
+          try { await lineClient.pushMessage(id, { type: 'text', text }); } catch {}
+        }
+      } catch (e: any) {
+        console.error('[ScheduledTasks] OTA conflict notify failed:', e.message);
+      }
+    }
+  }
+
+  const googleSummary = await pushBookingsToGoogleCalendar(settings);
+  results.push(`Google 行事曆：${googleSummary}`);
+
+  return { ok: true, summary: results.join('；') };
+}
+
 const TASK_EXECUTORS: Record<string, TaskExecutor> = {
   cancel_unpaid_bookings: cancelUnpaidBookings,
   notify_checkout_completed: notifyCheckoutCompleted,
+  advance_to_awaiting_balance: advanceToAwaitingBalance,
+  advance_to_checked_in: advanceToCheckedIn,
+  advance_to_deposit_processing: advanceToDepositProcessing,
+  balance_reminder: balanceReminder,
+  deposit_awaiting_notice: depositAwaitingNotice,
+  awaiting_confirmation_notice: awaitingConfirmationNotice,
+  checkin_notice: checkinNotice,
+  deposit_processing_notice: depositProcessingNotice,
+  laundry_notice: laundryNotice,
+  sync_calendars: syncCalendars,
 };
 
 function toScheduleConfig(task: any): ScheduleConfig {
@@ -174,6 +852,7 @@ function toScheduleConfig(task: any): ScheduleConfig {
     runAtDate: task.run_at_date,
     weekday: task.weekday,
     dayOfMonth: task.day_of_month,
+    intervalMinutes: task.interval_minutes,
   };
 }
 
