@@ -4,6 +4,7 @@ import { ThemeProvider } from '@mui/material/styles';
 import CssBaseline from '@mui/material/CssBaseline';
 import { SnackbarProvider } from 'notistack';
 import { enterpriseTheme } from './muiTheme';
+import ConfirmDialogProvider from './components/ui-mui/ConfirmDialogProvider';
 import { supabase } from './lib/supabase';
 import Login from './pages/Login';
 import Overview from './pages/Overview';
@@ -102,6 +103,9 @@ function App() {
       autoHideDuration={3000}
       anchorOrigin={{ vertical: 'top', horizontal: 'right' }}
     >
+    {/* 二次確認對話框：以 Promise Hook 形式提供給各頁（useConfirm），
+        放在 Router 外層，任何頁面都拿得到同一個實例 */}
+    <ConfirmDialogProvider>
     <BrowserRouter>
       <Routes>
         <Route path="/login" element={!session ? <Login /> : <Navigate to="/" />} />
@@ -133,6 +137,7 @@ function App() {
         <Route path="*" element={<Navigate to="/" />} />
       </Routes>
     </BrowserRouter>
+    </ConfirmDialogProvider>
     </SnackbarProvider>
     </ThemeProvider>
   );
