@@ -1162,7 +1162,8 @@ async function startBookingFlow(
     .order('created_at', { ascending: false })
     .limit(1)
     .maybeSingle();
-  if (latestBooking && (latestBooking.status === 'inquiring' || latestBooking.status === 'quoted')) {
+  // quoted（已報價）已併入 inquiring（待報價，見 bookingStatus.ts），所以只需要判斷 inquiring。
+  if (latestBooking && latestBooking.status === 'inquiring') {
     bookingId = latestBooking.id;
   }
 
@@ -1557,7 +1558,11 @@ async function finishBookingFlow(
         total_amount: amounts.total_amount,
         deposit: amounts.deposit,
         room_type_label: roomTypeLabel,
-        status: 'quoted',
+        // quoted 已併入 inquiring（待報價本來就涵蓋「已報價、等客人決定」），這裡不需要
+        // 也不應該再把狀態切走——insertNewBooking 建立時就是 inquiring，報價算完仍停在
+        // 同一個狀態，等客人回「是」才會由 handleBookingConfirmation() 轉成 awaiting_deposit。
+        // 顯式寫出來是為了防呆：萬一這張訂單是重新試算（狀態理論上還是 inquiring），也不會不小心被改壞。
+        status: 'inquiring',
         collected_answers: collected,
         updated_at: new Date().toISOString(),
       })
@@ -1729,12 +1734,19 @@ async function handleRemittanceReport(
   const last5Match = userMessage.match(/\d{5}/); // 抓第一組連續 5 位數字當作匯款帳號後五碼
   const remit_last5 = last5Match ? last5Match[0] : null;
 
+  // 客人回報匯款＝待預定(2)→待確認(3) 的觸發點：客人「說」已經匯款了，但客服還沒核對到帳，
+  // 所以只轉到「待確認」，不是直接進「已預定」——已預定要等客服核對完手動改（見 bookingStatus.ts）。
+  // 只在目前確實是 awaiting_deposit 時才轉，避免在其他狀態下被這句話誤觸發狀態倒退/跳躍。
   const { data: booking } = await supabase
     .from('bookings')
     .update({ ...(remit_last5 ? { remit_last5 } : {}), updated_at: new Date().toISOString() })
     .eq('id', session.bookingId)
     .select()
     .single();
+
+  if (booking?.status === 'awaiting_deposit') {
+    await supabase.from('bookings').update({ status: 'awaiting_confirmation' }).eq('id', session.bookingId);
+  }
 
   const replyText = '好的，已收到您的匯款回報，我們核對後會盡快為您確認訂房，謝謝您的耐心等候 🙏';
   await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
@@ -1746,7 +1758,7 @@ async function handleRemittanceReport(
     try {
       await lineClient.pushMessage(id, {
         type: 'text',
-        text: `💰 匯款回報：【${nickname || '匿名用戶'}】訂單 ${orderNumber} 回報${last5Text}\n原文：${userMessage}\n查帳無誤後請至「訂單管理」將狀態改為已預定，或用「客製訊息發送」送出【訂房成功通知】自動改狀態。`,
+        text: `💰 匯款回報：【${nickname || '匿名用戶'}】訂單 ${orderNumber} 回報${last5Text}\n原文：${userMessage}\n已自動轉為「待確認」，查帳無誤後請至「訂單管理」將狀態改為已預定。`,
       });
     } catch {}
   }

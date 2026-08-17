@@ -12,16 +12,21 @@ import { OCCUPYING_STATUSES, bookingStatusLabel } from '../lib/bookingStatus';
 import DateRangeSettingsModal from '../components/DateRangeSettingsModal';
 
 // 行事曆事件用實心色塊呈現，這裡單獨定義（十六進位色碼，直接當 MUI sx/style 用）。
+// 跟 bookingStatus.ts 的 badgeClassName 用同一套顏色邏輯（同色系），只是換成十六進位。
 const STATUS_HEX: Record<string, string> = {
   awaiting_deposit: '#facc15',
+  awaiting_confirmation: '#f59e0b',
   reserved: '#a855f7',
   awaiting_balance: '#f97316',
-  confirmed: '#22c55e',
+  awaiting_checkin: '#0ea5e9',
+  checked_in: '#14b8a6',
+  deposit_processing: '#6366f1',
+  completed: '#22c55e',
   pending_manual_conflict: '#ef4444',
 };
-const QUOTED_HEX = '#9ca3af'; // 已報價但尚未鎖定房型，顏色跟其他狀態區隔用灰色＋虛線框
+const INQUIRING_HEX = '#9ca3af'; // 待報價（已算過價但客人還沒決定，尚未鎖定房型），顏色跟其他狀態區隔用灰色＋虛線框
 
-const CALENDAR_STATUSES = [...OCCUPYING_STATUSES]; // awaiting_deposit/reserved/awaiting_balance/confirmed/pending_manual_conflict
+const CALENDAR_STATUSES = [...OCCUPYING_STATUSES];
 
 const locales = { 'zh-TW': zhTW };
 const localizer = dateFnsLocalizer({
@@ -47,7 +52,7 @@ interface BookingEvent {
   end: Date;
   allDay: true;
   status: string;
-  quoted: boolean;
+  inquiring: boolean;
   booking: any;
 }
 
@@ -81,7 +86,9 @@ export default function RoomCalendar() {
       const { data: bookings } = await supabase
         .from('bookings')
         .select('id, name, nickname, whole_house, status, checkin_date, checkout_date, room_type_label, total_amount')
-        .in('status', [...CALENDAR_STATUSES, 'quoted'])
+        // inquiring（待報價）也要撈：quoted 已併入 inquiring，「已算過價但客人還沒決定」
+        // 這種有日期、但尚未鎖定房型的訂單，現在就是狀態=inquiring 且有 checkin/checkout_date。
+        .in('status', [...CALENDAR_STATUSES, 'inquiring'])
         .lte('checkin_date', monthEndIso)
         .gt('checkout_date', monthStartIso);
 
@@ -89,7 +96,7 @@ export default function RoomCalendar() {
         .filter((b: any) => b.checkin_date && b.checkout_date)
         .map((b: any) => {
           const guestName = b.name || b.nickname || '未取得';
-          const roomLabel = b.whole_house ? '包棟' : b.room_type_label || (b.status === 'quoted' ? '未指定房型' : '房型未定');
+          const roomLabel = b.whole_house ? '包棟' : b.room_type_label || (b.status === 'inquiring' ? '未指定房型' : '房型未定');
           return {
             id: b.id,
             title: `${guestName}（${roomLabel}）`,
@@ -97,7 +104,7 @@ export default function RoomCalendar() {
             end: new Date(`${b.checkout_date}T00:00:00`), // 退房日不算住宿夜，跟 react-big-calendar 多日事件「end 不含」的慣例一致
             allDay: true,
             status: b.status,
-            quoted: b.status === 'quoted',
+            inquiring: b.status === 'inquiring',
             booking: b,
           };
         });
@@ -151,10 +158,10 @@ export default function RoomCalendar() {
 
   const eventPropGetter = (event: BookingEvent) => ({
     style: {
-      backgroundColor: event.quoted ? QUOTED_HEX : STATUS_HEX[event.status] || '#9ca3af',
+      backgroundColor: event.inquiring ? INQUIRING_HEX : STATUS_HEX[event.status] || '#9ca3af',
       color: '#fff',
-      border: event.quoted ? '1px dashed #fff' : 'none',
-      opacity: event.quoted ? 0.85 : 1,
+      border: event.inquiring ? '1px dashed #fff' : 'none',
+      opacity: event.inquiring ? 0.85 : 1,
     },
   });
 
@@ -187,8 +194,8 @@ export default function RoomCalendar() {
           </Stack>
         ))}
         <Stack direction="row" alignItems="center" spacing={0.75}>
-          <Box sx={{ width: 12, height: 12, borderRadius: 0.5, bgcolor: QUOTED_HEX, border: '1px dashed #fff', outline: '1px solid #d1d5db' }} />
-          <Typography variant="caption" color="text.secondary">已報價（未鎖房型）</Typography>
+          <Box sx={{ width: 12, height: 12, borderRadius: 0.5, bgcolor: INQUIRING_HEX, border: '1px dashed #fff', outline: '1px solid #d1d5db' }} />
+          <Typography variant="caption" color="text.secondary">待報價（未鎖房型）</Typography>
         </Stack>
         <Chip label="旺季" size="small" sx={{ height: 20, fontSize: '0.65rem', bgcolor: '#fed7aa', color: '#9a3412' }} />
         <Chip label="連假" size="small" sx={{ height: 20, fontSize: '0.65rem', bgcolor: '#fecaca', color: '#991b1b' }} />
@@ -239,7 +246,7 @@ export default function RoomCalendar() {
                 <Chip
                   label={bookingStatusLabel(selectedEvent.status)}
                   size="small"
-                  sx={{ bgcolor: selectedEvent.quoted ? QUOTED_HEX : STATUS_HEX[selectedEvent.status] || '#9ca3af', color: '#fff' }}
+                  sx={{ bgcolor: selectedEvent.inquiring ? INQUIRING_HEX : STATUS_HEX[selectedEvent.status] || '#9ca3af', color: '#fff' }}
                 />
               </Box>
             </Stack>

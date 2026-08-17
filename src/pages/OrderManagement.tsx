@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import { ClipboardList, Search, RotateCcw, Save, Plus, Trash2, AlertCircle, Shirt, RefreshCw, CalendarDays, ListFilter, DoorOpen, ArrowRight } from 'lucide-react';
-import { PageHeader, Button, Modal, StatusBadge, EmptyState, ConfirmDialog } from '../components/ui';
-import { BOOKING_STATUS_OPTIONS, SYSTEM_ONLY_STATUS, REQUIRES_REMIT_LAST5_STATUS, FLOW_STEP_STATUSES, flowStepIndex, bookingStatusLabel } from '../lib/bookingStatus';
+import { Button, Modal, StatusBadge, EmptyState, ConfirmDialog } from '../components/ui';
+import { BOOKING_STATUS_OPTIONS, SYSTEM_ONLY_STATUSES, REQUIRES_REMIT_LAST5_STATUS, REQUIRES_CHECKIN_PASSWORD_STATUS, FLOW_STEP_STATUSES, flowStepIndex, bookingStatusLabel } from '../lib/bookingStatus';
 import { computeOrderAmounts } from '../lib/messageVariables';
 import { generateOrderNumber } from '../lib/orderNumber';
 import {
@@ -13,11 +13,12 @@ import { RoomOption, roomLabel } from '../lib/rooms';
 
 const PAGE_SIZE = 15;
 
-const FILTER_STATUS_OPTIONS = [{ value: '', label: '全部狀態' }, ...BOOKING_STATUS_OPTIONS, SYSTEM_ONLY_STATUS];
+const FILTER_STATUS_OPTIONS = [{ value: '', label: '全部狀態' }, ...BOOKING_STATUS_OPTIONS, ...SYSTEM_ONLY_STATUSES];
 
 interface OrderForm {
   id?: string;
   order_number?: string;
+  created_at?: string; // 唯讀顯示用，不可編輯，新增訂單時還沒有值
   name: string;
   nickname: string;
   line_user_id: string;
@@ -35,6 +36,7 @@ interface OrderForm {
   total_amount: string;
   deposit: string;
   remit_last5: string;
+  check_in_password: string;
   status: string;
   notes: string;
   linen_change_count: string;
@@ -44,15 +46,23 @@ const emptyForm = (): OrderForm => ({
   name: '', nickname: '', line_user_id: '', phone: '',
   checkin_date: '', checkout_date: '', headcount: '', adults: '', kids: '', infants: '',
   whole_house: false, room_type_label: '', room_amount: '', security_deposit: '', total_amount: '', deposit: '', remit_last5: '',
-  status: 'inquiring', notes: '', linen_change_count: '1',
+  check_in_password: '', status: 'inquiring', notes: '', linen_change_count: '1',
 });
+
+function formatDateTime(iso?: string): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}/${pad(d.getMonth() + 1)}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
 
 function StatusHelpIcon() {
   return (
     <div className="group relative inline-flex">
       <AlertCircle className="w-3.5 h-3.5 text-gray-400 cursor-help" />
       <div className="hidden group-hover:block absolute z-20 left-0 top-5 w-80 bg-gray-800 text-white text-xs rounded-lg p-3 space-y-1.5 shadow-lg">
-        {[...BOOKING_STATUS_OPTIONS, SYSTEM_ONLY_STATUS].map((s) => (
+        {[...BOOKING_STATUS_OPTIONS, ...SYSTEM_ONLY_STATUSES].map((s) => (
           <div key={s.value}><strong className="text-white">{s.label}</strong>：<span className="text-gray-300">{s.description}</span></div>
         ))}
       </div>
@@ -65,6 +75,7 @@ const EXCEPTION_STATUS_STYLE: Record<string, string> = {
   refunded: 'border-gray-200 bg-gray-100 text-gray-600',
   cancelled: 'border-red-100 bg-red-50/60 text-red-500',
   pending_manual_conflict: 'border-amber-200 bg-amber-50 text-amber-700',
+  external_synced: 'border-slate-200 bg-slate-50 text-slate-600',
 };
 
 // 訂單流程狀態進度列：上排是正常 6 步流程（點了篩選表格），下排是例外/其他流程。
@@ -126,7 +137,7 @@ function FlowStatusBar({
             {exceptionPill('refunded', bookingStatusLabel('refunded'))}
           </div>
           {exceptionPill('cancelled', bookingStatusLabel('cancelled'))}
-          {exceptionPill(SYSTEM_ONLY_STATUS.value, SYSTEM_ONLY_STATUS.label)}
+          {SYSTEM_ONLY_STATUSES.map((s) => <span key={s.value}>{exceptionPill(s.value, s.label)}</span>)}
         </div>
       </div>
     </div>
@@ -210,9 +221,17 @@ export default function OrderManagement() {
   };
 
   // 點流程列的某個步驟：切換篩選列的「訂單狀態」並重新查詢，再點一次同一個步驟會清掉篩選。
+  //
+  // 這裡不能寫成 setStatus(next); setTimeout(() => runQuery(0), 0)——setState 是非同步的，
+  // setTimeout(fn, 0) 排進的還是「這一輪 render」就已經存在的 runQuery 版本，那個版本的
+  // runQuery 透過 closure 讀到的 status 仍是「點擊之前」的舊值，不是剛剛按的 statusValue。
+  // 結果就是：點下去畫面立刻高亮（highlight 只看 render 用的 status），但下方清單其實是拿
+  // 上一輪的狀態去查，感覺起來永遠「慢一拍」——要再點一次、把新的舊值代入才會補上這次的篩選。
+  // 修法是讓 runQuery 直接接受要用的狀態值，不要依賴 state 更新完成的時間點。
   const selectStatusFilter = (statusValue: string) => {
-    setStatus((prev) => (prev === statusValue ? '' : statusValue));
-    setTimeout(() => runQuery(0), 0);
+    const next = status === statusValue ? '' : statusValue;
+    setStatus(next);
+    runQuery(0, { status: next });
   };
 
   // 換房間或改換洗次數才重算；已手動調整過的品項由 mergeUsage 保留。
@@ -302,7 +321,19 @@ export default function OrderManagement() {
     setUsageRows(computeUsage(selectedRoomIds, linenDefaults, normalizeChangeCount(Number(form.linen_change_count)), linenItems));
   };
 
-  const runQuery = async (pageIndex: number) => {
+  // overrides：呼叫端剛 setState 但還沒生效的最新值，優先用這個而不是 state，
+  // 道理跟 selectStatusFilter 上面的說明一樣——不要靠 setTimeout 賭 state 更新的時機。
+  const runQuery = async (
+    pageIndex: number,
+    overrides?: Partial<{ keyword: string; startDate: string; endDate: string; status: string; roomType: string }>
+  ) => {
+    const eff = {
+      keyword: overrides?.keyword ?? keyword,
+      startDate: overrides?.startDate ?? startDate,
+      endDate: overrides?.endDate ?? endDate,
+      status: overrides?.status ?? status,
+      roomType: overrides?.roomType ?? roomType,
+    };
     setLoading(true);
     let query = supabase
       .from('bookings')
@@ -310,13 +341,13 @@ export default function OrderManagement() {
       .order('created_at', { ascending: false })
       .range(pageIndex * PAGE_SIZE, pageIndex * PAGE_SIZE + PAGE_SIZE - 1);
 
-    if (startDate) query = query.gte('checkin_date', startDate);
-    if (endDate) query = query.lte('checkin_date', endDate);
-    if (status) query = query.eq('status', status);
-    if (roomType === '包棟') query = query.eq('whole_house', true);
-    else if (roomType) query = query.ilike('room_type_label', `%${roomType}%`);
-    if (keyword.trim()) {
-      const kw = keyword.trim().replace(/[%,()]/g, '');
+    if (eff.startDate) query = query.gte('checkin_date', eff.startDate);
+    if (eff.endDate) query = query.lte('checkin_date', eff.endDate);
+    if (eff.status) query = query.eq('status', eff.status);
+    if (eff.roomType === '包棟') query = query.eq('whole_house', true);
+    else if (eff.roomType) query = query.ilike('room_type_label', `%${eff.roomType}%`);
+    if (eff.keyword.trim()) {
+      const kw = eff.keyword.trim().replace(/[%,()]/g, '');
       query = query.or(`name.ilike.%${kw}%,nickname.ilike.%${kw}%,phone.ilike.%${kw}%,order_number.ilike.%${kw}%`);
     }
 
@@ -335,7 +366,7 @@ export default function OrderManagement() {
     setEndDate('');
     setStatus('');
     setRoomType('');
-    setTimeout(() => runQuery(0), 0);
+    runQuery(0, { keyword: '', startDate: '', endDate: '', status: '', roomType: '' });
   };
 
   const openNew = () => {
@@ -354,6 +385,7 @@ export default function OrderManagement() {
     setForm({
       id: row.id,
       order_number: row.order_number || '',
+      created_at: row.created_at || '',
       name: row.name || '',
       nickname: row.nickname || '',
       line_user_id: row.line_user_id || '',
@@ -372,6 +404,7 @@ export default function OrderManagement() {
       total_amount: row.total_amount != null ? String(row.total_amount) : '',
       deposit: row.deposit != null ? String(row.deposit) : '',
       remit_last5: row.remit_last5 || '',
+      check_in_password: row.check_in_password || '',
       status: row.status,
       notes: row.notes || '',
       linen_change_count: String(row.linen_change_count ?? 1),
@@ -422,6 +455,9 @@ export default function OrderManagement() {
         total_amount: form.total_amount === '' ? null : Number(form.total_amount),
         deposit: form.deposit === '' ? null : Number(form.deposit),
         remit_last5: form.remit_last5 || null,
+        // 只有狀態為「待入住」才允許有值——不是這個狀態時，即使欄位裡還留著文字（例如狀態被改回
+        // 更早的步驟），存檔時一律清空，不要讓舊密碼在不該生效的狀態下還留著造成誤導。
+        check_in_password: form.status === REQUIRES_CHECKIN_PASSWORD_STATUS ? (form.check_in_password || null) : null,
         status: form.status,
         notes: form.notes || null,
         updated_at: new Date().toISOString(),
@@ -494,21 +530,26 @@ export default function OrderManagement() {
 
   const balanceDue = (row: any) => (row.total_amount != null ? row.total_amount - (row.deposit ?? 0) : null);
 
-  const formStatusOptions = form.status === SYSTEM_ONLY_STATUS.value ? [SYSTEM_ONLY_STATUS, ...BOOKING_STATUS_OPTIONS] : BOOKING_STATUS_OPTIONS;
+  // 系統專用狀態不開放手動選，但如果這張訂單「現在剛好就是」系統專用狀態（例如系統偵測到檔期
+  // 衝突、或是外部平台同步進來的），下拉選單還是要能顯示目前這個值，不然編輯畫面會顯示成空白選項。
+  const currentSystemOnlyStatus = SYSTEM_ONLY_STATUSES.find((s) => s.value === form.status);
+  const formStatusOptions = currentSystemOnlyStatus ? [currentSystemOnlyStatus, ...BOOKING_STATUS_OPTIONS] : BOOKING_STATUS_OPTIONS;
 
   return (
     <div className="w-full space-y-6">
-      <PageHeader
-        icon={<ClipboardList className="w-6 h-6 text-green-600" />}
-        title="訂單管理"
-        description="新增、查詢、檢視與編輯所有訂房紀錄。"
-        action={<Button onClick={openNew} icon={<Plus className="w-4 h-4" />}>新增訂單</Button>}
-      />
-
-      <FlowStatusBar counts={statusCounts} activeStatus={status} onSelectStatus={selectStatusFilter} />
-
-      <div className="bg-white p-5 rounded-xl shadow-sm border space-y-3">
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3">
+      {/* 標題區塊與關鍵字搜尋合併成同一張卡片，中間用分隔線區分，不用再各自佔一張卡片。 */}
+      <div className="bg-white p-5 rounded-xl shadow-sm border space-y-4">
+        <div className="flex flex-wrap justify-between items-start gap-4">
+          <div>
+            <h2 className="text-2xl font-bold text-gray-800 flex items-center gap-2">
+              <ClipboardList className="w-6 h-6 text-green-600" />
+              訂單管理
+            </h2>
+            <p className="text-gray-500 mt-1">新增、查詢、檢視與編輯所有訂房紀錄。</p>
+          </div>
+          <Button onClick={openNew} icon={<Plus className="w-4 h-4" />}>新增訂單</Button>
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3 border-t pt-4">
           <div className="lg:col-span-2">
             <label className="flex items-center gap-1 text-xs text-gray-500 mb-1"><Search className="w-3.5 h-3.5" />關鍵字搜尋</label>
             <input value={keyword} onChange={(e) => setKeyword(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && runQuery(0)} placeholder="搜尋姓名、電話或訂單編號" className="w-full px-3 py-2 border rounded-lg text-sm" />
@@ -541,6 +582,8 @@ export default function OrderManagement() {
           <Button onClick={() => runQuery(0)} loading={loading} icon={<Search className="w-4 h-4" />}>查詢</Button>
         </div>
       </div>
+
+      <FlowStatusBar counts={statusCounts} activeStatus={status} onSelectStatus={selectStatusFilter} />
 
       <div className="bg-white rounded-xl shadow-sm border overflow-hidden">
         <div className="overflow-x-auto">
@@ -615,8 +658,22 @@ export default function OrderManagement() {
           </div>
           <div>
             <label className="block text-xs text-gray-500 mb-1">LINE User ID</label>
-            <input value={form.line_user_id} onChange={(e) => setForm({ ...form, line_user_id: e.target.value })} className="w-full px-3 py-2 border rounded-lg" placeholder="非 LINE 客戶可留空" />
+            {/* 只有新增訂單時能填；訂單一旦建立就鎖住不可改——LINE user ID 決定這張訂單屬於
+                哪位聯絡人，改掉的話對話記錄/推播對象都會對不上，是身分而不是可編輯的資料欄位。 */}
+            <input
+              value={form.line_user_id}
+              onChange={(e) => setForm({ ...form, line_user_id: e.target.value })}
+              disabled={!!editingId}
+              className={`w-full px-3 py-2 border rounded-lg ${editingId ? 'bg-gray-100 text-gray-400' : ''}`}
+              placeholder="非 LINE 客戶可留空"
+            />
           </div>
+          {editingId && (
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">訂單建立時間</label>
+              <input value={formatDateTime(form.created_at)} disabled className="w-full px-3 py-2 border rounded-lg bg-gray-100 text-gray-400" />
+            </div>
+          )}
           <div>
             <label className="block text-xs text-gray-500 mb-1">客戶姓名</label>
             <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className="w-full px-3 py-2 border rounded-lg" />
@@ -726,6 +783,19 @@ export default function OrderManagement() {
             <select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value })} className="w-full px-3 py-2 border rounded-lg bg-white">
               {formStatusOptions.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
             </select>
+          </div>
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">
+              入住密碼{form.status !== REQUIRES_CHECKIN_PASSWORD_STATUS && <span className="text-gray-400">（僅「待入住」狀態可填）</span>}
+            </label>
+            {/* 客人到現場要能報這組密碼給客服核對，所以是明碼輸入，不是密碼型輸入框。 */}
+            <input
+              value={form.check_in_password}
+              onChange={(e) => setForm({ ...form, check_in_password: e.target.value })}
+              disabled={form.status !== REQUIRES_CHECKIN_PASSWORD_STATUS}
+              className={`w-full px-3 py-2 border rounded-lg ${form.status !== REQUIRES_CHECKIN_PASSWORD_STATUS ? 'bg-gray-100 text-gray-400' : ''}`}
+              placeholder="入住時用來核對身分的密碼／門禁碼"
+            />
           </div>
           <div className="col-span-2">
             <label className="block text-xs text-gray-500 mb-1">備註</label>
