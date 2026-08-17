@@ -287,10 +287,24 @@ ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS booking_trigger_keywords TE
 ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS quote_sheet_id TEXT DEFAULT '';
 ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS quote_sheet_gid TEXT DEFAULT '0';
 
--- 訂房行事曆訂閱網址（netlify/functions/calendar-feed.ts）的通行碼。行事曆軟體訂閱時沒辦法帶
--- Authorization 標頭，只能靠網址裡的 ?token= 驗證，所以這個值等同密碼，不要外流。
--- 空字串＝功能關閉（不是「沒設定就公開」），要啟用請在「系統設定」頁產生一組。
+-- 訂房行事曆訂閱網址（netlify/functions/calendar-feed.ts）的通行碼。這是 2026-08 版本用的舊功能
+-- （行事曆軟體訂閱一個 URL，Google/TimeTree/Apple 都適用），後來改成直接寫入指定的 Google 行事曆
+-- （見下面 google_calendar_id 等欄位），程式已經不再讀寫這個欄位，比照本專案「舊欄位保留不刪」的慣例
+-- （LINE 串接改多帳號時 settings 的舊 channel token 欄位也是這樣處理）留著不動，避免不必要的欄位異動。
 ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS calendar_feed_token TEXT DEFAULT '';
+
+-- Google 行事曆同步（服務帳號直接寫入事件，取代上面舊的訂閱網址做法）：
+--   google_calendar_id：要寫入哪一個 Google 行事曆，管理員在 Google 日曆設定裡複製「行事曆 ID」貼過來。
+--   google_service_account_json：GCP 服務帳號的金鑰檔（JSON）原文貼上，用來簽發存取權杖呼叫
+--     Calendar API，等同密碼，不要外流。管理員要記得把上面設定的行事曆「分享」給這組服務帳號的信箱
+--     （在服務帳號金鑰的 client_email 欄位可以找到），並給予「可以變更活動」的權限，否則寫入會被拒絕。
+--   last_synced_at / last_sync_status / last_sync_summary：「排程管理」的 sync_calendars 排程執行完寫回，
+--     供後台顯示最後一次同步的結果，跟 ota_channels 的 last_import_* 同一套設計。
+ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS google_calendar_id TEXT;
+ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS google_service_account_json TEXT;
+ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS google_calendar_last_synced_at TIMESTAMPTZ;
+ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS google_calendar_last_sync_status TEXT; -- 'success' | 'failed'，還沒同步過是 NULL
+ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS google_calendar_last_sync_summary TEXT;
 ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS booking_welcome_message TEXT DEFAULT '🏡 LINE AI 訂房
 若您想先詢問空房或報價，請直接回覆以下資訊，我們會協助您確認：
 
@@ -431,6 +445,19 @@ CREATE INDEX IF NOT EXISTS idx_conversations_channel ON public.conversations(cha
 
 -- 訂單完成（退房後）統計推播用：記錄這筆訂單已經推播過，避免排程每次跑都重複發送。
 ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS completion_notified_at TIMESTAMPTZ;
+
+-- 通知名單：排程管理的各種自動通知（尾款提醒、待確認訂單通知、押金處理通知、洗滌排程…）
+-- 要發給「某個官方帳號底下的某幾位聯絡人，或群組」，不是整個帳號的全部聯絡人。
+-- 在後台勾選聯絡人存成具名清單，各排程可以共用同一份、也可以各自建立自己的名單。
+CREATE TABLE IF NOT EXISTS public.notification_recipient_groups (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    channel_id UUID NOT NULL REFERENCES public.line_channels(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    line_user_ids JSONB NOT NULL DEFAULT '[]', -- 該 channel 底下被勾選的 user_states.line_user_id 陣列
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_notification_groups_channel ON public.notification_recipient_groups(channel_id);
 
 -- 客製訊息發送：後台自訂的可重複使用訊息範本
 CREATE TABLE IF NOT EXISTS public.custom_message_templates (
@@ -631,6 +658,59 @@ ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS order_number TEXT UNIQUE;
 ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS room_type_label TEXT; -- 算完報價時寫入的人類可讀房型摘要（包棟＝「包棟」，個別租房＝房型名稱組合），列表顯示用，不用每次 join booking_room_nights
 ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS notes TEXT; -- 訂單管理頁的管理員備註，系統不會自動寫入
 ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS remit_last5 TEXT; -- 匯款末5碼，狀態改成「已預定」時訂單管理頁會要求填寫（僅前端表單驗證，不是資料庫層級限制，避免擋到 LINE 自動流程寫入）
+-- 入住密碼／門禁碼，客服手動輸入的明碼（客人到現場要能報這組密碼，所以不能加密存）。
+-- 只有狀態為「待入住」時前端才會開放編輯這個欄位（僅前端表單驗證，不是資料庫層級限制）。
+ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS check_in_password TEXT;
+
+-- ========================================================================
+-- 第三方平台（Airbnb／Booking.com／Agoda／Trip）iCal 雙向同步。
+--
+-- 匯出：每個頻道有自己的 export_token，netlify/functions/calendar-feed.ts 依這個 token
+--   產生專屬的訂閱網址給該平台貼上，內容排除「來源就是該平台自己」的訂單，避免同步迴圈
+--   （平台匯出自己剛匯入的訂單，我們又原樣匯出回去）。
+-- 匯入：room_type_id 決定這個頻道的日期要拿去佔用哪個房型（null＝整棟）；import_ics_url 是
+--   管理員貼上的、該平台自己提供的匯出網址；scheduled_tasks 的 sync_ota_calendars 排程會定期
+--   抓取、解析，寫回 bookings（status='external_synced'，見 bookingStatus.ts）。
+--
+-- ota_channels 要建在 bookings 拿到 external_channel_id 這個外鍵之前，所以放在這裡。
+-- ========================================================================
+CREATE TABLE IF NOT EXISTS public.ota_channels (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    platform TEXT NOT NULL CHECK (platform IN ('airbnb', 'booking', 'agoda', 'trip')),
+    name TEXT NOT NULL, -- 顯示用名稱，同一平台有多個房源/多筆訂閱時用來區分（例如「Airbnb - 暖木」）
+    room_type_id UUID REFERENCES public.room_types(id) ON DELETE SET NULL, -- null＝整棟
+    import_ics_url TEXT, -- 該平台自己提供的匯出網址，管理員貼上，null＝這個頻道不匯入
+    -- 我方匯出給該平台訂閱用。前端建立時用 crypto.getRandomValues() 產生（跟 settings.calendar_feed_token
+    -- 同一套做法，見 SystemSettings.tsx），不用資料庫端的 gen_random_bytes()——那需要另外啟用
+    -- pgcrypto 擴充套件，這個專案目前完全不依賴它，沒必要為了這一個欄位多引入一個相依性。
+    export_token TEXT NOT NULL UNIQUE,
+    is_active BOOLEAN NOT NULL DEFAULT true,
+    display_order INTEGER NOT NULL DEFAULT 0,
+    last_imported_at TIMESTAMPTZ,
+    last_import_status TEXT, -- 'success' | 'failed'，還沒同步過是 NULL
+    last_import_summary TEXT,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_ota_channels_active ON public.ota_channels(is_active) WHERE is_active;
+
+-- booking_source：這筆訂單是怎麼來的。'direct' 涵蓋 LINE 訂房流程與後台手動建單，
+-- 其餘四個對應 ota_channels.platform，只有 external_synced 狀態的訂單才會是非 direct。
+ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS booking_source TEXT NOT NULL DEFAULT 'direct'
+  CHECK (booking_source IN ('direct', 'airbnb', 'booking', 'agoda', 'trip'));
+ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS external_channel_id UUID REFERENCES public.ota_channels(id) ON DELETE SET NULL;
+ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS external_uid TEXT; -- 來源平台 iCal 裡的 VEVENT UID，供比對是否為同一筆、是否已從來源移除
+-- 同一個頻道底下 external_uid 不能重複，但允許多個頻道各自用到相同的 UID 字串（不同平台的 UID 互不相關），
+-- 也允許 external_channel_id 是 null（一般訂單，這個限制不適用）。
+CREATE UNIQUE INDEX IF NOT EXISTS idx_bookings_external_uid ON public.bookings(external_channel_id, external_uid) WHERE external_channel_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_bookings_external_channel ON public.bookings(external_channel_id) WHERE external_channel_id IS NOT NULL;
+
+-- Google 行事曆同步（sync_calendars 排程）用來記錄「這筆訂單目前對應到 Google 行事曆的哪一個事件」，
+-- 才能在訂單異動時用 PATCH 更新既有事件、而不是每次都重新建立一筆。google_synced_at 是「上次成功
+-- 同步當下」的時間戳，排程只挑 updated_at 比它新（或還沒同步過）的訂單處理，避免每次排程執行都要
+-- 把所有訂單重新 push 一次、白白浪費 Google API 額度。
+ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS google_event_id TEXT;
+ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS google_synced_at TIMESTAMPTZ;
 -- 這趟住宿的布巾換洗次數。預設 1＝整趟只在退房後洗一次（最常見）；客人中途想再洗就填 2。
 -- 放在訂單而不是房間設定，因為這是每趟住宿的實際狀況，事先決定不了。
 ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS linen_change_count INTEGER NOT NULL DEFAULT 1;
@@ -682,17 +762,43 @@ END $$;
 UPDATE public.bookings SET status = 'quoted' WHERE status = 'pending_confirmation';
 UPDATE public.bookings SET status = 'reserved' WHERE status = 'confirmed';
 
+-- 訂單狀態第二次改版（2026-08）：9 步驟主流程＋3 步驟例外分支，取代原本 10 種狀態。
+-- 新增 awaiting_confirmation（待確認）／checked_in（入住中）／deposit_processing（押金處理）／
+-- completed（已處理），細分「已收尾款」到「真正結案」之間的過程。
+-- 舊 quoted（已報價）→ 併入 inquiring（待報價，本來就涵蓋「還沒報價」跟「已報價、等客人決定」兩種情況）
+-- 舊 confirmed（已確認：已收尾款、等入住日到）→ 改名 awaiting_checkin（語意完全相同，只是原本的
+-- 「已確認」在新流程裡不再適合當終點，改成入住前的等待狀態，入住當天/退房當天由排程自動推進到
+-- checked_in／deposit_processing）。
+UPDATE public.bookings SET status = 'inquiring' WHERE status = 'quoted';
+UPDATE public.bookings SET status = 'awaiting_checkin' WHERE status = 'confirmed';
+
+-- external_synced：第三方平台（Airbnb／Booking.com／Agoda／Trip）iCal 同步匯入用的系統專用狀態，
+-- 見 bookingStatus.ts 的 SYSTEM_ONLY_STATUSES 說明。
 ALTER TABLE public.bookings ADD CONSTRAINT bookings_status_check CHECK (status IN (
-  'inquiring', 'quoted', 'awaiting_deposit', 'reserved', 'awaiting_balance',
-  'confirmed', 'awaiting_refund', 'refunded', 'cancelled', 'pending_manual_conflict'
+  'inquiring', 'awaiting_deposit', 'awaiting_confirmation', 'reserved', 'awaiting_balance',
+  'awaiting_checkin', 'checked_in', 'deposit_processing', 'completed',
+  'cancelled', 'awaiting_refund', 'refunded', 'pending_manual_conflict', 'external_synced'
 ));
 DROP INDEX IF EXISTS idx_bookings_confirmed_dates; -- 舊索引，條件只認舊的 'confirmed' 狀態，被下面新的取代
+DROP INDEX IF EXISTS idx_bookings_occupying_dates; -- 舊索引條件只認第一版的狀態集合，CREATE IF NOT EXISTS 不會更新既有索引的 WHERE 條件，要砍掉重建
 
 CREATE INDEX IF NOT EXISTS idx_bookings_user ON public.bookings(line_user_id, created_at DESC);
 -- 「佔用中」的狀態（房間已鎖定、還沒到取消/退款的訂單），供檔期衝突檢查跟房況行事曆使用
 CREATE INDEX IF NOT EXISTS idx_bookings_occupying_dates ON public.bookings(checkin_date, checkout_date)
-  WHERE status IN ('awaiting_deposit', 'reserved', 'awaiting_balance', 'confirmed', 'pending_manual_conflict');
+  WHERE status IN (
+    'awaiting_deposit', 'awaiting_confirmation', 'reserved', 'awaiting_balance',
+    'awaiting_checkin', 'checked_in', 'deposit_processing', 'completed',
+    'pending_manual_conflict', 'external_synced'
+  );
 CREATE INDEX IF NOT EXISTS idx_bookings_order_number ON public.bookings(order_number);
+-- 排程管理新增的三個自動狀態轉換都是「狀態=X 且日期到了」的查詢，各自建一個部分索引。
+CREATE INDEX IF NOT EXISTS idx_bookings_reserved_checkin ON public.bookings(checkin_date) WHERE status = 'reserved';
+CREATE INDEX IF NOT EXISTS idx_bookings_awaiting_checkin_date ON public.bookings(checkin_date) WHERE status = 'awaiting_checkin';
+CREATE INDEX IF NOT EXISTS idx_bookings_checked_in_checkout ON public.bookings(checkout_date) WHERE status = 'checked_in';
+-- 排程管理的通知排程（尾款提醒／待預定匯款通知／押金處理通知／洗滌排程）各自的查詢條件。
+CREATE INDEX IF NOT EXISTS idx_bookings_awaiting_balance_checkin ON public.bookings(checkin_date) WHERE status = 'awaiting_balance';
+CREATE INDEX IF NOT EXISTS idx_bookings_awaiting_deposit_created ON public.bookings(created_at) WHERE status = 'awaiting_deposit';
+CREATE INDEX IF NOT EXISTS idx_bookings_deposit_processing_checkout ON public.bookings(checkout_date) WHERE status = 'deposit_processing';
 
 -- 8.7 個別房型每晚實際使用紀錄（顧客確認訂房當下才寫入），供「不同顧客訂到同一天/同房型」衝突檢查用。
 CREATE TABLE IF NOT EXISTS public.booking_room_nights (
@@ -840,9 +946,30 @@ CREATE TABLE IF NOT EXISTS public.scheduled_tasks (
 );
 CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_due ON public.scheduled_tasks(next_run_at) WHERE is_active = true;
 
+-- recurrence 的合法值後來多了 'hourly'（每小時）跟 'every_n_minutes'（每 N 分鐘，google 行事曆同步用），
+-- 但建表當下的 CHECK 只認得最早的四種——用跟 bookings.status 同一套「動態找舊 CHECK 名稱再砍掉重建」
+-- 手法補上，這樣不管資料庫是哪個版本開始建的，重跑這份 schema 都能補齊到最新的合法值清單。
+DO $$
+DECLARE
+  con_name text;
+BEGIN
+  SELECT conname INTO con_name
+  FROM pg_constraint
+  WHERE conrelid = 'public.scheduled_tasks'::regclass AND contype = 'c' AND pg_get_constraintdef(oid) LIKE '%recurrence%';
+  IF con_name IS NOT NULL THEN
+    EXECUTE format('ALTER TABLE public.scheduled_tasks DROP CONSTRAINT %I', con_name);
+  END IF;
+END $$;
+ALTER TABLE public.scheduled_tasks ADD CONSTRAINT scheduled_tasks_recurrence_check
+  CHECK (recurrence IN ('once', 'every_n_minutes', 'hourly', 'daily', 'weekly', 'monthly'));
+
+ALTER TABLE public.scheduled_tasks ADD COLUMN IF NOT EXISTS interval_minutes INTEGER; -- recurrence='every_n_minutes' 專用
+
 -- 9. 啟用 RLS（僅限已登入使用者存取，用 DROP + CREATE 讓整份腳本可重複執行）
 ALTER TABLE public.settings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.line_channels ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.notification_recipient_groups ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.ota_channels ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.user_states ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.processed_events ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.knowledge_base_items ENABLE ROW LEVEL SECURITY;
@@ -883,6 +1010,12 @@ CREATE POLICY "Allow Auth Access States" ON public.user_states FOR ALL USING (au
 -- 不讓 anon key 讀得到憑證。
 DROP POLICY IF EXISTS "Allow Auth Access Line Channels" ON public.line_channels;
 CREATE POLICY "Allow Auth Access Line Channels" ON public.line_channels FOR ALL USING (auth.role() = 'authenticated');
+DROP POLICY IF EXISTS "Allow Auth Access Notification Groups" ON public.notification_recipient_groups;
+CREATE POLICY "Allow Auth Access Notification Groups" ON public.notification_recipient_groups FOR ALL USING (auth.role() = 'authenticated');
+-- export_token 等同密碼（外部平台訂閱時無法帶 Authorization 標頭，只能靠網址裡的 token 驗證），
+-- 一般前台不能讀到，只有已登入的管理員能在後台看到／管理。
+DROP POLICY IF EXISTS "Allow Auth Access OTA Channels" ON public.ota_channels;
+CREATE POLICY "Allow Auth Access OTA Channels" ON public.ota_channels FOR ALL USING (auth.role() = 'authenticated');
 -- processed_events 只有 line-webhook.ts 用 service role key 寫入/查詢（會略過 RLS），
 -- 前端從不存取這張表，這裡開 RLS 只是不讓 anon key 直接讀寫，不影響 webhook 運作。
 DROP POLICY IF EXISTS "Allow Auth Access Processed Events" ON public.processed_events;

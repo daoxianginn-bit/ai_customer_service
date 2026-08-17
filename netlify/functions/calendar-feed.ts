@@ -3,17 +3,18 @@ import { createClient } from '@supabase/supabase-js';
 import { OCCUPYING_STATUSES } from '../../src/lib/bookingStatus';
 
 // ========================================================================
-// 訂房行事曆訂閱來源（iCalendar / .ics）
-// 取代原本掛在 Google「報價」試算表上的兩支 Apps Script（calendar_sync.gs / timetree_sync.gs）——
-// 那兩支是讀試算表產生日曆事件，試算表鏡射功能移除後就沒有資料來源了。這支直接讀 Supabase
-// `bookings`，資料來源跟訂單管理／房況行事曆完全一致，不會有「試算表沒同步到」的落差。
+// OTA 平台訂閱（?channel=ota_channels.export_token）：給 Airbnb／Booking.com／Agoda／Trip
+// 貼進它們自己的「行事曆同步」設定，讓那些平台知道這裡的房源已經被訂走、避免被重複訂出去。
+// 這個方向刻意不帶顧客姓名等個資（平台不需要知道是誰訂的，只需要知道日期被佔用），
+// 而且會排除「來源就是這個平台自己」的訂單——不然平台匯出自己剛匯入的訂單、我們又原樣
+// 匯出回去，等於自己讀自己，沒有意義。
 //
-// Google 日曆／TimeTree／Apple 行事曆都可以「訂閱網址」指向這個網址，不需要 Apps Script、
-// 不需要 Google 服務帳號、也不需要試算表。
+// 給民宿自己看房況的「個人訂閱」已經改用 Google 行事曆同步（主動 push，見
+// scheduled-tasks-run.ts 的 sync_calendars 排程），不再需要這支 function 額外撐一份
+// ?token= 的訂閱網址功能，settings.calendar_feed_token 欄位保留但不再讀寫。
 //
-// 權限：行事曆軟體訂閱時沒辦法帶 Authorization 標頭，只能靠網址本身。內容含顧客姓名，
-// 不能公開，所以要求網址帶 ?token=，比對 settings.calendar_feed_token。沒設定 token 就整個關閉，
-// 避免有人升級後忘了設定、結果變成匿名可讀。
+// 權限：訂閱網址沒辦法帶 Authorization 標頭，只能靠網址本身，所以是網址帶 token 比對，
+// 找不到頻道／頻道被停用就直接拒絕。
 // ========================================================================
 
 const supabase = createClient(process.env.SUPABASE_URL || '', process.env.SUPABASE_SERVICE_ROLE_KEY || '');
@@ -65,86 +66,24 @@ function toIcsDateTimeUtc(d: Date): string {
   return `${d.toISOString().slice(0, 19).replace(/[-:]/g, '')}Z`;
 }
 
-function formatAdultsKids(adults: number | null, kids: number | null, infants: number | null): string {
-  const a = adults ?? 0;
-  const k = kids ?? 0;
-  const i = infants ?? 0;
-  return `${a}大${k}小${i > 0 ? `${i}幼` : ''}`;
-}
-
 function isoDaysAgo(days: number): string {
   return new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
 }
 
-export const handler: Handler = async (event) => {
-  if (event.httpMethod !== 'GET') return { statusCode: 405, body: 'Method Not Allowed' };
-
-  const { data: settings, error: settingsError } = await supabase
-    .from('settings')
-    .select('calendar_feed_token')
-    .single();
-  if (settingsError || !settings) return { statusCode: 500, body: 'Failed to fetch settings' };
-
-  const expected = String(settings.calendar_feed_token || '');
-  const provided = String(event.queryStringParameters?.token || '');
-  // 還沒設定 token＝功能未啟用，一律拒絕（不是「沒設定就放行」）。
-  if (!expected || provided !== expected) {
-    return { statusCode: 401, body: 'Unauthorized' };
-  }
-
-  const { data: bookings, error: bookingsError } = await supabase
-    .from('bookings')
-    .select('id, order_number, name, checkin_date, checkout_date, headcount, adults, kids, infants, whole_house, room_type_label, status, notes')
-    .in('status', FEED_STATUSES)
-    .gte('checkout_date', isoDaysAgo(PAST_WINDOW_DAYS))
-    .not('checkin_date', 'is', null)
-    .not('checkout_date', 'is', null)
-    .order('checkin_date');
-  if (bookingsError) return { statusCode: 500, body: 'Failed to fetch bookings' };
-
-  const stamp = toIcsDateTimeUtc(new Date());
-  const lines: string[] = [
+function buildIcsResponse(calName: string, lines: string[]) {
+  const header = [
     'BEGIN:VCALENDAR',
     'VERSION:2.0',
     'PRODID:-//daoxiang//booking-calendar//zh-TW',
     'CALSCALE:GREGORIAN',
     'METHOD:PUBLISH',
-    'X-WR-CALNAME:訂房行事曆',
+    `X-WR-CALNAME:${calName}`,
     'X-WR-TIMEZONE:Asia/Taipei',
     // 給日曆軟體的更新頻率建議（實際多久抓一次仍由對方決定，不保證遵守）
     'REFRESH-INTERVAL;VALUE=DURATION:PT1H',
     'X-PUBLISHED-TTL:PT1H',
   ];
-
-  for (const b of bookings || []) {
-    // 全天事件的 DTEND 是「不包含」的，直接用退房日就等於住到退房前一晚，跟原本 Apps Script 一致。
-    const summaryParts = [`${b.name || '未填姓名'} ${b.headcount ?? ''}人`.trim()];
-    if (b.whole_house) summaryParts.push('·包棟');
-    // 「已確認」＝已收尾款（見 bookingStatus.ts），其餘鎖房中的狀態都還沒收齊尾款。
-    if (b.status !== 'confirmed') summaryParts.push(' ⚠️尾款未收');
-    const summary = summaryParts.join('');
-
-    const descParts = [
-      `訂單編號: ${b.order_number || ''}`,
-      `大人小孩: ${formatAdultsKids(b.adults, b.kids, b.infants)}`,
-    ];
-    if (b.room_type_label) descParts.push(`房型: ${b.room_type_label}`);
-    if (b.notes) descParts.push(`備註: ${b.notes}`);
-
-    lines.push('BEGIN:VEVENT');
-    // UID 用資料庫 id：order_number 可能還沒產生或被改，id 才是真正穩定的識別碼，
-    // 不穩定的 UID 會讓日曆每次更新都重建事件（而不是就地更新）。
-    lines.push(`UID:${b.id}@daoxiang-booking`);
-    lines.push(`DTSTAMP:${stamp}`);
-    lines.push(`DTSTART;VALUE=DATE:${toIcsDate(b.checkin_date)}`);
-    lines.push(`DTEND;VALUE=DATE:${toIcsDate(b.checkout_date)}`);
-    lines.push(`SUMMARY:${escapeIcsText(summary)}`);
-    lines.push(`DESCRIPTION:${escapeIcsText(descParts.join('\n'))}`);
-    lines.push('END:VEVENT');
-  }
-
-  lines.push('END:VCALENDAR');
-
+  const body = [...header, ...lines, 'END:VCALENDAR'];
   return {
     statusCode: 200,
     headers: {
@@ -152,6 +91,70 @@ export const handler: Handler = async (event) => {
       'Content-Disposition': 'inline; filename="booking.ics"',
       'Cache-Control': 'public, max-age=600',
     },
-    body: lines.map(foldIcsLine).join('\r\n'),
+    body: body.map(foldIcsLine).join('\r\n'),
   };
+}
+
+export const handler: Handler = async (event) => {
+  if (event.httpMethod !== 'GET') return { statusCode: 405, body: 'Method Not Allowed' };
+
+  const channelToken = event.queryStringParameters?.channel;
+  if (!channelToken) return { statusCode: 400, body: 'Missing channel token' };
+  return handleOtaChannelFeed(channelToken);
 };
+
+async function handleOtaChannelFeed(token: string) {
+  const { data: channel, error: channelError } = await supabase
+    .from('ota_channels')
+    .select('*')
+    .eq('export_token', token)
+    .eq('is_active', true)
+    .maybeSingle();
+  if (channelError) return { statusCode: 500, body: 'Failed to fetch channel' };
+  if (!channel) return { statusCode: 401, body: 'Unauthorized' };
+
+  let query = supabase
+    .from('bookings')
+    .select('id, order_number, checkin_date, checkout_date, whole_house, status, booking_source')
+    .in('status', FEED_STATUSES)
+    // 排除來源就是這個平台自己的訂單——不然平台匯出自己剛匯入的訂單，我們又原樣匯出回去，
+    // 形成無意義的自我循環（也可能被平台誤判成同一晚被自己重複佔用）。
+    .neq('booking_source', channel.platform)
+    .gte('checkout_date', isoDaysAgo(PAST_WINDOW_DAYS))
+    .not('checkin_date', 'is', null)
+    .not('checkout_date', 'is', null)
+    .order('checkin_date');
+
+  const { data: bookings, error: bookingsError } = await query;
+  if (bookingsError) return { statusCode: 500, body: 'Failed to fetch bookings' };
+
+  // 這個頻道綁定特定房型時，只輸出「會佔用到那間房」的訂單：包棟一定佔用（佔用所有房間），
+  // 個別租房則要查 booking_rooms 這張正式的房間關聯表才知道實際開了哪幾間。
+  let relevantIds: Set<string> | null = null;
+  if (channel.room_type_id) {
+    const { data: roomLinks } = await supabase
+      .from('booking_rooms')
+      .select('booking_id')
+      .eq('room_type_id', channel.room_type_id);
+    relevantIds = new Set((roomLinks || []).map((r: any) => r.booking_id));
+  }
+
+  const stamp = toIcsDateTimeUtc(new Date());
+  const lines: string[] = [];
+
+  for (const b of bookings || []) {
+    if (relevantIds && !b.whole_house && !relevantIds.has(b.id)) continue;
+
+    lines.push('BEGIN:VEVENT');
+    lines.push(`UID:${b.id}@daoxiang-booking`);
+    lines.push(`DTSTAMP:${stamp}`);
+    lines.push(`DTSTART;VALUE=DATE:${toIcsDate(b.checkin_date)}`);
+    lines.push(`DTEND;VALUE=DATE:${toIcsDate(b.checkout_date)}`);
+    // 刻意不帶顧客姓名／訂單編號等個資給第三方平台——對方只需要知道日期被佔用，
+    // 不需要知道是誰訂的；完整細節現在只會出現在 Google 行事曆同步（sync_calendars 排程）。
+    lines.push(`SUMMARY:${escapeIcsText('已預訂 Reserved')}`);
+    lines.push('END:VEVENT');
+  }
+
+  return buildIcsResponse(`房況同步 - ${channel.name}`, lines);
+}

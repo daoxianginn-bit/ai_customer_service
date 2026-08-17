@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react';
-import { Save, Bot, MessageCircle, UserCheck, Copy, Clock, SlidersHorizontal, CalendarDays } from 'lucide-react';
+import { Save, Bot, MessageCircle, UserCheck, Clock, SlidersHorizontal, CalendarDays, CheckCircle2, XCircle } from 'lucide-react';
 import { useSettings } from '../lib/useSettings';
 import { PageHeader, Button } from '../components/ui';
 import LineChannelsPanel from '../components/LineChannelsPanel';
+import NotificationGroupsPanel from '../components/NotificationGroupsPanel';
+import OtaChannelsPanel from '../components/OtaChannelsPanel';
 
 // 原本是 AI 引擎設定／LINE 串接設定／轉接規則三個獨立頁面，內容都只是對同一張
 // settings 表的單一表單（同一個 useSettings() hook），合成一頁三個分頁籤（比照
@@ -22,24 +24,6 @@ export default function SystemSettings() {
 
   // Webhook 網址現在是「每個官方帳號各一組」，由 LineChannelsPanel 各自產生並提供複製，
   // 不再有全站共用的那一個。
-
-  // 訂閱網址帶著 token 當通行碼（行事曆軟體沒辦法帶 Authorization 標頭），所以這串等同密碼。
-  const calendarFeedUrl = settings?.calendar_feed_token
-    ? `${window.location.origin}/.netlify/functions/calendar-feed?token=${encodeURIComponent(settings.calendar_feed_token)}`
-    : '';
-
-  const handleGenerateCalendarToken = () => {
-    if (settings?.calendar_feed_token && !confirm('重新產生後，原本已經訂閱舊網址的行事曆會失效，需要重新訂閱一次。確定要繼續嗎？')) return;
-    const bytes = new Uint8Array(24);
-    crypto.getRandomValues(bytes);
-    const token = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
-    setSettings({ ...settings, calendar_feed_token: token });
-  };
-
-  const handleCopyCalendarUrl = () => {
-    navigator.clipboard.writeText(calendarFeedUrl);
-    alert('訂閱網址已複製');
-  };
 
   if (loading) return <div>載入中...</div>;
   if (!settings) return <div>找不到設定檔</div>;
@@ -154,26 +138,56 @@ export default function SystemSettings() {
               由下面這個面板管理；settings 的舊欄位保留但已不再被程式讀取。 */}
           <LineChannelsPanel />
 
+          <div className="border-t pt-6">
+            <NotificationGroupsPanel />
+          </div>
+
           <div className="border-t pt-6 space-y-4">
-            <h4 className="text-sm font-bold text-gray-600 flex items-center gap-2"><CalendarDays className="w-4 h-4" />訂房行事曆訂閱</h4>
+            <h4 className="text-sm font-bold text-gray-600 flex items-center gap-2"><CalendarDays className="w-4 h-4" />Google 行事曆同步</h4>
             <p className="text-sm text-gray-500">
-              把這個網址加進 Google 日曆／TimeTree／Apple 行事曆的「訂閱網址」，訂單就會直接顯示在手機日曆上。
-              資料直接讀資料庫，跟「訂單管理」「房況行事曆」完全一致。只會列出已鎖房的訂單（待預定～已確認），待報價和已取消的不會出現。
+              「排程管理」的「行事曆整合同步」排程會把目前所有已鎖房的訂單（不分直接訂房或第三方平台匯入）
+              直接寫入下面指定的 Google 行事曆，取代舊版「產生一個訂閱網址、自己貼到 Google/TimeTree/Apple」的做法——
+              設定好之後不用手動訂閱，排程跑過就能在 Google 日曆上看到最新狀況。
             </p>
             <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
-              ⚠️ 這個網址包含顧客姓名，且任何人拿到都能直接開啟，等同密碼，請勿外流或貼到公開群組。
+              一次性設定步驟：(1) 到 Google Cloud Console 建立一個服務帳號、下載金鑰（JSON），貼到下方「服務帳號金鑰」欄位。
+              (2) 打開目標 Google 行事曆的設定，把它「分享」給金鑰裡 <code className="font-mono">client_email</code> 那組信箱，權限選「可以變更活動」。
+              (3) 到「排程管理」新增一筆「行事曆整合同步」排程。金鑰內容等同密碼，請勿外流。
             </p>
-            {calendarFeedUrl ? (
-              <div className="flex gap-2 font-mono text-sm">
-                <input type="text" readOnly value={calendarFeedUrl} className="flex-1 px-4 py-2 border rounded-lg bg-gray-50" />
-                <button onClick={handleCopyCalendarUrl} className="p-2 border rounded-lg hover:bg-gray-100" title="複製訂閱網址"><Copy className="w-5 h-5" /></button>
-              </div>
-            ) : (
-              <p className="text-sm text-gray-400">尚未啟用。點下方按鈕產生一組通行碼後記得按「儲存設定」。</p>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Google 行事曆 ID</label>
+              <input
+                type="text" name="google_calendar_id" value={settings.google_calendar_id || ''} onChange={handleChange}
+                placeholder="例如 abcd1234@group.calendar.google.com，或個人行事曆用你的 Google 帳號 email"
+                className="w-full px-4 py-2 border rounded-lg font-mono text-sm"
+              />
+              <p className="text-xs text-gray-400 mt-1">在 Google 日曆該行事曆的「設定與共用」頁面可以找到「行事曆 ID」。</p>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">服務帳號金鑰 (JSON)</label>
+              <textarea
+                name="google_service_account_json" value={settings.google_service_account_json || ''} onChange={handleChange}
+                rows={6} placeholder='{"type": "service_account", "client_email": "...", "private_key": "...", ...}'
+                className="w-full px-4 py-2 border rounded-lg font-mono text-xs"
+              />
+            </div>
+            {settings.google_calendar_last_synced_at && (
+              <p className="flex items-start gap-1.5 text-xs">
+                {settings.google_calendar_last_sync_status === 'success' ? (
+                  <CheckCircle2 className="w-3.5 h-3.5 text-green-600 shrink-0 mt-0.5" />
+                ) : (
+                  <XCircle className="w-3.5 h-3.5 text-red-500 shrink-0 mt-0.5" />
+                )}
+                <span>
+                  <span className="text-gray-400">上次同步 {new Date(settings.google_calendar_last_synced_at).toLocaleString('zh-TW')}：</span>
+                  <span className="text-gray-600">{settings.google_calendar_last_sync_summary}</span>
+                </span>
+              </p>
             )}
-            <Button variant="secondary" onClick={handleGenerateCalendarToken}>
-              {settings.calendar_feed_token ? '重新產生通行碼' : '產生通行碼並啟用'}
-            </Button>
+          </div>
+
+          <div className="border-t pt-6">
+            <OtaChannelsPanel />
           </div>
         </div>
         )}
