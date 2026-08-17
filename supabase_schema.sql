@@ -459,6 +459,24 @@ CREATE TABLE IF NOT EXISTS public.notification_recipient_groups (
 );
 CREATE INDEX IF NOT EXISTS idx_notification_groups_channel ON public.notification_recipient_groups(channel_id);
 
+-- LINE 群組（機器人被邀進去的群組聊天，例如內部用來接收推播通知的群組），
+-- 跟上面的 notification_recipient_groups（本系統自訂的收件人名單）是完全不同的兩件事——
+-- 這裡存的是「LINE 平台本身的群組」，group_id 是 LINE 那邊的群組識別碼。
+-- 沒辦法主動查「機器人在哪些群組裡」，只能被動從 webhook 事件（join／群組內的訊息）
+-- 收到 groupId 才記錄下來，見 line-webhook.ts 的 handleGroupEvent()。
+CREATE TABLE IF NOT EXISTS public.line_groups (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    channel_id UUID NOT NULL REFERENCES public.line_channels(id) ON DELETE CASCADE,
+    group_id TEXT NOT NULL,
+    name TEXT, -- 呼叫 LINE 的 getGroupSummary() 取得，拿不到（權限不足／群組已解散）就留空，後台顯示群組 ID 代替
+    is_active BOOLEAN NOT NULL DEFAULT true, -- 機器人被踢出/離開群組時設 false，保留歷史紀錄不刪列
+    last_message_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now(),
+    UNIQUE (channel_id, group_id)
+);
+CREATE INDEX IF NOT EXISTS idx_line_groups_channel_active ON public.line_groups(channel_id) WHERE is_active;
+
 -- 客製訊息發送：後台自訂的可重複使用訊息範本
 CREATE TABLE IF NOT EXISTS public.custom_message_templates (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -969,6 +987,7 @@ ALTER TABLE public.scheduled_tasks ADD COLUMN IF NOT EXISTS interval_minutes INT
 ALTER TABLE public.settings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.line_channels ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.notification_recipient_groups ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.line_groups ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.ota_channels ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.user_states ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.processed_events ENABLE ROW LEVEL SECURITY;
@@ -1012,6 +1031,8 @@ DROP POLICY IF EXISTS "Allow Auth Access Line Channels" ON public.line_channels;
 CREATE POLICY "Allow Auth Access Line Channels" ON public.line_channels FOR ALL USING (auth.role() = 'authenticated');
 DROP POLICY IF EXISTS "Allow Auth Access Notification Groups" ON public.notification_recipient_groups;
 CREATE POLICY "Allow Auth Access Notification Groups" ON public.notification_recipient_groups FOR ALL USING (auth.role() = 'authenticated');
+DROP POLICY IF EXISTS "Allow Auth Access Line Groups" ON public.line_groups;
+CREATE POLICY "Allow Auth Access Line Groups" ON public.line_groups FOR ALL USING (auth.role() = 'authenticated');
 -- export_token 等同密碼（外部平台訂閱時無法帶 Authorization 標頭，只能靠網址裡的 token 驗證），
 -- 一般前台不能讀到，只有已登入的管理員能在後台看到／管理。
 DROP POLICY IF EXISTS "Allow Auth Access OTA Channels" ON public.ota_channels;

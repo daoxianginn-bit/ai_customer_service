@@ -25,8 +25,9 @@ interface NotificationGroup {
 }
 
 interface Contact {
-  line_user_id: string;
+  line_user_id: string; // LINE 群組時，這欄位存的是 group_id——push message 的 to 欄位不分兩者，通知名單可以混合勾選個人跟群組
   nickname: string | null;
+  is_group?: boolean;
 }
 
 interface FormValue {
@@ -72,15 +73,19 @@ export default function NotificationGroupsPanel() {
       .then(({ data }) => setChannels((data || []) as LineChannel[]));
   }, [fetchGroups]);
 
+  // 個人聯絡人（user_states）跟 LINE 群組（line_groups，機器人被邀進去的群組，例如內部推播用的群組）
+  // 併成同一份可勾選清單——通知名單本來就是「這則自動通知要發給誰」，群組聊天室跟個人一樣都是有效的收件對象。
   const fetchContacts = useCallback(async (channelId: string) => {
     if (!channelId) { setContacts([]); return; }
     setContactsLoading(true);
-    const { data } = await supabase
-      .from('user_states')
-      .select('line_user_id, nickname')
-      .eq('channel_id', channelId)
-      .order('last_message_at', { ascending: false, nullsFirst: false });
-    setContacts((data || []) as Contact[]);
+    const [{ data: people }, { data: groups }] = await Promise.all([
+      supabase.from('user_states').select('line_user_id, nickname').eq('channel_id', channelId).order('last_message_at', { ascending: false, nullsFirst: false }),
+      supabase.from('line_groups').select('group_id, name').eq('channel_id', channelId).eq('is_active', true).order('last_message_at', { ascending: false, nullsFirst: false }),
+    ]);
+    setContacts([
+      ...((people || []) as { line_user_id: string; nickname: string | null }[]).map((c) => ({ ...c, is_group: false })),
+      ...((groups || []) as { group_id: string; name: string | null }[]).map((g) => ({ line_user_id: g.group_id, nickname: g.name || '（未取得群組名稱）', is_group: true })),
+    ]);
     setContactsLoading(false);
   }, []);
 
@@ -182,7 +187,7 @@ export default function NotificationGroupsPanel() {
         <Box sx={{ flexGrow: 1 }}>
           <Typography variant="h6">通知名單</Typography>
           <Typography variant="body2" color="text.secondary">
-            排程管理的自動通知（尾款提醒、押金處理通知…）要發給誰，在這裡勾選聯絡人存成具名清單。
+            排程管理的自動通知（尾款提醒、押金處理通知、洗滌排程…）要發給誰，在這裡勾選聯絡人或群組存成具名清單。
           </Typography>
         </Box>
         <Button variant="contained" startIcon={<Plus size={16} />} onClick={openNew} disabled={!channels.length}>
@@ -259,7 +264,7 @@ export default function NotificationGroupsPanel() {
               <Typography variant="body2" color="text.secondary" sx={{ py: 2 }}>載入聯絡人中…</Typography>
             ) : visibleContacts.length === 0 ? (
               <Typography variant="body2" color="text.secondary" sx={{ py: 2 }}>
-                {contacts.length === 0 ? '這個官方帳號底下還沒有任何聯絡人' : '沒有符合搜尋條件的聯絡人'}
+                {contacts.length === 0 ? '這個官方帳號底下還沒有任何聯絡人或群組' : '沒有符合搜尋條件的聯絡人或群組'}
               </Typography>
             ) : (
               <List
@@ -272,9 +277,13 @@ export default function NotificationGroupsPanel() {
                     <ListItemButton key={c.line_user_id} onClick={() => toggleContact(c.line_user_id)} dense>
                       <Checkbox edge="start" checked={checked} tabIndex={-1} disableRipple size="small" />
                       <ListItemText
-                        primary={c.nickname || '（未取得暱稱）'}
+                        primary={
+                          <Stack direction="row" spacing={0.75} alignItems="center">
+                            <span>{c.nickname || '（未取得暱稱）'}</span>
+                            {c.is_group && <Chip label="群組" size="small" sx={{ height: 16, fontSize: 10 }} color="info" variant="outlined" />}
+                          </Stack>
+                        }
                         secondary={c.line_user_id}
-                        primaryTypographyProps={{ fontSize: 13 }}
                         secondaryTypographyProps={{ fontSize: 11, fontFamily: 'monospace' }}
                       />
                     </ListItemButton>

@@ -185,12 +185,55 @@ export const handler: Handler = async (event) => {
   return { statusCode: 200, body: 'OK' };
 };
 
+// LINE 群組（機器人被邀進去的群組聊天，例如內部推播通知用的群組）：這裡只負責記錄
+// 「這個頻道被邀進了哪些群組」，完全不進客服 AI/訂房流程——群組是多人聊天的地方，
+// 裡面任何人講話都不代表「這位客人要訂房」，混進去會被 AI 誤判成客人訊息去回覆
+// （這是修這個功能之前真實會發生的問題：group 訊息的 source.userId 常常是 undefined，
+// 舊版程式碼直接用 lineEvent.source.userId! 硬轉型，等於把 undefined 當成一個使用者處理）。
+async function handleGroupEvent(lineEvent: any, lineClient: Client, channel: LineChannel): Promise<void> {
+  const groupId: string | undefined = lineEvent.source?.groupId;
+  if (!groupId) return;
+
+  if (lineEvent.type === 'leave') {
+    await supabase.from('line_groups')
+      .update({ is_active: false, updated_at: new Date().toISOString() })
+      .eq('channel_id', channel.id).eq('group_id', groupId);
+    return;
+  }
+
+  // join（機器人被邀進群組）或 message（群組裡有人傳訊息）都當作「這個群組還在使用中」。
+  if (lineEvent.type !== 'join' && lineEvent.type !== 'message') return;
+
+  const { data: existing } = await supabase.from('line_groups')
+    .select('name').eq('channel_id', channel.id).eq('group_id', groupId).maybeSingle();
+
+  let name = existing?.name || null;
+  if (!name) {
+    // 拿不到摘要（權限不足／群組已解散）不影響記錄本身，名稱留空，後台顯示群組 ID 代替。
+    try { name = (await lineClient.getGroupSummary(groupId)).groupName; } catch {}
+  }
+
+  await supabase.from('line_groups').upsert({
+    channel_id: channel.id,
+    group_id: groupId,
+    name,
+    is_active: true,
+    last_message_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  }, { onConflict: 'channel_id,group_id' });
+}
+
 async function processLineEvent(
   lineEvent: WebhookEvent,
   settings: any,
   lineClient: Client,
   channel: LineChannel
 ): Promise<void> {
+  if ((lineEvent as any).source?.type === 'group') {
+    await handleGroupEvent(lineEvent, lineClient, channel);
+    return;
+  }
+
   if (!(lineEvent.type === 'message' && lineEvent.message.type === 'text')) return;
 
   const userId = lineEvent.source.userId!;

@@ -74,13 +74,22 @@ export const handler: Handler = async (event) => {
       // 發送帳號不是客戶用帳號時，收件人不能從訂單清單挑（那些 line_user_id 屬於客戶用帳號，
       // 在別的官方帳號底下完全是無效的 ID，push 一定失敗）。改成列出「這個帳號自己的聯絡人」，
       // 外加它底下已經存好的通知名單，讓管理員可以一鍵套用不用整批手動勾選。
+      //
+      // LINE 群組（機器人被邀進去的群組，例如內部推播通知用的群組）也併進同一份清單一起回傳，
+      // 用 is_group 標示——LINE 的 push message「to」欄位不分 userId／groupId，同一套發送邏輯
+      // 直接就能送給群組，不需要另外做一套發送流程，前端只要能分辨顯示、不用改送出的程式碼。
       const channelId: string = body.channelId || '';
       if (!channelId) return { statusCode: 400, body: JSON.stringify({ error: '缺少 channelId' }) };
-      const [{ data: contacts }, { data: groups }] = await Promise.all([
+      const [{ data: contacts }, { data: groups }, { data: lineGroups }] = await Promise.all([
         supabase.from('user_states').select('line_user_id, nickname').eq('channel_id', channelId).order('last_message_at', { ascending: false, nullsFirst: false }),
         supabase.from('notification_recipient_groups').select('id, name, line_user_ids').eq('channel_id', channelId).order('created_at', { ascending: false }),
+        supabase.from('line_groups').select('group_id, name').eq('channel_id', channelId).eq('is_active', true).order('last_message_at', { ascending: false, nullsFirst: false }),
       ]);
-      return { statusCode: 200, body: JSON.stringify({ contacts: contacts || [], groups: groups || [] }) };
+      const contactList = [
+        ...(contacts || []).map((c: any) => ({ line_user_id: c.line_user_id, nickname: c.nickname, is_group: false })),
+        ...(lineGroups || []).map((g: any) => ({ line_user_id: g.group_id, nickname: g.name || '（未取得群組名稱）', is_group: true })),
+      ];
+      return { statusCode: 200, body: JSON.stringify({ contacts: contactList, groups: groups || [] }) };
     }
 
     if (body.action === 'send') {

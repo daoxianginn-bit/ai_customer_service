@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from 'react';
 import { supabase } from '../lib/supabase';
-import { Search, Send, Plus, Trash2, Pencil, Gauge, RotateCcw, Save, Eye, Eraser, User, Radio } from 'lucide-react';
+import { Search, Send, Plus, Trash2, Pencil, Gauge, RotateCcw, Save, Eye, Eraser, User, Radio, Users } from 'lucide-react';
 import MessageTemplateEditor from '../components/MessageTemplateEditor';
 import { PageHeader, Button, Modal, ConfirmDialog, StatusBadge } from '../components/ui';
 import { BOOKING_STATUS_OPTIONS } from '../lib/bookingStatus';
@@ -13,8 +13,9 @@ interface ChannelOption {
 }
 
 interface Contact {
-  line_user_id: string;
+  line_user_id: string; // LINE 群組時，這欄位存的是 group_id——push message 的 to 欄位不分兩者，可以共用同一套發送邏輯
   nickname: string | null;
+  is_group?: boolean;
 }
 
 interface RecipientGroup {
@@ -598,7 +599,9 @@ export default function CustomMessageSending() {
                   visibleContacts.map((c) => (
                     <label key={c.line_user_id} className={`flex items-center gap-2 px-4 py-2 text-sm cursor-pointer hover:bg-gray-50 ${selectedContactIds.has(c.line_user_id) ? 'bg-green-50' : ''}`}>
                       <input type="checkbox" checked={selectedContactIds.has(c.line_user_id)} onChange={() => toggleContact(c.line_user_id)} />
+                      {c.is_group && <Users className="w-3.5 h-3.5 text-blue-400 shrink-0" />}
                       <span className="flex-1 min-w-0 truncate">{c.nickname || '（未取得暱稱）'}</span>
+                      {c.is_group && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-blue-50 text-blue-600 border border-blue-200 shrink-0">群組</span>}
                       <span className="text-xs text-gray-400 font-mono truncate max-w-[120px]">{c.line_user_id}</span>
                     </label>
                   ))
