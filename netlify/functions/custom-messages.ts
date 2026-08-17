@@ -40,20 +40,19 @@ export const handler: Handler = async (event) => {
   const { data: settings, error: settingsError } = await supabase.from('settings').select('*').single();
   if (settingsError || !settings) return { statusCode: 500, body: JSON.stringify({ error: '讀取系統設定失敗' }) };
 
-  // 客製訊息發送的對象是「客戶」，所以一律用客戶用官方帳號的憑證。
-  // 憑證改存 line_channels 之後 settings.line_channel_access_token 已不再維護，不能再拿來用。
-  const customerChannel = await fetchCustomerChannel();
-  if (!customerChannel?.channel_access_token) {
-    return { statusCode: 500, body: JSON.stringify({ error: '尚未設定「客戶用」LINE 官方帳號憑證，請至系統設定 → LINE 串接設定新增' }) };
-  }
-
   try {
     if (body.action === 'quota') {
-      const quota = await getLineQuota(customerChannel.channel_access_token);
+      // 額度是「每個官方帳號各自的」，跟著使用者在頁面上選的發送帳號查，不是永遠查客戶用帳號。
+      const channel = await fetchChannelById(body.channelId);
+      if (!channel?.channel_access_token) return { statusCode: 400, body: JSON.stringify({ error: '找不到這個官方帳號的憑證' }) };
+      const quota = await getLineQuota(channel.channel_access_token);
       return { statusCode: 200, body: JSON.stringify(quota) };
     }
 
     if (body.action === 'list') {
+      // 訂單資料一律來自客戶用帳號（訂房只會發生在那個帳號底下），跟「要用哪個帳號發送」無關——
+      // 這就是「跨官方帳號取得資訊」：即使等一下要用團隊內部帳號發送，這裡仍然看得到客戶的訂單資訊，
+      // 可以拿來當發送內容的參考／合併欄位來源。
       const { variables, rows } = await listOrders(settings, {
         keyword: body.keyword,
         startDate: body.startDate,
@@ -65,6 +64,25 @@ export const handler: Handler = async (event) => {
       return { statusCode: 200, body: JSON.stringify({ variables, rows }) };
     }
 
+    if (body.action === 'channels') {
+      // 給前端的官方帳號下拉選單，以及選定帳號後可以套用的通知名單（不用打開後台另一頁去查）。
+      const { data: channels } = await supabase.from('line_channels').select('id, name, role').eq('is_active', true).order('display_order');
+      return { statusCode: 200, body: JSON.stringify({ channels: channels || [] }) };
+    }
+
+    if (body.action === 'contacts') {
+      // 發送帳號不是客戶用帳號時，收件人不能從訂單清單挑（那些 line_user_id 屬於客戶用帳號，
+      // 在別的官方帳號底下完全是無效的 ID，push 一定失敗）。改成列出「這個帳號自己的聯絡人」，
+      // 外加它底下已經存好的通知名單，讓管理員可以一鍵套用不用整批手動勾選。
+      const channelId: string = body.channelId || '';
+      if (!channelId) return { statusCode: 400, body: JSON.stringify({ error: '缺少 channelId' }) };
+      const [{ data: contacts }, { data: groups }] = await Promise.all([
+        supabase.from('user_states').select('line_user_id, nickname').eq('channel_id', channelId).order('last_message_at', { ascending: false, nullsFirst: false }),
+        supabase.from('notification_recipient_groups').select('id, name, line_user_ids').eq('channel_id', channelId).order('created_at', { ascending: false }),
+      ]);
+      return { statusCode: 200, body: JSON.stringify({ contacts: contacts || [], groups: groups || [] }) };
+    }
+
     if (body.action === 'send') {
       const recipients: { lineUserId: string; fields: Record<string, string>; bookingId?: string }[] = Array.isArray(body.recipients) ? body.recipients : [];
       const template: string = body.template || '';
@@ -74,9 +92,16 @@ export const handler: Handler = async (event) => {
         return { statusCode: 400, body: JSON.stringify({ error: `一次最多發送 ${MAX_BATCH_SEND} 位，請分批發送（這次選了 ${recipients.length} 位）` }) };
       }
 
+      // 用哪個官方帳號發送由前端指定（預設客戶用，可切換成廠商用／團隊內部用），
+      // 收件人的 line_user_id 一定要屬於同一個帳號，混用會整批發送失敗。
+      const channel = await fetchChannelById(body.channelId);
+      if (!channel?.channel_access_token) {
+        return { statusCode: 500, body: JSON.stringify({ error: '找不到指定官方帳號的憑證，請至系統設定 → LINE 串接設定確認' }) };
+      }
+
       const lineClient = new Client({
-        channelAccessToken: customerChannel.channel_access_token,
-        channelSecret: customerChannel.channel_secret,
+        channelAccessToken: channel.channel_access_token,
+        channelSecret: channel.channel_secret,
       });
 
       // 發訊息跟改訂單狀態是兩件事，故意不放在同一個動作裡——要改狀態一律回訂單管理頁做。
@@ -156,16 +181,11 @@ async function roomLabelsByBooking(bookingIds: string[]): Promise<Record<string,
   return map;
 }
 
-// 客戶用官方帳號：客製訊息的收件人都是這個帳號底下的聯絡人，憑證也要用它的。
-async function fetchCustomerChannel(): Promise<LineChannel | null> {
-  const { data } = await supabase
-    .from('line_channels')
-    .select('*')
-    .eq('role', 'customer')
-    .eq('is_active', true)
-    .order('display_order')
-    .limit(1)
-    .maybeSingle();
+// 依 id 查一個官方帳號的憑證；不給 id 時退回客戶用帳號（頁面預設值，也是舊版行為的 fallback）。
+async function fetchChannelById(channelId?: string): Promise<LineChannel | null> {
+  let query = supabase.from('line_channels').select('*').eq('is_active', true);
+  query = channelId ? query.eq('id', channelId) : query.eq('role', 'customer');
+  const { data } = await query.order('display_order').limit(1).maybeSingle();
   return (data as LineChannel) || null;
 }
 

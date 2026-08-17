@@ -1,9 +1,27 @@
 import { useState, useEffect, useMemo } from 'react';
 import { supabase } from '../lib/supabase';
-import { Search, Send, Plus, Trash2, Pencil, Gauge, RotateCcw, Save, Eye, Eraser, User } from 'lucide-react';
+import { Search, Send, Plus, Trash2, Pencil, Gauge, RotateCcw, Save, Eye, Eraser, User, Radio } from 'lucide-react';
 import MessageTemplateEditor from '../components/MessageTemplateEditor';
 import { PageHeader, Button, Modal, ConfirmDialog, StatusBadge } from '../components/ui';
 import { BOOKING_STATUS_OPTIONS } from '../lib/bookingStatus';
+import { channelRoleLabel } from '../lib/lineChannels';
+
+interface ChannelOption {
+  id: string;
+  name: string;
+  role: string;
+}
+
+interface Contact {
+  line_user_id: string;
+  nickname: string | null;
+}
+
+interface RecipientGroup {
+  id: string;
+  name: string;
+  line_user_ids: string[];
+}
 
 interface Template {
   id: string;
@@ -58,6 +76,21 @@ export default function CustomMessageSending() {
   const [selectedTemplateId, setSelectedTemplateId] = useState('');
   const [draftBody, setDraftBody] = useState('');
 
+  // 發送帳號：決定用哪個官方帳號的憑證發送、收件人要從哪個池子挑。
+  // 客戶用帳號＝原本的行為（從訂單清單勾選）；其餘帳號＝從該帳號自己的聯絡人挑（見下方 contacts 區塊）。
+  // 「查詢客戶名單」那個面板永遠顯示、不受這個選擇影響——即使等一下要用團隊內部帳號發送，
+  // 這裡仍然看得到客戶的訂單資訊，可以拿來當發送內容的參考，這就是「跨官方帳號取得資訊」。
+  const [channels, setChannels] = useState<ChannelOption[]>([]);
+  const [channelId, setChannelId] = useState('');
+  const customerChannelId = channels.find((c) => c.role === 'customer')?.id || '';
+  const isCustomerChannel = !channelId || channelId === customerChannelId;
+
+  const [contacts, setContacts] = useState<Contact[]>([]);
+  const [contactGroups, setContactGroups] = useState<RecipientGroup[]>([]);
+  const [contactsLoading, setContactsLoading] = useState(false);
+  const [selectedContactIds, setSelectedContactIds] = useState<Set<string>>(new Set());
+  const [contactFilter, setContactFilter] = useState('');
+
   const [keyword, setKeyword] = useState('');
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
@@ -86,11 +119,63 @@ export default function CustomMessageSending() {
 
   useEffect(() => {
     fetchTemplates();
-    fetchQuota();
     fetchRoomTypeOptions();
     fetchVariables();
+    fetchChannels();
     runQuery();
   }, []);
+
+  // 頻道清單載入完成、或使用者切換發送帳號時：查那個帳號的額度；不是客戶用帳號的話還要
+  // 順便查它自己的聯絡人清單／通知名單（客戶用帳號沿用左側訂單清單的勾選，不需要這份）。
+  useEffect(() => {
+    if (!channelId) return;
+    fetchQuota(channelId);
+    if (channelId !== customerChannelId) fetchContacts(channelId);
+    else { setContacts([]); setContactGroups([]); setSelectedContactIds(new Set()); }
+  }, [channelId, customerChannelId]);
+
+  const fetchChannels = async () => {
+    try {
+      const result = await callCustomMessagesFunction('channels');
+      const list: ChannelOption[] = result.channels || [];
+      setChannels(list);
+      setChannelId((prev) => prev || list.find((c) => c.role === 'customer')?.id || list[0]?.id || '');
+    } catch (e: any) {
+      console.error('查詢官方帳號失敗', e.message);
+    }
+  };
+
+  const fetchContacts = async (id: string) => {
+    setContactsLoading(true);
+    setSelectedContactIds(new Set());
+    try {
+      const result = await callCustomMessagesFunction('contacts', { channelId: id });
+      setContacts(result.contacts || []);
+      setContactGroups(result.groups || []);
+    } catch (e: any) {
+      console.error('查詢聯絡人失敗', e.message);
+    } finally {
+      setContactsLoading(false);
+    }
+  };
+
+  const toggleContact = (id: string) => {
+    setSelectedContactIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  const applyRecipientGroup = (group: RecipientGroup) => {
+    setSelectedContactIds(new Set(group.line_user_ids));
+  };
+
+  const visibleContacts = contacts.filter((c) => {
+    if (!contactFilter.trim()) return true;
+    const kw = contactFilter.trim().toLowerCase();
+    return (c.nickname || '').toLowerCase().includes(kw) || c.line_user_id.toLowerCase().includes(kw);
+  });
 
   // 可用變數清單獨立於訂單查詢自己抓一次。
   // 原本只在 runQuery() 成功時才會被填入（來自 custom-messages function 的回傳），
@@ -112,9 +197,9 @@ export default function CustomMessageSending() {
     setRoomTypeOptions((data || []).map((r: any) => ({ id: r.id, name: r.name })));
   };
 
-  const fetchQuota = async () => {
+  const fetchQuota = async (id: string) => {
     try {
-      const result = await callCustomMessagesFunction('quota');
+      const result = await callCustomMessagesFunction('quota', { channelId: id });
       setQuota(result);
     } catch (e: any) {
       console.error('查詢額度失敗', e.message);
@@ -185,9 +270,16 @@ export default function CustomMessageSending() {
     });
   };
 
-  const selectedRows = rows.filter((r, i) => selectedKeys.has(rowKey(r, i)));
+  const selectedOrderRows = rows.filter((r, i) => selectedKeys.has(rowKey(r, i)));
   const selectedTemplate = templates.find((t) => t.id === selectedTemplateId) || null;
-  const previewCustomer = selectedRows[0] || null;
+  // 參考訂單：兩種發送模式都可能用到——客戶用帳號時就是「這次要發的那位客人」；
+  // 其他帳號時是選填的「這則通知是關於哪張訂單」，借用它的合併欄位（例如通知內部某張訂單待確認），
+  // 沒選訂單就照原樣發送、不做欄位替換。
+  const referenceOrder = selectedOrderRows[0] || null;
+  const previewCustomer = referenceOrder;
+
+  // 實際收件人數量：客戶用帳號＝訂單清單勾選人數；其他帳號＝聯絡人清單勾選人數。
+  const recipientCount = isCustomerChannel ? selectedOrderRows.length : selectedContactIds.size;
 
   const mergeTemplateLocal = (template: string, fields: Record<string, string>): string => {
     let result = template;
@@ -258,12 +350,12 @@ export default function CustomMessageSending() {
   };
 
   const handleSendClick = () => {
-    if (!selectedRows.length) {
-      alert('請先勾選要發送的名單');
+    if (!recipientCount) {
+      alert(isCustomerChannel ? '請先勾選要發送的名單' : '請先勾選要發送的聯絡人');
       return;
     }
-    if (selectedRows.length > MAX_BATCH_SEND) {
-      alert(`一次最多發送 ${MAX_BATCH_SEND} 位，請分批發送（目前勾選 ${selectedRows.length} 位）`);
+    if (recipientCount > MAX_BATCH_SEND) {
+      alert(`一次最多發送 ${MAX_BATCH_SEND} 位，請分批發送（目前勾選 ${recipientCount} 位）`);
       return;
     }
     if (!draftBody.trim()) {
@@ -277,22 +369,30 @@ export default function CustomMessageSending() {
   const confirmSend = async () => {
     setSending(true);
     try {
-      const recipients = selectedRows
-        .filter((r) => r.line_user_id)
-        .map((r) => ({ lineUserId: r.line_user_id, fields: r.fields, bookingId: r.id }));
-      const result = await callCustomMessagesFunction('send', { recipients, template: draftBody });
+      // 客戶用帳號：每位客人各自的訂單欄位（原本的行為）。
+      // 其他帳號：收件人是該帳號的聯絡人，line_user_id 池子完全不同；合併欄位借用左側「有沒有
+      // 選到參考訂單」——選了就整批通知都套用那張訂單的資訊（例如「請確認訂單 A001」），沒選就照原文發送。
+      const recipients = isCustomerChannel
+        ? selectedOrderRows.filter((r) => r.line_user_id).map((r) => ({ lineUserId: r.line_user_id, fields: r.fields, bookingId: r.id }))
+        : [...selectedContactIds].map((id) => ({ lineUserId: id, fields: referenceOrder?.fields || {} }));
+
+      const result = await callCustomMessagesFunction('send', { recipients, template: draftBody, channelId });
       const rows: any[] = result.results || [];
       const ok = rows.filter((r) => r.ok).length;
       const fail = rows.length - ok;
       setSendResult({ ok, fail });
       setShowConfirm(false);
-      await fetchQuota();
+      await fetchQuota(channelId);
     } catch (e: any) {
       alert(`發送失敗：${e.message}`);
     } finally {
       setSending(false);
     }
   };
+
+  const recipientDisplayNames = isCustomerChannel
+    ? selectedOrderRows.map((r) => `${displayName(r)}${r.checkin_date ? `（入住 ${r.checkin_date}）` : ''}`)
+    : [...selectedContactIds].map((id) => contacts.find((c) => c.line_user_id === id)?.nickname || id);
 
   return (
     <div className="space-y-6">
@@ -301,21 +401,43 @@ export default function CustomMessageSending() {
         title="客製訊息發送"
         description="查詢客戶名單、套用訊息範本、帶入報價欄位並批次發送 LINE 訊息。"
         action={
-          <div className="flex items-center gap-2 bg-gray-50 border rounded-lg px-4 py-2 text-sm text-gray-700">
-            <Gauge className="w-4 h-4 text-gray-400" />
-            {quota == null ? (
-              <span className="text-gray-400">額度查詢中...</span>
-            ) : quota.limit == null ? (
-              <span>本月已用 {quota.used.toLocaleString()} 則（無上限方案）</span>
-            ) : (
-              <span>
-                本月剩餘 <strong className={quota.remaining !== null && quota.remaining < 50 ? 'text-red-600' : 'text-gray-800'}>{quota.remaining?.toLocaleString()}</strong>
-                {' '}/ {quota.limit.toLocaleString()} 則
-              </span>
-            )}
+          <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1.5 bg-gray-50 border rounded-lg px-3 py-2 text-sm text-gray-700">
+              <Radio className="w-4 h-4 text-gray-400" />
+              <select
+                value={channelId}
+                onChange={(e) => setChannelId(e.target.value)}
+                className="bg-transparent text-sm focus:outline-none"
+              >
+                {channels.map((c) => (
+                  <option key={c.id} value={c.id}>{c.name}（{channelRoleLabel(c.role)}）</option>
+                ))}
+              </select>
+            </div>
+            <div className="flex items-center gap-2 bg-gray-50 border rounded-lg px-4 py-2 text-sm text-gray-700">
+              <Gauge className="w-4 h-4 text-gray-400" />
+              {quota == null ? (
+                <span className="text-gray-400">額度查詢中...</span>
+              ) : quota.limit == null ? (
+                <span>本月已用 {quota.used.toLocaleString()} 則（無上限方案）</span>
+              ) : (
+                <span>
+                  本月剩餘 <strong className={quota.remaining !== null && quota.remaining < 50 ? 'text-red-600' : 'text-gray-800'}>{quota.remaining?.toLocaleString()}</strong>
+                  {' '}/ {quota.limit.toLocaleString()} 則
+                </span>
+              )}
+            </div>
           </div>
         }
       />
+
+      {!isCustomerChannel && (
+        <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+          目前發送帳號是「{channels.find((c) => c.id === channelId)?.name}」（{channelRoleLabel(channels.find((c) => c.id === channelId)?.role)}）——
+          收件人請到下方「發送對象」勾選這個帳號自己的聯絡人，不是左側的訂單清單。左側訂單清單仍可查詢瀏覽，
+          若有勾選一筆訂單，會把它的資訊當作合併欄位套用到這次要發送的內容裡。
+        </p>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
         {/* 第一欄：查詢客戶名單 */}
@@ -428,7 +550,7 @@ export default function CustomMessageSending() {
             </div>
 
             <div className="flex justify-between items-center px-4 py-3 border-t text-xs text-gray-500">
-              <span>已選取 {selectedRows.length} 位顧客</span>
+              <span>已選取 {selectedOrderRows.length} 筆{isCustomerChannel ? '（即發送對象）' : '（供合併欄位參考，非發送對象）'}</span>
               <div className="flex items-center gap-2">
                 <button disabled={page === 0} onClick={() => setPage((p) => p - 1)} className="px-2 py-1 border rounded disabled:opacity-40">‹</button>
                 <span>{page + 1} / {totalPages}</span>
@@ -437,6 +559,56 @@ export default function CustomMessageSending() {
               <span>每頁顯示 {PAGE_SIZE}</span>
             </div>
           </div>
+
+          {/* 發送對象：客戶用帳號以外的頻道，收件人從這裡的聯絡人清單勾選（不是上面的訂單清單，
+              那些 line_user_id 屬於客戶用帳號，在別的帳號底下是無效 ID）。 */}
+          {!isCustomerChannel && (
+            <div className="bg-white rounded-xl shadow-sm border overflow-hidden">
+              <div className="p-4 border-b space-y-3">
+                <h3 className="font-bold text-gray-800 text-sm">發送對象（{channels.find((c) => c.id === channelId)?.name} 聯絡人）</h3>
+                {contactGroups.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-xs text-gray-400">套用通知名單：</span>
+                    {contactGroups.map((g) => (
+                      <button
+                        key={g.id}
+                        onClick={() => applyRecipientGroup(g)}
+                        className="px-3 py-1 text-xs rounded-full border bg-gray-50 text-gray-600 border-gray-200 hover:bg-gray-100"
+                      >
+                        {g.name}（{g.line_user_ids.length}）
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <input
+                  value={contactFilter}
+                  onChange={(e) => setContactFilter(e.target.value)}
+                  placeholder="搜尋暱稱或 LINE User ID"
+                  className="w-full px-3 py-2 border rounded-lg text-sm"
+                />
+              </div>
+              <div className="max-h-64 overflow-y-auto divide-y divide-gray-100">
+                {contactsLoading ? (
+                  <p className="text-center text-gray-400 py-8 text-sm">載入聯絡人中...</p>
+                ) : visibleContacts.length === 0 ? (
+                  <p className="text-center text-gray-400 py-8 text-sm">
+                    {contacts.length === 0 ? '這個官方帳號底下還沒有任何聯絡人' : '沒有符合搜尋條件的聯絡人'}
+                  </p>
+                ) : (
+                  visibleContacts.map((c) => (
+                    <label key={c.line_user_id} className={`flex items-center gap-2 px-4 py-2 text-sm cursor-pointer hover:bg-gray-50 ${selectedContactIds.has(c.line_user_id) ? 'bg-green-50' : ''}`}>
+                      <input type="checkbox" checked={selectedContactIds.has(c.line_user_id)} onChange={() => toggleContact(c.line_user_id)} />
+                      <span className="flex-1 min-w-0 truncate">{c.nickname || '（未取得暱稱）'}</span>
+                      <span className="text-xs text-gray-400 font-mono truncate max-w-[120px]">{c.line_user_id}</span>
+                    </label>
+                  ))
+                )}
+              </div>
+              <div className="px-4 py-3 border-t text-xs text-gray-500">
+                已選取 {selectedContactIds.size} 位聯絡人（即發送對象）
+              </div>
+            </div>
+          )}
         </div>
 
         {/* 第二欄：訊息範本與內容編輯 */}
@@ -506,10 +678,12 @@ export default function CustomMessageSending() {
             </div>
 
             <p className="text-xs text-gray-500 pt-2 border-t">
-              已勾選 <strong className={selectedRows.length > MAX_BATCH_SEND ? 'text-red-600' : ''}>{selectedRows.length}</strong> 位（單次上限 {MAX_BATCH_SEND} 位）
+              已勾選 <strong className={recipientCount > MAX_BATCH_SEND ? 'text-red-600' : ''}>{recipientCount}</strong> 位（單次上限 {MAX_BATCH_SEND} 位）
             </p>
 
-            <Button onClick={handleSendClick} icon={<Send className="w-4 h-4" />} fullWidth>發送給已勾選顧客</Button>
+            <Button onClick={handleSendClick} icon={<Send className="w-4 h-4" />} fullWidth>
+              {isCustomerChannel ? '發送給已勾選顧客' : '發送給已勾選聯絡人'}
+            </Button>
 
             {sendResult && (
               <div className="text-xs bg-gray-50 border rounded-lg p-3 space-y-1">
@@ -576,15 +750,18 @@ export default function CustomMessageSending() {
         onCancel={() => setShowConfirm(false)}
         message={
           <div className="space-y-3">
-            <p>即將發送給 <strong>{selectedRows.length}</strong> 位顧客，訊息內容會依各顧客的報價資訊自動帶入。是否確認發送？</p>
+            <p>
+              即將用「{channels.find((c) => c.id === channelId)?.name}」發送給 <strong>{recipientCount}</strong> 位
+              {isCustomerChannel ? '顧客，訊息內容會依各顧客的報價資訊自動帶入' : '聯絡人'}。是否確認發送？
+            </p>
             <div className="space-y-1.5">
               <p>✅ 已套用範本：{selectedTemplate?.title || '（自訂內容）'}</p>
-              <p>✅ 發送對象：{selectedRows.length} 位顧客</p>
+              <p>✅ 發送對象：{recipientCount} 位{isCustomerChannel ? '顧客' : '聯絡人'}</p>
               <p>✅ 發送方式：LINE 訊息</p>
             </div>
             <div className="max-h-40 overflow-y-auto border rounded-lg p-3 space-y-1">
-              {selectedRows.map((r, i) => (
-                <div key={i}>・{displayName(r)}{r.checkin_date ? `（入住 ${r.checkin_date}）` : ''}</div>
+              {recipientDisplayNames.map((name, i) => (
+                <div key={i}>・{name}</div>
               ))}
             </div>
           </div>

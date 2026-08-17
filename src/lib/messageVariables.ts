@@ -118,9 +118,12 @@ export const SOURCE_OPTIONS: { value: VariableSource; label: string; fields: { v
   { value: 'settings', label: '民宿設定', fields: SETTINGS_FIELD_OPTIONS },
 ];
 
-// 不在 message_variables 對照表裡、但 line-webhook.ts 一定會自己算出來帶入的變數。
-// 編輯器要認得它們，否則管理員會看到「這個變數沒有登記」的假警告。
-export const ALWAYS_AVAILABLE_VARIABLES = ['匯款日時間'];
+// 不在 message_variables 對照表裡、但由特定呼叫端自己算出來帶入的變數，不走一般的
+// BOOKING_FIELD_OPTIONS 白名單機制。編輯器要認得它們，否則管理員會看到「這個變數沒有登記」的假警告。
+//   匯款日時間：line-webhook.ts 即時算出的截止時間。
+//   入住密碼：scheduled-tasks-run.ts 的「入住排程」專用，故意不放進 BOOKING_FIELD_OPTIONS——
+//     那份白名單的設計本來就是要擋掉密碼類欄位被任意範本引用，只有這個排程本身會手動帶入這個值。
+export const ALWAYS_AVAILABLE_VARIABLES = ['匯款日時間', '入住密碼'];
 
 // ------------------------------------------------------------------------
 // 訊息範本切段：把 "您好 [姓名]" 切成 [文字, 變數]，
