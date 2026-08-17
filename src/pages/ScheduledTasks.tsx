@@ -5,12 +5,19 @@ import { PageHeader, Button, Modal, ConfirmDialog, Switch, EmptyState } from '..
 import { Recurrence, ScheduleConfig, computeNextRunAt, describeSchedule } from '../lib/scheduleRecurrence';
 
 // 排程類型清單：之後新增排程類型（定時寄信、到期通知、LINE 分眾發送...）只需要在這裡多加一筆，
-// 不用改頁面其他邏輯或資料表結構。目前只有一種。
+// 不用改頁面其他邏輯或資料表結構。
+// 每一筆都要在 netlify/functions/scheduled-tasks-run.ts 的 TASK_EXECUTORS 有對應實作，
+// 否則排程到期時只會記錄一句「未知的排程類型」。
 const TASK_TYPE_OPTIONS = [
   {
     value: 'cancel_unpaid_bookings',
     label: '訂單自動取消',
     description: '取消狀態為「待預定」、且已經超過匯款期限（[匯款日時間]）的訂單。不會另外通知顧客，但會推播給真人客服帳號。',
+  },
+  {
+    value: 'notify_checkout_completed',
+    label: '訂單完成統計推播',
+    description: '把已經過退房日的訂單整理成統計，推播給「廠商用」與「團隊內部用」官方帳號的所有聯絡人。每筆訂單只會推播一次。建議設定為每天執行一次。',
   },
 ];
 

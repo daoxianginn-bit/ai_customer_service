@@ -356,6 +356,82 @@ ALTER TABLE public.user_states ADD COLUMN IF NOT EXISTS avatar_url TEXT; -- LINE
 -- 這個只影響「客製訊息發送」頁挑選名單時排不排得到這個人，個別客服對話不受影響。
 ALTER TABLE public.user_states ADD COLUMN IF NOT EXISTS marketing_opt_out BOOLEAN NOT NULL DEFAULT false;
 
+-- ========================================================================
+-- 2.5 多 LINE 官方帳號（多 webhook）
+--
+-- 改版前整套系統假設只有一個官方帳號，憑證直接放在 settings 表。現在要同時經營三種角色：
+--   customer 客戶用：既有的訂房詢問／AI 問答／轉真人，全功能。
+--   vendor   廠商用：接收訂單完成統計，並可回覆簡短確認（例如「已備貨」）。
+--   internal 團隊內部用：接收訂單完成統計。
+--
+-- ⚠️ 最關鍵的一點：LINE 的 user ID 是「每個官方帳號各自獨立」的——同一個人在客戶帳號
+-- 和廠商帳號會拿到兩組完全不同的 userId，彼此無法對應。所以聯絡人、對話、訂單都必須
+-- 標記自己屬於哪個 channel，user_states 的主鍵也要從 line_user_id 改成
+-- (channel_id, line_user_id) 複合鍵，否則兩個帳號的同名 userId 會互相覆蓋。
+-- ========================================================================
+CREATE TABLE IF NOT EXISTS public.line_channels (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL,                       -- 官方帳號名稱，後台各處顯示用
+    role TEXT NOT NULL DEFAULT 'customer' CHECK (role IN ('customer', 'vendor', 'internal')),
+    channel_access_token TEXT NOT NULL DEFAULT '',
+    channel_secret TEXT NOT NULL DEFAULT '',
+    is_active BOOLEAN NOT NULL DEFAULT true,
+    display_order INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_line_channels_role ON public.line_channels(role) WHERE is_active;
+
+-- 既有專案升級：把 settings 裡原本那組憑證搬成第一個 customer 角色的頻道。
+-- 只在 line_channels 全空時執行一次，避免重跑腳本又多長一筆重複的頻道。
+INSERT INTO public.line_channels (name, role, channel_access_token, channel_secret, display_order)
+SELECT '客戶用官方帳號', 'customer',
+       COALESCE(s.line_channel_access_token, ''), COALESCE(s.line_channel_secret, ''), 0
+FROM public.settings s
+WHERE NOT EXISTS (SELECT 1 FROM public.line_channels)
+LIMIT 1;
+
+-- 各表補上 channel_id。既有資料一律歸到「第一個 customer 頻道」——升級前的資料本來就
+-- 全部來自那個唯一的官方帳號，這個歸屬是事實而不是猜測。
+ALTER TABLE public.user_states   ADD COLUMN IF NOT EXISTS channel_id UUID REFERENCES public.line_channels(id) ON DELETE CASCADE;
+ALTER TABLE public.conversations ADD COLUMN IF NOT EXISTS channel_id UUID REFERENCES public.line_channels(id) ON DELETE SET NULL;
+ALTER TABLE public.handover_logs ADD COLUMN IF NOT EXISTS channel_id UUID REFERENCES public.line_channels(id) ON DELETE SET NULL;
+ALTER TABLE public.bookings      ADD COLUMN IF NOT EXISTS channel_id UUID REFERENCES public.line_channels(id) ON DELETE SET NULL;
+
+DO $$
+DECLARE
+  default_channel UUID;
+BEGIN
+  SELECT id INTO default_channel FROM public.line_channels
+   WHERE role = 'customer' ORDER BY display_order, created_at LIMIT 1;
+  IF default_channel IS NULL THEN RETURN; END IF;
+
+  UPDATE public.user_states   SET channel_id = default_channel WHERE channel_id IS NULL;
+  UPDATE public.conversations SET channel_id = default_channel WHERE channel_id IS NULL;
+  UPDATE public.handover_logs SET channel_id = default_channel WHERE channel_id IS NULL;
+  UPDATE public.bookings      SET channel_id = default_channel WHERE channel_id IS NULL;
+
+  -- 補完才能設 NOT NULL，也才能把它放進主鍵
+  ALTER TABLE public.user_states ALTER COLUMN channel_id SET NOT NULL;
+
+  -- 主鍵從 line_user_id 換成 (channel_id, line_user_id)。
+  -- 用 DO 區塊判斷是不是已經換過，讓整份腳本重跑時不會炸掉。
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint c
+     WHERE c.conrelid = 'public.user_states'::regclass AND c.contype = 'p'
+       AND (SELECT COUNT(*) FROM unnest(c.conkey)) = 1
+  ) THEN
+    ALTER TABLE public.user_states DROP CONSTRAINT user_states_pkey;
+    ALTER TABLE public.user_states ADD CONSTRAINT user_states_pkey PRIMARY KEY (channel_id, line_user_id);
+  END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_user_states_channel ON public.user_states(channel_id, last_message_at DESC);
+CREATE INDEX IF NOT EXISTS idx_conversations_channel ON public.conversations(channel_id, created_at DESC);
+
+-- 訂單完成（退房後）統計推播用：記錄這筆訂單已經推播過，避免排程每次跑都重複發送。
+ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS completion_notified_at TIMESTAMPTZ;
+
 -- 客製訊息發送：後台自訂的可重複使用訊息範本
 CREATE TABLE IF NOT EXISTS public.custom_message_templates (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -378,10 +454,22 @@ CREATE TABLE IF NOT EXISTS public.message_variables (
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT now()
 );
 
--- 預設帶入現有系統已經在用的變數，讓既有的罐頭訊息／客製訊息範本升級後不會突然找不到變數。
+-- 預設變數：只在「這張表完全空的」時候才寫入，也就是全新專案第一次執行這份腳本時。
+--
+-- ⚠️ 這裡刻意不用 `INSERT ... ON CONFLICT (variable_name) DO NOTHING`（原本的寫法）。
+-- ON CONFLICT 只會跳過「還存在」的資料列；管理員在「訊息變數資料維護」刪掉的變數已經不存在，
+-- 不會產生衝突，於是每次重跑整份腳本就會被原封不動地種回來——管理員刪掉的變數一直復活，
+-- 而且會重新出現在訊息編輯器下方的快捷插入鈕裡。這份腳本本來就設計成可以重複執行
+-- （既有專案升級都是整份重跑），所以這個復活是必然會發生、不是偶發。
+--
+-- 改成「整張表是空的才種」之後：全新專案照樣拿到完整預設值；既有專案已經自己整理過的清單
+-- （含刻意刪除的項目）不會被腳本覆寫。
+--
 -- 「客戶姓名」跟「姓名」、「入住人數」跟「人數」、「總報價」跟「總金額」是同一個欄位的兩種命名
 -- （客製訊息發送 vs 罐頭訊息歷史上取的名字不同），兩個都保留，管理員可以自行刪除不需要的那個。
-INSERT INTO public.message_variables (variable_name, source, field_key, display_order) VALUES
+INSERT INTO public.message_variables (variable_name, source, field_key, display_order)
+SELECT v.variable_name, v.source, v.field_key, v.display_order
+FROM (VALUES
     ('訂單編號', 'booking', 'order_number', 1),
     ('姓名', 'booking', 'name', 2),
     ('客戶姓名', 'booking', 'name', 3),
@@ -403,6 +491,8 @@ INSERT INTO public.message_variables (variable_name, source, field_key, display_
     ('禮金內容', 'settings', 'booking_gift_message', 19),
     ('民宿名稱', 'settings', 'business_name', 20),
     ('客服LINE', 'settings', 'customer_service_line', 21)
+) AS v(variable_name, source, field_key, display_order)
+WHERE NOT EXISTS (SELECT 1 FROM public.message_variables)
 ON CONFLICT (variable_name) DO NOTHING;
 
 -- 8.5 動態訂房流程（可新增多組流程，各自有觸發關鍵字與最多 5 個步驟）
@@ -684,7 +774,11 @@ CREATE TABLE IF NOT EXISTS public.booking_linen_usage (
 );
 CREATE INDEX IF NOT EXISTS idx_booking_linen_usage_booking ON public.booking_linen_usage(booking_id);
 
-INSERT INTO public.linen_items (category, spec, unit_price, display_order) VALUES
+-- 同 message_variables：只在整張表空的時候種預設值。
+-- 用 ON CONFLICT 的話，管理員在「備品管理」刪掉的品項會在每次重跑腳本時復活。
+INSERT INTO public.linen_items (category, spec, unit_price, display_order)
+SELECT v.category, v.spec, v.unit_price, v.display_order
+FROM (VALUES
     ('床包', '平紋貢緞床包-3.5x6.2 尺-高 28cm 紫線', 45, 1),
     ('床包', '平紋貢緞床包-5x6.2 尺-高 28cm 紅線', 45, 2),
     ('床包', '平紋貢緞床包-6x6.2 尺-高 28cm 藍線', 45, 3),
@@ -703,6 +797,8 @@ INSERT INTO public.linen_items (category, spec, unit_price, display_order) VALUE
     ('枕頭', '', 70, 16),
     ('羽絨(毛)被', '', 150, 17),
     ('其他布品', '', NULL, 18)
+) AS v(category, spec, unit_price, display_order)
+WHERE NOT EXISTS (SELECT 1 FROM public.linen_items)
 ON CONFLICT (category, spec) DO NOTHING;
 
 -- 既有訂單的房間紀錄回填：LINE 個別租房的訂單有 booking_room_nights，可以直接推出開了哪幾間房。
@@ -746,6 +842,7 @@ CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_due ON public.scheduled_tasks(nex
 
 -- 9. 啟用 RLS（僅限已登入使用者存取，用 DROP + CREATE 讓整份腳本可重複執行）
 ALTER TABLE public.settings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.line_channels ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.user_states ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.processed_events ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.knowledge_base_items ENABLE ROW LEVEL SECURITY;
@@ -781,6 +878,11 @@ DROP POLICY IF EXISTS "Allow Auth Access" ON public.settings;
 CREATE POLICY "Allow Auth Access" ON public.settings FOR ALL USING (auth.role() = 'authenticated');
 DROP POLICY IF EXISTS "Allow Auth Access States" ON public.user_states;
 CREATE POLICY "Allow Auth Access States" ON public.user_states FOR ALL USING (auth.role() = 'authenticated');
+-- line_channels 存的是各官方帳號的 access token / secret，等同密碼。
+-- webhook 端一律用 service role key 讀取（略過 RLS），這裡只開放已登入的管理員，
+-- 不讓 anon key 讀得到憑證。
+DROP POLICY IF EXISTS "Allow Auth Access Line Channels" ON public.line_channels;
+CREATE POLICY "Allow Auth Access Line Channels" ON public.line_channels FOR ALL USING (auth.role() = 'authenticated');
 -- processed_events 只有 line-webhook.ts 用 service role key 寫入/查詢（會略過 RLS），
 -- 前端從不存取這張表，這裡開 RLS 只是不讓 anon key 直接讀寫，不影響 webhook 運作。
 DROP POLICY IF EXISTS "Allow Auth Access Processed Events" ON public.processed_events;

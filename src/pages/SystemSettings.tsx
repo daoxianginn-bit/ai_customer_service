@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Save, Bot, MessageCircle, UserCheck, Copy, Clock, SlidersHorizontal, CalendarDays } from 'lucide-react';
 import { useSettings } from '../lib/useSettings';
 import { PageHeader, Button } from '../components/ui';
+import LineChannelsPanel from '../components/LineChannelsPanel';
 
 // 原本是 AI 引擎設定／LINE 串接設定／轉接規則三個獨立頁面，內容都只是對同一張
 // settings 表的單一表單（同一個 useSettings() hook），合成一頁三個分頁籤（比照
@@ -17,17 +18,10 @@ const TABS: { key: Tab; label: string; icon: JSX.Element }[] = [
 
 export default function SystemSettings() {
   const { settings, setSettings, loading, saving, handleSave, handleChange } = useSettings();
-  const [webhookUrl, setWebhookUrl] = useState('');
   const [tab, setTab] = useState<Tab>('ai');
 
-  useEffect(() => {
-    setWebhookUrl(window.location.origin + '/.netlify/functions/line-webhook');
-  }, []);
-
-  const handleCopyWebhook = () => {
-    navigator.clipboard.writeText(webhookUrl);
-    alert('Webhook URL 已複製');
-  };
+  // Webhook 網址現在是「每個官方帳號各一組」，由 LineChannelsPanel 各自產生並提供複製，
+  // 不再有全站共用的那一個。
 
   // 訂閱網址帶著 token 當通行碼（行事曆軟體沒辦法帶 Authorization 標頭），所以這串等同密碼。
   const calendarFeedUrl = settings?.calendar_feed_token
@@ -155,24 +149,10 @@ export default function SystemSettings() {
 
         {tab === 'line' && (
         <div className="p-6 space-y-6">
-          <div className="grid grid-cols-2 gap-6">
-            <div className="col-span-2">
-              <label className="block text-sm font-medium text-gray-700 mb-1">Webhook URL</label>
-              <div className="flex gap-2 font-mono text-sm">
-                <input type="text" readOnly value={webhookUrl} className="flex-1 px-4 py-2 border rounded-lg bg-gray-50" />
-                <button onClick={handleCopyWebhook} className="p-2 border rounded-lg hover:bg-gray-100"><Copy className="w-5 h-5" /></button>
-              </div>
-              <p className="text-xs text-gray-400 mt-1">貼到 LINE Developers Console 的 Webhook URL 欄位，並開啟 "Use webhook"。</p>
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Channel Access Token</label>
-              <input type="password" name="line_channel_access_token" value={settings.line_channel_access_token || ''} onChange={handleChange} className="w-full px-4 py-2 border rounded-lg" />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Channel Secret</label>
-              <input type="password" name="line_channel_secret" value={settings.line_channel_secret || ''} onChange={handleChange} className="w-full px-4 py-2 border rounded-lg" />
-            </div>
-          </div>
+          {/* 改版前這裡是單一組 Channel Access Token / Secret（存在 settings 表）。
+              現在支援多個官方帳號（客戶用／廠商用／團隊內部用），憑證改存 line_channels 表，
+              由下面這個面板管理；settings 的舊欄位保留但已不再被程式讀取。 */}
+          <LineChannelsPanel />
 
           <div className="border-t pt-6 space-y-4">
             <h4 className="text-sm font-bold text-gray-600 flex items-center gap-2"><CalendarDays className="w-4 h-4" />訂房行事曆訂閱</h4>

@@ -3,6 +3,7 @@ import { Client } from '@line/bot-sdk';
 import { createClient } from '@supabase/supabase-js';
 import fetch from 'node-fetch';
 import { buildMergeFields, MessageVariable } from '../../src/lib/messageVariables';
+import { LineChannel } from '../../src/lib/lineChannels';
 
 // ========================================================================
 // 客製訊息發送（客製訊息發送頁）專用 function：
@@ -39,9 +40,16 @@ export const handler: Handler = async (event) => {
   const { data: settings, error: settingsError } = await supabase.from('settings').select('*').single();
   if (settingsError || !settings) return { statusCode: 500, body: JSON.stringify({ error: '讀取系統設定失敗' }) };
 
+  // 客製訊息發送的對象是「客戶」，所以一律用客戶用官方帳號的憑證。
+  // 憑證改存 line_channels 之後 settings.line_channel_access_token 已不再維護，不能再拿來用。
+  const customerChannel = await fetchCustomerChannel();
+  if (!customerChannel?.channel_access_token) {
+    return { statusCode: 500, body: JSON.stringify({ error: '尚未設定「客戶用」LINE 官方帳號憑證，請至系統設定 → LINE 串接設定新增' }) };
+  }
+
   try {
     if (body.action === 'quota') {
-      const quota = await getLineQuota(settings.line_channel_access_token);
+      const quota = await getLineQuota(customerChannel.channel_access_token);
       return { statusCode: 200, body: JSON.stringify(quota) };
     }
 
@@ -67,8 +75,8 @@ export const handler: Handler = async (event) => {
       }
 
       const lineClient = new Client({
-        channelAccessToken: settings.line_channel_access_token,
-        channelSecret: settings.line_channel_secret,
+        channelAccessToken: customerChannel.channel_access_token,
+        channelSecret: customerChannel.channel_secret,
       });
 
       // 發訊息跟改訂單狀態是兩件事，故意不放在同一個動作裡——要改狀態一律回訂單管理頁做。
@@ -148,6 +156,19 @@ async function roomLabelsByBooking(bookingIds: string[]): Promise<Record<string,
   return map;
 }
 
+// 客戶用官方帳號：客製訊息的收件人都是這個帳號底下的聯絡人，憑證也要用它的。
+async function fetchCustomerChannel(): Promise<LineChannel | null> {
+  const { data } = await supabase
+    .from('line_channels')
+    .select('*')
+    .eq('role', 'customer')
+    .eq('is_active', true)
+    .order('display_order')
+    .limit(1)
+    .maybeSingle();
+  return (data as LineChannel) || null;
+}
+
 async function fetchMessageVariables(): Promise<MessageVariable[]> {
   const { data } = await supabase.from('message_variables').select('variable_name, source, field_key').order('display_order');
   return (data as MessageVariable[]) || [];
@@ -167,7 +188,9 @@ async function listOrders(settings: any, filters: OrderFilters): Promise<{ varia
       // booking_rooms 還沒建立，退回舊的文字比對，功能照舊
       if (filters.roomType) query = query.ilike('room_type_label', `%${filters.roomType}%`);
     } else if (ids.length === 0) {
-      return { variables: [], rows: [] };
+      // 這個房型沒有任何訂單：訂單清單是空的，但「可用變數」跟查到幾筆訂單無關，
+      // 仍要照常回傳，否則前端的變數清單會被清空（範本裡的變數全變成未知警告）。
+      return { variables: (await fetchMessageVariables()).map((v) => v.variable_name), rows: [] };
     } else {
       query = query.in('id', ids);
     }

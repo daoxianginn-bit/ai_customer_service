@@ -19,6 +19,7 @@ import {
   SelectableRoom, RoomCountRequest, selectRoomsByRequest, toRoomCountRequests, describeShortfall,
 } from '../../src/lib/roomSelection';
 import { computeUsage, normalizeChangeCount } from '../../src/lib/linenCost';
+import { LineChannel, isFullServiceRole, channelRoleLabel } from '../../src/lib/lineChannels';
 
 const supabase = createClient(
   process.env.SUPABASE_URL || '',
@@ -48,9 +49,25 @@ async function flushPendingWrites() {
   }
 }
 
-function logConversation(userId: string, nickname: string | null, direction: 'inbound' | 'outbound', content: string, source: string) {
+// 這次 webhook 呼叫是哪個官方帳號打進來的。
+//
+// 一次 webhook POST 只會來自一個官方帳號，所以整個 invocation 期間這個值是固定的——
+// 即使 handler 用 Promise.allSettled 平行處理多位客人的事件，大家共用的也是同一個頻道，
+// 不會互相污染。相對於把 channel 參數一路穿過二十幾個函式（saveBookingSession、
+// logConversation、各流程處理函式…），這個作法侵入性小很多。
+// 一定要在 handler 解析出頻道後、開始處理事件前設定。
+let activeChannelId: string | null = null;
+
+function logConversation(
+  userId: string,
+  nickname: string | null,
+  direction: 'inbound' | 'outbound',
+  content: string,
+  source: string,
+  channelId: string | null = activeChannelId
+) {
   deferWrite('conversations.insert', () =>
-    supabase.from('conversations').insert({ line_user_id: userId, nickname, direction, content, source })
+    supabase.from('conversations').insert({ channel_id: channelId, line_user_id: userId, nickname, direction, content, source })
   );
 }
 
@@ -90,19 +107,52 @@ async function fetchSettings(): Promise<any | null> {
   return data;
 }
 
+// 頻道設定變動不頻繁，但每次 webhook 呼叫都要讀（驗簽章、拿 access token）。
+// 比照 settings 用同樣的 30 秒 TTL 快取。
+const CHANNELS_CACHE_TTL_MS = 30 * 1000;
+let channelsCache: { data: LineChannel[]; fetchedAt: number } | null = null;
+
+async function fetchChannels(): Promise<LineChannel[]> {
+  const now = Date.now();
+  if (channelsCache && now - channelsCache.fetchedAt < CHANNELS_CACHE_TTL_MS) return channelsCache.data;
+  const { data } = await supabase
+    .from('line_channels')
+    .select('*')
+    .eq('is_active', true)
+    .order('display_order');
+  const result = (data || []) as LineChannel[];
+  channelsCache = { data: result, fetchedAt: now };
+  return result;
+}
+
+// 哪個官方帳號打進來的：網址帶 ?channel=<id> 就用那個。
+// 沒帶就退回第一個 customer 頻道——升級前設定在 LINE 後台的 webhook 網址沒有這個參數，
+// 這個 fallback 讓既有的客戶帳號在還沒去改網址之前照常運作，不會一部署就斷線。
+async function resolveChannel(channelId: string | undefined): Promise<LineChannel | null> {
+  const channels = await fetchChannels();
+  if (channelId) return channels.find((c) => c.id === channelId) || null;
+  return channels.find((c) => c.role === 'customer') || null;
+}
+
 export const handler: Handler = async (event) => {
   if (event.httpMethod !== 'POST') return { statusCode: 405, body: 'Method Not Allowed' };
 
   const settings = await fetchSettings();
   if (!settings) return { statusCode: 500, body: 'Failed to fetch settings' };
 
+  const channel = await resolveChannel(event.queryStringParameters?.channel);
+  if (!channel) return { statusCode: 404, body: 'LINE channel not configured' };
+  activeChannelId = channel.id;
+
   const lineClient = new Client({
-    channelAccessToken: settings.line_channel_access_token,
-    channelSecret: settings.line_channel_secret,
+    channelAccessToken: channel.channel_access_token,
+    channelSecret: channel.channel_secret,
   });
 
+  // 簽章一定要用「這個頻道自己的」secret 驗——用錯頻道的 secret 會全部驗不過，
+  // 也不能省略：這是唯一能確認請求真的來自 LINE 的機制。
   const signature = event.headers['x-line-signature'] || '';
-  if (!validateSignature(event.body || '', settings.line_channel_secret, signature)) {
+  if (!validateSignature(event.body || '', channel.channel_secret, signature)) {
     return { statusCode: 401, body: 'Invalid signature' };
   }
 
@@ -123,7 +173,7 @@ export const handler: Handler = async (event) => {
   await Promise.allSettled(
     Array.from(eventsByUser.values()).map(async (userEvents) => {
       for (const lineEvent of userEvents) {
-        await processLineEvent(lineEvent, settings, lineClient);
+        await processLineEvent(lineEvent, settings, lineClient, channel);
       }
     })
   );
@@ -135,7 +185,12 @@ export const handler: Handler = async (event) => {
   return { statusCode: 200, body: 'OK' };
 };
 
-async function processLineEvent(lineEvent: WebhookEvent, settings: any, lineClient: Client): Promise<void> {
+async function processLineEvent(
+  lineEvent: WebhookEvent,
+  settings: any,
+  lineClient: Client,
+  channel: LineChannel
+): Promise<void> {
   if (!(lineEvent.type === 'message' && lineEvent.message.type === 'text')) return;
 
   const userId = lineEvent.source.userId!;
@@ -147,9 +202,10 @@ async function processLineEvent(lineEvent: WebhookEvent, settings: any, lineClie
   try {
     // 1. 強制去重 (關鍵防禦) ＋ 2. 獲取當前狀態
     // 兩者沒有先後依賴（狀態查詢是唯讀的，就算是重複事件也只是白查一次），平行發出省一個來回。
+    // 狀態一定要連 channel_id 一起比對：同一組 line_user_id 在不同官方帳號是不同的人。
     const [dedupeRes, userStateRes] = await Promise.all([
       supabase.from('processed_events').insert({ event_id: eventId }),
-      supabase.from('user_states').select('*').eq('line_user_id', userId).single(),
+      supabase.from('user_states').select('*').eq('channel_id', channel.id).eq('line_user_id', userId).maybeSingle(),
     ]);
 
     if (dedupeRes.error) {
@@ -168,19 +224,29 @@ async function processLineEvent(lineEvent: WebhookEvent, settings: any, lineClie
     }
     // 這筆 upsert 的結果沒有任何後續邏輯在等（下面用的是上面already查好的 userState），
     // 延後到回覆送出後再寫，不要卡在客人前面。
+    // onConflict 要指定複合主鍵，否則 supabase 會用預設的單欄推斷而撞不到既有列。
     const isFirstEverMessage = !userState;
     deferWrite('user_states.upsert', () =>
       supabase.from('user_states').upsert({
+        channel_id: channel.id,
         line_user_id: userId,
         nickname,
         avatar_url: avatarUrl,
         last_message_at: new Date().toISOString(),
         // first_message_at 只在第一次見到這個 userId 時寫入一次，之後 upsert 不會再覆蓋
         ...(isFirstEverMessage ? { first_message_at: new Date().toISOString() } : {}),
-      })
+      }, { onConflict: 'channel_id,line_user_id' })
     );
 
-    logConversation(userId, nickname, 'inbound', userMessage, 'user');
+    logConversation(userId, nickname, 'inbound', userMessage, 'user', channel.id);
+
+    // 廠商／團隊內部帳號：不跑訂房流程也不跑知識庫問答，只記錄聯絡人並把回覆轉給客服知道。
+    // 這兩種帳號的用途是「接收訂單完成統計」，對方回一句「已備貨」時我們要收得到，
+    // 但不該讓 AI 拿民宿的知識庫去回答廠商，那只會答非所問。
+    if (!isFullServiceRole(channel.role)) {
+      await handleNonCustomerChannelMessage(lineClient, lineEvent, settings, channel, userId, nickname, userMessage);
+      return;
+    }
 
     // 3. 關鍵字偵測 (轉真人客服)
     const handoverKeywords = parseCsvKeywords(settings.handover_keywords);
@@ -193,13 +259,15 @@ async function processLineEvent(lineEvent: WebhookEvent, settings: any, lineClie
       const startedAt = new Date().toISOString();
 
       await supabase.from('user_states').upsert({
+        channel_id: channel.id,
         line_user_id: userId,
         nickname,
         is_human_mode: true,
         last_human_interaction: startedAt
-      });
+      }, { onConflict: 'channel_id,line_user_id' });
 
       await supabase.from('handover_logs').insert({
+        channel_id: channel.id,
         line_user_id: userId,
         nickname,
         triggered_keyword: matchedKeyword,
@@ -209,7 +277,7 @@ async function processLineEvent(lineEvent: WebhookEvent, settings: any, lineClie
 
       const replyText = '已為您轉接真人客服，請稍候。';
       await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
-      await logConversation(userId, nickname, 'outbound', replyText, 'system');
+      logConversation(userId, nickname, 'outbound', replyText, 'system', channel.id);
 
       const agentIds = settings.agent_user_ids?.split(',').map((id: string) => id.trim()).filter(Boolean);
       if (agentIds) {
@@ -227,14 +295,17 @@ async function processLineEvent(lineEvent: WebhookEvent, settings: any, lineClie
       if (new Date().getTime() - lastInteraction < timeoutMs) {
         // 客人還在互動就延後計時——真人客服是直接在 LINE 官方帳號 App 裡回覆客人，這個系統
         // 看不到真人本人有沒有在處理，只能靠客人是否還在傳訊息判斷「這通還沒結束」。
-        await supabase.from('user_states').update({ last_human_interaction: new Date().toISOString() }).eq('line_user_id', userId);
+        await supabase.from('user_states').update({ last_human_interaction: new Date().toISOString() })
+          .eq('channel_id', channel.id).eq('line_user_id', userId);
         return;
       }
 
-      await supabase.from('user_states').update({ is_human_mode: false }).eq('line_user_id', userId);
+      await supabase.from('user_states').update({ is_human_mode: false })
+        .eq('channel_id', channel.id).eq('line_user_id', userId);
       await supabase
         .from('handover_logs')
         .update({ status: 'closed', ended_at: new Date().toISOString(), resolved_by: 'timeout_auto' })
+        .eq('channel_id', channel.id)
         .eq('line_user_id', userId)
         .eq('status', 'open');
     }
@@ -323,12 +394,14 @@ async function fetchConversationContext(userId: string, currentMessage: string):
     supabase
       .from('conversations')
       .select('direction, content')
+      .eq('channel_id', activeChannelId)
       .eq('line_user_id', userId)
       .order('created_at', { ascending: false })
       .limit(CONVERSATION_HISTORY_LIMIT + 1),
     supabase
       .from('bookings')
       .select('order_number, checkin_date, checkout_date, headcount, whole_house, total_amount, status, room_type_label')
+      .eq('channel_id', activeChannelId)
       .eq('line_user_id', userId)
       .neq('status', 'cancelled')
       .order('created_at', { ascending: false })
@@ -346,6 +419,42 @@ async function fetchConversationContext(userId: string, currentMessage: string):
     else break;
   }
   return { history: rows.slice(-CONVERSATION_HISTORY_LIMIT), recentBooking: bookingRes.data || null };
+}
+
+// 廠商／團隊內部帳號收到訊息時的處理。
+//
+// 這兩種帳號是「我們推播、對方偶爾回一句」的單向為主關係，不需要訂房流程也不需要知識庫問答
+// （拿民宿的知識庫回答廠商只會答非所問）。所以這裡只做三件事：留下對話記錄、回一句收到、
+// 把原文轉給客服知道。真正的判讀交給人，系統不揣測「已備貨」到底代表什麼。
+async function handleNonCustomerChannelMessage(
+  lineClient: Client,
+  lineEvent: any,
+  settings: any,
+  channel: LineChannel,
+  userId: string,
+  nickname: string | null,
+  userMessage: string
+) {
+  const replyText = '收到，謝謝您的回覆！';
+  try {
+    await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
+    logConversation(userId, nickname, 'outbound', replyText, 'system', channel.id);
+  } catch (e: any) {
+    console.error('[Channel] reply failed:', e.message);
+  }
+
+  // 轉給客服。用客戶用帳號推播——agent_user_ids 存的是客服在「客戶用官方帳號」下的 userId，
+  // 拿廠商帳號的 client 去推會找不到人（user ID 跨帳號不通用）。
+  const customerChannel = (await fetchChannels()).find((c) => c.role === 'customer');
+  if (!customerChannel?.channel_access_token) return;
+  const notifyClient = new Client({
+    channelAccessToken: customerChannel.channel_access_token,
+    channelSecret: customerChannel.channel_secret,
+  });
+  const text = `💬 ${channelRoleLabel(channel.role)}帳號「${channel.name}」收到回覆\n來自：${nickname || '未知'}\n內容：${userMessage}`;
+  for (const id of parseCsvKeywords(settings.agent_user_ids)) {
+    try { await notifyClient.pushMessage(id, { type: 'text', text }); } catch {}
+  }
 }
 
 // ========================================================================
@@ -518,7 +627,14 @@ function loadBookingSession(userState: any, settings: any): BookingSession | nul
 
 async function saveBookingSession(userId: string, session: Omit<BookingSession, 'updatedAt'>) {
   try {
-    await supabase.from('user_states').upsert({ line_user_id: userId, booking_session: JSON.stringify({ ...session, updatedAt: Date.now() }) });
+    await supabase.from('user_states').upsert(
+      {
+        channel_id: activeChannelId,
+        line_user_id: userId,
+        booking_session: JSON.stringify({ ...session, updatedAt: Date.now() }),
+      },
+      { onConflict: 'channel_id,line_user_id' }
+    );
   } catch (e: any) {
     console.error('[Booking] save session failed:', e.message);
   }
@@ -526,7 +642,8 @@ async function saveBookingSession(userId: string, session: Omit<BookingSession, 
 
 async function clearBookingSession(userId: string) {
   try {
-    await supabase.from('user_states').update({ booking_session: null }).eq('line_user_id', userId);
+    await supabase.from('user_states').update({ booking_session: null })
+      .eq('channel_id', activeChannelId).eq('line_user_id', userId);
   } catch (e: any) {
     console.error('[Booking] clear session failed:', e.message);
   }
@@ -1040,6 +1157,7 @@ async function startBookingFlow(
   const { data: latestBooking } = await supabase
     .from('bookings')
     .select('id, status')
+    .eq('channel_id', activeChannelId)
     .eq('line_user_id', userId)
     .order('created_at', { ascending: false })
     .limit(1)
@@ -1054,7 +1172,7 @@ async function startBookingFlow(
       const p = await lineClient.getProfile(userId);
       resolvedNickname = p.displayName;
     } catch {}
-    const data = await insertNewBooking({ line_user_id: userId, nickname: resolvedNickname, flow_id: flow.id, status: 'inquiring', collected_answers: {} });
+    const data = await insertNewBooking({ channel_id: activeChannelId, line_user_id: userId, nickname: resolvedNickname, flow_id: flow.id, status: 'inquiring', collected_answers: {} });
     bookingId = data.id;
   } else {
     await supabase.from('bookings').update({ flow_id: flow.id, status: 'inquiring' }).eq('id', bookingId);
@@ -1075,8 +1193,12 @@ async function startBookingFlow(
 async function handoverBrokenFlowSession(lineClient: Client, lineEvent: any, settings: any, userId: string, nickname: string | null) {
   await clearBookingSession(userId);
   const startedAt = new Date().toISOString();
-  await supabase.from('user_states').upsert({ line_user_id: userId, nickname, is_human_mode: true, last_human_interaction: startedAt });
+  await supabase.from('user_states').upsert(
+    { channel_id: activeChannelId, line_user_id: userId, nickname, is_human_mode: true, last_human_interaction: startedAt },
+    { onConflict: 'channel_id,line_user_id' }
+  );
   await supabase.from('handover_logs').insert({
+    channel_id: activeChannelId,
     line_user_id: userId,
     nickname,
     triggered_keyword: '訂房流程設定異動中斷',
@@ -1246,7 +1368,11 @@ async function finishQueryFlow(
 
   let booking: any = null;
   if (orderNumber) {
-    const { data } = await supabase.from('bookings').select('*').eq('order_number', orderNumber).eq('line_user_id', userId).maybeSingle();
+    const { data } = await supabase.from('bookings').select('*')
+      .eq('order_number', orderNumber)
+      .eq('channel_id', activeChannelId)
+      .eq('line_user_id', userId)
+      .maybeSingle();
     booking = data;
   }
 

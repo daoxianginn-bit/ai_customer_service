@@ -3,6 +3,7 @@ import { supabase } from '../lib/supabase';
 import { Users, Search, RotateCcw, MessageSquare, ClipboardList, Copy, RefreshCcw, AlertCircle, Trash2 } from 'lucide-react';
 import { PageHeader, Button, Modal, StatusBadge, EmptyState, Pagination, ConfirmDialog } from '../components/ui';
 import { DEPOSIT_OR_LATER_STATUSES } from '../lib/bookingStatus';
+import { channelRoleLabel } from '../lib/lineChannels';
 
 const PAGE_SIZE_OPTIONS = [10, 20, 50];
 
@@ -59,13 +60,15 @@ function addDays(d: Date, days: number): Date {
   return next;
 }
 
-async function callLineProfileFunction(lineUserId: string) {
+// channelId 一定要一起帶：LINE 的 profile API 只查得到自己官方帳號底下的好友，
+// 用別的帳號的 token 去查一律回錯誤。
+async function callLineProfileFunction(lineUserId: string, channelId: string) {
   const { data: sessionData } = await supabase.auth.getSession();
   const token = sessionData.session?.access_token;
   const res = await fetch('/.netlify/functions/line-profile', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ lineUserId }),
+    body: JSON.stringify({ lineUserId, channelId }),
   });
   const result = await res.json();
   if (!res.ok) throw new Error(result.error || '查詢失敗');
@@ -117,11 +120,30 @@ export default function CustomerDirectory() {
   const [fullConvoLoading, setFullConvoLoading] = useState(false);
   const [fullConvoList, setFullConvoList] = useState<any[]>([]);
 
+  const [channels, setChannels] = useState<{ id: string; name: string; role: string }[]>([]);
+  const [channelId, setChannelId] = useState<string>('');
+
   const selectedContact = contacts.find((c) => c.line_user_id === selectedId) || null;
 
+  // 目前檢視哪個官方帳號的聯絡人。LINE 的 user ID 是各官方帳號獨立的，
+  // 不同帳號的聯絡人是完全不同的人，混在同一份清單裡看沒有意義，一次只看一個帳號。
   useEffect(() => {
-    runQuery(0);
-  }, [pageSize]);
+    supabase
+      .from('line_channels')
+      .select('id, name, role')
+      .eq('is_active', true)
+      .order('display_order')
+      .then(({ data }) => {
+        const list = (data || []) as { id: string; name: string; role: string }[];
+        setChannels(list);
+        // 預設看客戶用帳號——客戶資料頁的主要使用情境
+        setChannelId((prev) => prev || list.find((c) => c.role === 'customer')?.id || list[0]?.id || '');
+      });
+  }, []);
+
+  useEffect(() => {
+    if (channelId) runQuery(0);
+  }, [pageSize, channelId]);
 
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => setCurrentUserId(data.user?.id || null));
@@ -134,6 +156,7 @@ export default function CustomerDirectory() {
     let query = supabase
       .from('user_states')
       .select('line_user_id, nickname, avatar_url, last_message_at, first_message_at, marketing_opt_out')
+      .eq('channel_id', channelId)
       .order('last_message_at', { ascending: false, nullsFirst: false })
       .range(pageIndex * pageSize, pageIndex * pageSize + pageSize - 1);
 
@@ -229,9 +252,11 @@ export default function CustomerDirectory() {
     setRefreshingIds((prev) => new Set(prev).add(lineUserId));
     setRefreshErrors((prev) => { const next = { ...prev }; delete next[lineUserId]; return next; });
     try {
-      const profile = await callLineProfileFunction(lineUserId);
+      const profile = await callLineProfileFunction(lineUserId, channelId);
       if (profile.displayName) {
-        await supabase.from('user_states').update({ nickname: profile.displayName, avatar_url: profile.pictureUrl || null }).eq('line_user_id', lineUserId);
+        await supabase.from('user_states')
+          .update({ nickname: profile.displayName, avatar_url: profile.pictureUrl || null })
+          .eq('channel_id', channelId).eq('line_user_id', lineUserId);
         setContacts((prev) => prev.map((c) => (c.line_user_id === lineUserId ? { ...c, nickname: profile.displayName, avatar_url: profile.pictureUrl || null } : c)));
       } else {
         setRefreshErrors((prev) => ({ ...prev, [lineUserId]: '目前仍抓不到暱稱' }));
@@ -244,7 +269,8 @@ export default function CustomerDirectory() {
   };
 
   const toggleMarketingOptOut = async (lineUserId: string, optOut: boolean) => {
-    await supabase.from('user_states').update({ marketing_opt_out: optOut }).eq('line_user_id', lineUserId);
+    await supabase.from('user_states').update({ marketing_opt_out: optOut })
+      .eq('channel_id', channelId).eq('line_user_id', lineUserId);
     setContacts((prev) => prev.map((c) => (c.line_user_id === lineUserId ? { ...c, marketing_opt_out: optOut } : c)));
   };
 
@@ -308,6 +334,22 @@ export default function CustomerDirectory() {
 
       <div className="bg-white p-4 rounded-xl shadow-sm border space-y-3">
         <div className="flex flex-wrap gap-3 items-end">
+          {/* 官方帳號切換：LINE user ID 各帳號獨立，聯絡人清單一次只能看一個帳號 */}
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">官方帳號</label>
+            <select
+              value={channelId}
+              onChange={(e) => setChannelId(e.target.value)}
+              className="px-3 py-2 border rounded-lg text-sm bg-white min-w-[160px]"
+            >
+              {channels.length === 0 && <option value="">（尚未設定官方帳號）</option>}
+              {channels.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name}（{channelRoleLabel(c.role)}）
+                </option>
+              ))}
+            </select>
+          </div>
           <div className="flex-1 min-w-[220px]">
             <label className="block text-xs text-gray-500 mb-1">關鍵字搜尋</label>
             <input

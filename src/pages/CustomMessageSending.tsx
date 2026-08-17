@@ -88,8 +88,19 @@ export default function CustomMessageSending() {
     fetchTemplates();
     fetchQuota();
     fetchRoomTypeOptions();
+    fetchVariables();
     runQuery();
   }, []);
+
+  // 可用變數清單獨立於訂單查詢自己抓一次。
+  // 原本只在 runQuery() 成功時才會被填入（來自 custom-messages function 的回傳），
+  // 造成兩個問題：訂單查詢查不到資料時 variables 會被清成空陣列，範本裡原本正常的
+  // [變數] 全部變成「不在清單裡」的黃色警告、下方快捷插入鈕也整排消失。
+  // 變數清單跟查到幾筆訂單本來就沒有關係，改成跟「訊息變數資料維護」同一個來源直接查。
+  const fetchVariables = async () => {
+    const { data } = await supabase.from('message_variables').select('variable_name').order('display_order');
+    setVariables((data || []).map((v: any) => v.variable_name));
+  };
 
   const fetchTemplates = async () => {
     const { data } = await supabase.from('custom_message_templates').select('*').order('created_at');
@@ -127,7 +138,8 @@ export default function CustomMessageSending() {
         roomType: roomType === '包棟' ? '包棟' : roomTypeOptions.find((r) => r.id === roomType)?.name || '',
       });
       setRows(result.rows || []);
-      setVariables(result.variables || []);
+      // 只有真的拿到清單才覆蓋；查無訂單時 function 會回空陣列，不能拿它把變數清單洗掉
+      if (result.variables?.length) setVariables(result.variables);
     } catch (e: any) {
       alert(`查詢失敗：${e.message}`);
     } finally {
