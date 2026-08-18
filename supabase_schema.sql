@@ -751,6 +751,15 @@ ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS security_deposit NUMERIC NO
 -- 未匯款訂單使用。改版前這個期限只算出來塞進訊息文字就丟掉、沒有存下來，所以沒辦法回填舊訂單。
 ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS payment_deadline_at TIMESTAMPTZ;
 
+-- 候補自動回報：訂單因為排不出房/檔期衝突被系統擋下（status='pending_manual_conflict'）時，
+-- 順便記下「卡住它的是哪一筆訂單」——排程管理的候補排程（process_waitlist）會定期檢查這筆
+-- 被監看的訂單有沒有「有結果」了（變成已預定，或取消/待退款/已退款），一旦有結果就自動重新
+-- 試算一次報價並主動推播給客人，不用客人自己再問一次。只是「監看對象」，不要求精準對應到
+-- 哪個房型卡到——監看對象一有動靜就重新試算，真正可不可以訂還是看當下即時房況，抓錯監看對象
+-- 頂多晚一點才重新檢查，不影響正確性。重新試算過（不管成功或放棄）就會清空，不會一直重試。
+ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS waitlist_blocked_by UUID REFERENCES public.bookings(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS idx_bookings_waitlist_blocked_by ON public.bookings(waitlist_blocked_by) WHERE waitlist_blocked_by IS NOT NULL;
+
 UPDATE public.bookings SET room_amount = total_amount WHERE room_amount IS NULL AND total_amount IS NOT NULL;
 
 -- 訂單狀態改版（10 種狀態，取代原本 5 種）：

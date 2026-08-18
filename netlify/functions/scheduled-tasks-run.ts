@@ -7,6 +7,7 @@ import { computeNextRunAt, ScheduleConfig } from '../../src/lib/scheduleRecurren
 import { OCCUPYING_STATUSES, BALANCE_PAID_STATUSES } from '../../src/lib/bookingStatus';
 import { parseIcsEvents } from '../../src/lib/icsParser';
 import { otaPlatformLabel } from '../../src/lib/otaChannels';
+import { processWaitlist } from './line-webhook';
 
 // ========================================================================
 // 排程執行器（ticker）
@@ -891,6 +892,7 @@ const TASK_EXECUTORS: Record<string, TaskExecutor> = {
   deposit_processing_notice: depositProcessingNotice,
   laundry_notice: laundryNotice,
   sync_calendars: syncCalendars,
+  process_waitlist: () => processWaitlist(),
 };
 
 function toScheduleConfig(task: any): ScheduleConfig {

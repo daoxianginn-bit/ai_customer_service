@@ -83,6 +83,11 @@ const TASK_TYPE_OPTIONS: { value: string; label: string; description: string; ne
     label: '行事曆整合同步',
     description: '兩步驟：(1) 抓取「第三方平台」頁面設定的 Airbnb／Booking.com／Agoda／Trip 匯入網址，同步新增/更新/取消對應訂單（狀態顯示為「外部平台已訂」），偵測到跟其他訂單撞期時推播提醒真人客服，不會自動處理。(2) 把整合後、目前所有佔用中的訂單（不分來源）同步寫入「基本設定」設定好的 Google 行事曆。不會發送任何訊息給客人。建議設定為每 15~30 分鐘執行一次。',
   },
+  {
+    value: 'process_waitlist',
+    label: '候補自動配對',
+    description: 'AI 訂房流程遇到排不出房或檔期衝突時，會把訂單排入候補並記住是被哪一筆訂單卡住。這個排程會定期檢查候補名單，只要卡住的那筆訂單「有結果」了（變成已預定，或取消/待退款/已退款），就自動重新試算一次報價並主動推播給候補的客人；同一時間有多筆候補時，人數較多的優先。只會重試一次，重試後若仍無法安排會轉真人處理，不會無限重試。建議設定為每 15~30 分鐘執行一次。',
+  },
 ];
 
 function taskTypeOption(value: string) {

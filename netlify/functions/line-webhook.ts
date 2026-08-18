@@ -41,7 +41,7 @@ function deferWrite(label: string, run: () => PromiseLike<unknown>) {
   );
 }
 
-async function flushPendingWrites() {
+export async function flushPendingWrites() {
   while (pendingWrites.length) {
     const queued = pendingWrites;
     pendingWrites = [];
@@ -1035,6 +1035,42 @@ function toSlashDate(isoDate: string | null | undefined): string {
   return (isoDate || '').replace(/-/g, '/');
 }
 
+// ------------------------------------------------------------------------
+// 候補自動回報：訂單被系統擋下（排不出房／檔期衝突）時，除了當下回覆客人，也記一筆
+// 「監看對象」，讓「排程管理」的候補排程之後能自動偵測「有結果了」並主動重新試算、推播。
+// ------------------------------------------------------------------------
+
+// 挑一筆跟這段日期重疊、目前佔用中的訂單當監看對象——不用精準對應到卡到哪個房型，
+// 只要它「有結果」（狀態離開佔用中）就代表值得重新試算一次；抓錯對象頂多晚一點才重新檢查，
+// 不影響正確性，因為重新試算時一律用當下即時房況重算，不是照著這筆監看對象本身的房型判斷。
+// 挑「最近更新」的一筆，通常也最可能是剛好卡到這次詢問的那一筆。
+async function findWaitlistWatchTarget(
+  checkinIso: string,
+  checkoutIso: string,
+  excludeBookingId: string
+): Promise<{ id: string; checkin_date: string; checkout_date: string } | null> {
+  const { data } = await supabase
+    .from('bookings')
+    .select('id, checkin_date, checkout_date')
+    .in('status', OCCUPYING_STATUSES)
+    .neq('id', excludeBookingId)
+    .lt('checkin_date', checkoutIso)
+    .gt('checkout_date', checkinIso)
+    .order('updated_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  return data || null;
+}
+
+// 把「客人想要的區間」跟「卡住他的那筆訂單的區間」交集，換成客人看得懂的日期文字，
+// 訊息裡才能明確講出「哪一天」被佔用，不是只講一句空泛的「有衝突」。
+function formatOverlapRange(reqStart: string, reqEnd: string, blockStart: string, blockEnd: string): string {
+  const start = reqStart > blockStart ? reqStart : blockStart;
+  const end = reqEnd < blockEnd ? reqEnd : blockEnd;
+  if (start >= end) return `${toSlashDate(reqStart)}~${toSlashDate(reqEnd)}`; // 保底防呆：呼叫端已保證有重疊，理論上不會走到這裡
+  return `${toSlashDate(start)}~${toSlashDate(end)}`;
+}
+
 // 不同顧客訂到同一天/同房型（或跟包棟）衝突檢查，比對所有「房間已鎖定」的狀態（待預定～已確認，
 // 含系統待人工確認），不只是已確認，避免同一天有兩筆都還在收訂金階段的訂單互相沒偵測到衝突。
 async function checkBookingConflict(
@@ -1395,7 +1431,8 @@ async function continueBookingFlow(
   }
   // quote 型流程走到這裡，session.bookingId 一定存在——startBookingFlow() 的 quote 分支
   // 一律先建立/接續一筆 bookings 才會進到收集步驟，不會有 quote 型流程沒有 bookingId 的情況。
-  await finishBookingFlow(lineClient, lineEvent, settings, userId, nickname, flow, collected, session.bookingId!);
+  const sendReply = (text: string) => lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text }).then(() => {});
+  await finishBookingFlow(lineClient, sendReply, settings, userId, nickname, flow, collected, session.bookingId!);
 }
 
 // collect 型流程的結尾：不管有沒有收集到什麼，走完最後一步就直接送完成訊息結束。
@@ -1472,15 +1509,24 @@ async function finishQueryFlow(
   await clearBookingSession(userId);
 }
 
+// sendReply：正常訂房流程從 webhook 事件呼叫時是 lineClient.replyMessage(lineEvent.replyToken, ...)；
+// 候補自動重新試算（見 attemptWaitlistRetry）沒有活著的 LINE 事件可以回覆，改用
+// lineClient.pushMessage(userId, ...) 主動推播——抽成參數讓兩邊共用同一套報價/開房/寫入邏輯，
+// 不用維護兩份幾乎一樣、只有「怎麼送出訊息」不同的程式碼。
 async function finishBookingFlow(
   lineClient: Client,
-  lineEvent: any,
+  sendReply: (text: string) => Promise<void>,
   settings: any,
   userId: string,
   nickname: string | null,
   flow: FlowDef,
   collected: Record<string, string>,
-  bookingId: string
+  bookingId: string,
+  // 候補自動重新試算（attemptWaitlistRetry）呼叫時傳 true：這次如果還是排不出房，
+  // 不要再送出「已排入候補」的訊息、也不要再設新的監看對象——呼叫端會統一處理「放棄候補、
+  // 轉真人」的訊息與通知，避免同一次重試對客人送出兩則互相矛盾的訊息（先講「已候補」
+  // 又馬上講「放棄候補」）。
+  isRetry = false
 ) {
   const allFields = flow.steps.flatMap((s) => s.fields);
   const quoteValues: Record<string, string> = {};
@@ -1500,7 +1546,7 @@ async function finishBookingFlow(
 
     const DEFAULT_INCOMPLETE_MESSAGE = '感謝您提供的資訊！我們已經收到，將由客服人員盡快為您確認詳細報價，謝謝您的耐心等候 🙏';
     const replyText = await renderFlowMessage(flow.incompleteMessage || DEFAULT_INCOMPLETE_MESSAGE, settings, userId, nickname, bookingId);
-    await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
+    await sendReply(replyText);
     await logConversation(userId, nickname, 'outbound', replyText, 'system');
 
     const agentIds = parseCsvKeywords(settings.agent_user_ids);
@@ -1527,7 +1573,7 @@ async function finishBookingFlow(
   if (!Number.isFinite(nights) || nights <= 0 || !Number.isFinite(headcount) || headcount <= 0) {
     await supabase.from('bookings').update({ collected_answers: collected, updated_at: new Date().toISOString() }).eq('id', bookingId);
     const replyText = '不好意思，入住日期、退房日期或人數看起來有點對不上，麻煩您點選「真人客服」，我們會盡快為您確認。';
-    await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
+    await sendReply(replyText);
     await logConversation(userId, nickname, 'outbound', replyText, 'system');
     await clearBookingSession(userId);
     return;
@@ -1573,7 +1619,7 @@ async function finishBookingFlow(
         .update({ collected_answers: collected, checkin_date: checkinIso, checkout_date: checkoutIso, nights, headcount, updated_at: new Date().toISOString() })
         .eq('id', bookingId);
       const replyText = '不好意思，這個日期／人數組合目前無法自動試算（可能是超過可接待人數，或低於最少接待人數），麻煩您點選「真人客服」，我們會盡快為您確認房況與價格。';
-      await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
+      await sendReply(replyText);
       await logConversation(userId, nickname, 'outbound', replyText, 'system');
       await clearBookingSession(userId);
       return;
@@ -1593,15 +1639,41 @@ async function finishBookingFlow(
       bookingId,
     });
 
-    // 排不出客人指定的房型組合就轉真人：默默改成別的房型，客人到現場才發現不對。
+    // 排不出客人指定的房型組合：默默改成別的房型，客人到現場才發現不對，所以不硬湊，轉成候補。
+    // 同時間多人詢問到重疊日期時最常見的就是這個分支——先找出是被哪一筆訂單卡住（watchTarget），
+    // 排入候補監看，「排程管理」的候補排程之後會在那筆訂單「有結果」時自動重新試算、主動推播，
+    // 不用客人自己再問一次，也不用客服每筆都手動盯著。真的找不到重疊訂單（理論上不太會發生）
+    // 才維持原本「已經請真人客服為您確認」的做法，直接轉人工。
     if (openedRooms.shortfall.length) {
-      await supabase.from('bookings').update({ collected_answers: collected, status: 'pending_manual_conflict', updated_at: new Date().toISOString() }).eq('id', bookingId);
-      const replyText = `不好意思，您指定的房型組合目前排不出來（${describeShortfall(openedRooms.shortfall)}），已經請真人客服為您確認實際空房，我們會盡快與您聯繫 🙏`;
-      await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
+      if (isRetry) {
+        // 候補重新試算還是排不出來：不送候補訊息、不設新的監看對象，交給 attemptWaitlistRetry
+        // 統一判斷要不要放棄候補、怎麼通知客人與客服。
+        await supabase.from('bookings').update({ collected_answers: collected, status: 'pending_manual_conflict', updated_at: new Date().toISOString() }).eq('id', bookingId);
+        return;
+      }
+
+      const watchTarget = await findWaitlistWatchTarget(checkinIso, checkoutIso, bookingId);
+      await supabase.from('bookings').update({
+        collected_answers: collected,
+        status: 'pending_manual_conflict',
+        waitlist_blocked_by: watchTarget?.id ?? null,
+        updated_at: new Date().toISOString(),
+      }).eq('id', bookingId);
+
+      const replyText = watchTarget
+        ? `感謝您提供的資訊！您想預訂 ${toSlashDate(checkinIso)}~${toSlashDate(checkoutIso)}、${headcount}人入住，不過 ${formatOverlapRange(checkinIso, checkoutIso, watchTarget.checkin_date, watchTarget.checkout_date)} 目前剛好有其他客人也在候位中，我們先幫您排入候補，一有結果會盡快主動回覆您，謝謝您的耐心等候 🙏`
+        : `不好意思，您指定的房型組合目前排不出來（${describeShortfall(openedRooms.shortfall)}），已經請真人客服為您確認實際空房，我們會盡快與您聯繫 🙏`;
+      await sendReply(replyText);
       await logConversation(userId, nickname, 'outbound', replyText, 'system');
+
       for (const id of parseCsvKeywords(settings.agent_user_ids)) {
         try {
-          await lineClient.pushMessage(id, { type: 'text', text: `⚠️ 房型排不出來：【${nickname || '匿名用戶'}】${toSlashDate(checkinIso)}~${toSlashDate(checkoutIso)}，${describeShortfall(openedRooms.shortfall)}，請人工確認。` });
+          await lineClient.pushMessage(id, {
+            type: 'text',
+            text: watchTarget
+              ? `🕒 房型候補中：【${nickname || '匿名用戶'}】${toSlashDate(checkinIso)}~${toSlashDate(checkoutIso)}，${describeShortfall(openedRooms.shortfall)}，已排入自動候補，等卡住的訂單有結果會自動重新試算並通知客人，不用立即處理。`
+              : `⚠️ 房型排不出來：【${nickname || '匿名用戶'}】${toSlashDate(checkinIso)}~${toSlashDate(checkoutIso)}，${describeShortfall(openedRooms.shortfall)}，請人工確認。`,
+          });
         } catch {}
       }
       await clearBookingSession(userId);
@@ -1647,6 +1719,8 @@ async function finishBookingFlow(
         // 是重新試算（狀態理論上還是 inquiring），也不會不小心被改壞。
         status: 'awaiting_deposit',
         collected_answers: collected,
+        // 候補重試成功走到這裡代表已經不再候補了，清掉監看對象，避免留著一個已經沒意義的舊參照。
+        waitlist_blocked_by: null,
         updated_at: new Date().toISOString(),
       })
       .eq('id', bookingId)
@@ -1665,7 +1739,7 @@ async function finishBookingFlow(
       })
     );
 
-    await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: quoteMessage });
+    await sendReply(quoteMessage);
     await logConversation(userId, nickname, 'outbound', quoteMessage, 'system');
 
     await saveBookingSession(userId, {
@@ -1679,7 +1753,7 @@ async function finishBookingFlow(
   } catch (e: any) {
     console.error('[Booking] quote failed:', e.message);
     const replyText = '不好意思，剛剛試算報價時出了一點狀況，麻煩您點選「真人客服」按鈕，我們會盡快為您確認房況與價格。';
-    await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
+    await sendReply(replyText);
     await logConversation(userId, nickname, 'outbound', replyText, 'system');
     await clearBookingSession(userId);
   }
@@ -1753,8 +1827,19 @@ async function handleBookingConfirmation(
   }
 
   if (hasConflict) {
-    await supabase.from('bookings').update({ status: 'pending_manual_conflict', updated_at: new Date().toISOString() }).eq('id', booking.id);
-    const replyText = '非常抱歉，這個日期範圍目前可能已經有其他訂單衝突，需要請真人客服為您確認實際空房狀況，我們會盡快與您聯繫，謝謝您的耐心等候 🙏';
+    // 客人回「是」的當下才發現撞期，通常就是另一位客人剛好搶先確認走了同一批房間——
+    // 找出是被哪一筆訂單卡住（watchTarget），排入候補監看，「排程管理」的候補排程之後
+    // 會在那筆訂單「有結果」（已預定或取消/退款）時自動重新試算、主動推播，不用客人自己再問一次。
+    const watchTarget = await findWaitlistWatchTarget(booking.checkin_date, booking.checkout_date, booking.id);
+    await supabase.from('bookings').update({
+      status: 'pending_manual_conflict',
+      waitlist_blocked_by: watchTarget?.id ?? null,
+      updated_at: new Date().toISOString(),
+    }).eq('id', booking.id);
+
+    const replyText = watchTarget
+      ? `非常抱歉，${formatOverlapRange(booking.checkin_date, booking.checkout_date, watchTarget.checkin_date, watchTarget.checkout_date)} 剛剛被其他客人預訂了，我們先幫您排入候補，一有結果會盡快主動回覆您，謝謝您的耐心等候 🙏`
+      : '非常抱歉，這個日期範圍目前可能已經有其他訂單衝突，需要請真人客服為您確認實際空房狀況，我們會盡快與您聯繫，謝謝您的耐心等候 🙏';
     await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
     await logConversation(userId, nickname, 'outbound', replyText, 'system');
     const agentIds = parseCsvKeywords(settings.agent_user_ids);
@@ -1762,7 +1847,9 @@ async function handleBookingConfirmation(
       try {
         await lineClient.pushMessage(id, {
           type: 'text',
-          text: `⚠️ 檔期衝突通知：【${booking.name || ''}】想確認 ${toSlashDate(booking.checkin_date)}~${toSlashDate(booking.checkout_date)} 訂房，但已有其他訂單日期/房型重疊，請人工核實實際空房狀況並跟客人聯繫。`,
+          text: watchTarget
+            ? `🕒 檔期衝突（已排候補）：【${booking.name || ''}】想確認 ${toSlashDate(booking.checkin_date)}~${toSlashDate(booking.checkout_date)} 訂房，但已有其他訂單重疊，已排入自動候補，等對方有結果會自動重新試算並通知客人，不用立即處理。`
+            : `⚠️ 檔期衝突通知：【${booking.name || ''}】想確認 ${toSlashDate(booking.checkin_date)}~${toSlashDate(booking.checkout_date)} 訂房，但已有其他訂單日期/房型重疊，請人工核實實際空房狀況並跟客人聯繫。`,
         });
       } catch {}
     }
@@ -1872,6 +1959,117 @@ async function handleRemittanceReport(
   }
 
   await clearBookingSession(userId);
+}
+
+// ========================================================================
+// 候補自動回報（排程管理的「候補自動配對」排程呼叫 processWaitlist()）
+//
+// finishBookingFlow／handleBookingConfirmation 排不出房或發現撞期時，除了回覆客人，
+// 也會記一筆 waitlist_blocked_by（監看哪一筆訂單）。這裡定期掃描這些候補中的訂單，
+// 只要監看對象「有結果」了（不再是佔用中狀態），就重新試算一次、主動推播給客人——
+// 只重試這一次，不管成功或還是排不出來，都會清空 waitlist_blocked_by，不會無限重試。
+// ========================================================================
+
+async function notifyWaitlistGiveUp(lineClient: Client, settings: any, booking: any, reason: string) {
+  for (const id of parseCsvKeywords(settings.agent_user_ids)) {
+    try {
+      await lineClient.pushMessage(id, {
+        type: 'text',
+        text: `🔔 候補放棄：【${booking.nickname || booking.name || '匿名用戶'}】訂單 ${booking.order_number || ''} 的自動候補已重試過但仍無法安排（${reason}），請人工確認實際空房並跟客人聯繫。`,
+      });
+    } catch {}
+  }
+}
+
+// 單一候補訂單的重新試算。沿用 finishBookingFlow 同一套算價/開房邏輯，只是資料來源
+// 從「當下客人打的訊息」改成這筆訂單先前存好的 collected_answers，送出方式也從
+// replyMessage 改成 pushMessage——候補排程執行時客人並沒有活著的 LINE 事件可以回覆。
+async function attemptWaitlistRetry(booking: any, settings: any, lineClient: Client): Promise<string> {
+  const label = booking.order_number || booking.id;
+  const flow = booking.flow_id ? await fetchFlowById(booking.flow_id) : null;
+  if (!flow) {
+    // 流程被刪了，或這筆訂單根本不是動態流程建立的：沒辦法自動重新試算，放棄候補、轉真人。
+    await supabase.from('bookings').update({ waitlist_blocked_by: null, updated_at: new Date().toISOString() }).eq('id', booking.id);
+    await notifyWaitlistGiveUp(lineClient, settings, booking, '找不到對應的訂房流程，無法自動重新試算');
+    return `${label}：找不到對應流程，已放棄候補並通知客服`;
+  }
+
+  activeChannelId = booking.channel_id || null;
+  const collected = booking.collected_answers || {};
+  const sendReply = (text: string) => lineClient.pushMessage(booking.line_user_id, { type: 'text', text }).then(() => {});
+
+  try {
+    await finishBookingFlow(lineClient, sendReply, settings, booking.line_user_id, booking.nickname, flow, collected, booking.id, true);
+  } catch (e: any) {
+    console.error('[Waitlist] retry failed:', e.message);
+    return `${label}：候補重試時發生錯誤（${e.message}）`;
+  }
+
+  const { data: after } = await supabase.from('bookings').select('status').eq('id', booking.id).maybeSingle();
+  if (after?.status === 'pending_manual_conflict') {
+    // 重試過還是排不出來：只重試這一次，不繼續無限重試，清空監看對象、轉真人一次性處理。
+    await supabase.from('bookings').update({ waitlist_blocked_by: null, updated_at: new Date().toISOString() }).eq('id', booking.id);
+    await notifyWaitlistGiveUp(lineClient, settings, booking, '重新試算後這個時段仍然排不出房或有衝突');
+    try {
+      await lineClient.pushMessage(booking.line_user_id, {
+        type: 'text',
+        text: '不好意思，重新為您確認後，這個時段目前仍無法安排，已經請真人客服為您確認實際空房狀況，我們會盡快與您聯繫 🙏',
+      });
+      await logConversation(booking.line_user_id, booking.nickname, 'outbound', '（候補重試仍無法安排，已轉真人）', 'system', booking.channel_id);
+    } catch {}
+    return `${label}：候補重試仍無法安排，已轉真人`;
+  }
+
+  return `${label}：候補重試成功，已推播新報價給客人`;
+}
+
+// 掃描所有候補中的訂單，只處理「監看對象已經有結果」的——監看對象不存在了（例如被刪除）
+// 也視為有結果，一併觸發重試，避免永遠卡住。同一批一次有多筆準備好重試時，人數較多的優先，
+// 讓大團體優先卡到剛釋出的房間。
+export async function processWaitlist(): Promise<{ ok: boolean; summary: string }> {
+  const settings = await fetchSettings();
+  if (!settings) return { ok: false, summary: '讀取系統設定失敗' };
+
+  const customerChannel = await resolveChannel(undefined);
+  if (!customerChannel?.channel_access_token) return { ok: false, summary: '找不到客戶用官方帳號憑證，無法推播候補結果' };
+  const lineClient = new Client({ channelAccessToken: customerChannel.channel_access_token, channelSecret: customerChannel.channel_secret });
+
+  const { data: waiting, error } = await supabase
+    .from('bookings')
+    .select('*')
+    .eq('status', 'pending_manual_conflict')
+    .not('waitlist_blocked_by', 'is', null);
+  if (error) return { ok: false, summary: `查詢候補名單失敗：${error.message}` };
+  if (!waiting || !waiting.length) return { ok: true, summary: '目前沒有候補中的訂單' };
+
+  const blockerIds = [...new Set(waiting.map((b: any) => b.waitlist_blocked_by))];
+  const { data: blockers } = await supabase.from('bookings').select('id, status').in('id', blockerIds);
+  const blockerStatusById = new Map((blockers || []).map((b: any) => [b.id, b.status]));
+
+  const ready = waiting.filter((b: any) => {
+    const blockerStatus = blockerStatusById.get(b.waitlist_blocked_by);
+    return blockerStatus === undefined || !OCCUPYING_STATUSES.includes(blockerStatus);
+  });
+  if (!ready.length) return { ok: true, summary: `${waiting.length} 筆候補中，監看對象都還沒有結果` };
+
+  ready.sort((a: any, b: any) => (b.headcount ?? 0) - (a.headcount ?? 0));
+
+  const results: string[] = [];
+  try {
+    for (const booking of ready) {
+      try {
+        results.push(await attemptWaitlistRetry(booking, settings, lineClient));
+      } catch (e: any) {
+        results.push(`${booking.order_number || booking.id}：候補重試發生未預期錯誤（${e.message}）`);
+      }
+    }
+  } finally {
+    // logConversation 等寫入是延後排隊的（deferWrite），平常靠 handler 在 return 前 flush；
+    // 這裡是從另一支 function（scheduled-tasks-run.ts）呼叫進來，沒有人會自動幫忙 flush，
+    // 容器一凍結這些排隊中的寫入就會被砍掉，一定要在這裡自己收尾。
+    await flushPendingWrites();
+  }
+  return { ok: true, summary: results.join('；') };
 }
 
 // ========================================================================
