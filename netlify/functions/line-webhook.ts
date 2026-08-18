@@ -1304,6 +1304,23 @@ async function continueBookingFlow(
           console.error('[Booking] step extraction failed:', e.message);
           return {} as Record<string, string>;
         });
+
+  // system 模式「這一步只問一個自由文字欄位，就把整句話當答案」的捷徑（見
+  // extractStepFieldsWithoutAi）沒有任何格式檢查，什麼都會被接受，包含圖文選單按鈕觸發的固定
+  // 文字——會把按鈕文字誤存成姓名/電話等欄位的答案，還悄悄推進到下一步，客人完全看不出哪裡錯了。
+  // 這裡補一道防線：這句話如果剛好對到「別的」流程的觸發字，就不當作這一欄的答案，讓它照下面
+  // missingFields 的邏輯判斷要不要顯示別的流程的自動回覆。順便快取起來，missingFields 那邊
+  // 不用再查一次。
+  let interruptingFlow: FlowDef | undefined;
+  const soleFreeTextKey =
+    flow.replyMode === 'system' && currentStep.fields.length === 1 && !currentStep.fields[0].quote_field
+      ? currentStep.fields[0].key
+      : null;
+  if (soleFreeTextKey && extracted[soleFreeTextKey] !== undefined) {
+    interruptingFlow = (await fetchActiveFlows()).find((f) => f.id !== flow.id && matchTriggerRules(userMessage, f.triggerRules));
+    if (interruptingFlow) delete extracted[soleFreeTextKey];
+  }
+
   // 格式不符的欄位當作沒收集到（從 extracted 移除，不會寫進 collected），跟「完全沒提到」
   // 分開回覆，讓顧客知道是格式錯誤要重打，不是漏答。'date' 類型會順便把值正規化成 YYYY-MM-DD
   // 存回 extracted，後面算價/確認訊息用到的就是統一格式，不管顧客當初打哪種寫法。
@@ -1331,6 +1348,21 @@ async function continueBookingFlow(
 
   const missingFields = currentStep.fields.filter((f) => !collected[f.key]);
   if (missingFields.length > 0) {
+    // 跟 awaiting_confirmation／awaiting_remittance 同樣的考量：這一步沒抓到欄位，
+    // 也可能是客人點了圖文選單之類的按鈕，剛好對到「別的」流程的觸發字，根本不是在回答
+    // 這一題。這時候要讓那個自動回覆正常顯示，不要用「還需要補充」卡住客人、也不要把這次
+    // 空的擷取結果存回 session——客人晚一點認真回這一題時，原本收集到的資料還在。
+    // 排除目前這個流程本身：重複打到同一個流程的觸發字比較像是想重新開始，不是這裡要處理的情境。
+    // interruptingFlow 上面可能已經查過（免費文字欄位捷徑那段）就直接沿用，沒有才現查。
+    interruptingFlow ??= (await fetchActiveFlows()).find((f) => f.id !== flow.id && matchTriggerRules(userMessage, f.triggerRules));
+    const interruptingFirstStep = interruptingFlow?.steps.find((s) => s.step_order === 1);
+    if (interruptingFirstStep) {
+      const replyText = await renderFlowMessage(interruptingFirstStep.message_template, settings, userId, nickname, null);
+      await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
+      await logConversation(userId, nickname, 'outbound', replyText, 'system');
+      return;
+    }
+
     await saveBookingSession(userId, { ...session, collected });
     const replyText = `還需要麻煩您補充：${missingFields.map((f) => f.label).join('、')}`;
     await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
@@ -1667,6 +1699,21 @@ async function handleBookingConfirmation(
   const isYes = !isNo && /^(是|對|確定|好|要|沒問題|ok|yes)/i.test(trimmed);
 
   if (!isYes && !isNo) {
+    // 這句話不是在回答是/否，很可能是客人點了圖文選單之類的自動回覆按鈕，剛好在等報價回覆
+    // 的當下觸發了另一個流程的關鍵字——這時候該讓那個自動回覆正常顯示，而不是硬用「請回是/否」
+    // 卡住客人（客人根本不知道自己在被問是/否，只會覺得 AI 答非所問）。
+    // 刻意不呼叫 startBookingFlow()：那會建新訂單、覆蓋掉這筆待確認的 session，讓客人之後
+    // 真的回「是」或「否」時已經接不回這筆報價了。這裡只送出對方流程的第一句話當作提示，
+    // session 完全不動，原本待確認的報價繼續安靜留著。
+    const interruptingFlow = (await fetchActiveFlows()).find((f) => matchTriggerRules(trimmed, f.triggerRules));
+    const interruptingFirstStep = interruptingFlow?.steps.find((s) => s.step_order === 1);
+    if (interruptingFirstStep) {
+      const replyText = await renderFlowMessage(interruptingFirstStep.message_template, settings, userId, nickname, null);
+      await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
+      await logConversation(userId, nickname, 'outbound', replyText, 'system');
+      return; // 停留在 awaiting_confirmation，不清 session
+    }
+
     const replyText = '不好意思，麻煩回覆「是」確認訂房，或「否」取消，謝謝！';
     await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
     await logConversation(userId, nickname, 'outbound', replyText, 'system');
@@ -1784,6 +1831,19 @@ async function handleRemittanceReport(
   userMessage: string,
   session: BookingSession
 ) {
+  // 跟 handleBookingConfirmation 同樣的考量：這個階段收到的訊息不一定真的是在回報匯款，
+  // 也可能是客人點了圖文選單之類的按鈕，剛好觸發了另一個流程的關鍵字。原本這裡不分青紅皂白
+  // 把任何訊息都當成匯款回報處理掉（抓不到末五碼、還會把 session 清掉），客人之後真的想
+  // 回報匯款時反而接不上了——先讓那個自動回覆正常顯示，session 保持不動，不當成回報處理。
+  const interruptingFlow = (await fetchActiveFlows()).find((f) => matchTriggerRules(userMessage, f.triggerRules));
+  const interruptingFirstStep = interruptingFlow?.steps.find((s) => s.step_order === 1);
+  if (interruptingFirstStep) {
+    const replyText = await renderFlowMessage(interruptingFirstStep.message_template, settings, userId, nickname, null);
+    await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
+    await logConversation(userId, nickname, 'outbound', replyText, 'system');
+    return; // 停留在 awaiting_remittance，不清 session
+  }
+
   const last5Match = userMessage.match(/\d{5}/); // 抓第一組連續 5 位數字當作匯款帳號後五碼
   const remit_last5 = last5Match ? last5Match[0] : null;
 
