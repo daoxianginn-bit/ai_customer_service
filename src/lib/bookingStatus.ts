@@ -85,14 +85,28 @@ export function bookingStatusCode(status?: string | null): number | null {
   return found ? found.code : null;
 }
 
-// 房間已經鎖定、還沒進入取消/退款流程的狀態，供房況行事曆／檔期衝突檢查判斷「這個日期算不算被佔用」。
-// 定義是「除了 待報價／取消／待退款／已退款 以外的全部」——只要訂單走到「待預定」以後，
-// 這個日期範圍就已經算是保留給這位客人了，一路到已處理都算數（那段日期確實被住過）。
+// 房間已經鎖定、還沒進入取消/退款流程的狀態，供房況行事曆／檔期衝突檢查／OTA 匯出／
+// Google 行事曆判斷「這個日期算不算被佔用」。
+//
+// 分界點是「客人有沒有明確表示要訂」：待報價／待預定都還只是報價階段（AI 算完價、等客人回
+// 「是」），客人隨時可能不訂，房間不該因此鎖起來不讓別人訂。客人回「是」（待確認）以後才算數，
+// 一路到已處理都算數（那段日期確實被住過）。
+//
+// 2026-08 改版曾一度把「待預定」也列進來（報價送出當下就轉待預定＝鎖房），結果是：每問一次價
+// 就永久吃掉一組房間——「訂單自動取消」排程只清「待確認」且要有匯款期限，而匯款期限是客人回
+// 「是」才寫入，所以停在「待預定」的訂單永遠不會自動釋放，連同一位客人重新詢問時都會被自己
+// 上一筆報價擋住。改回不鎖房後，兩位客人有可能拿到同一批房的報價，先回「是」的人拿到，後回的
+// 人會在確認階段被 checkBookingConflict 擋下並告知已被預訂。
 export const OCCUPYING_STATUSES = [
-  'awaiting_deposit', 'awaiting_confirmation', 'reserved', 'awaiting_balance',
+  'awaiting_confirmation', 'reserved', 'awaiting_balance',
   'awaiting_checkin', 'checked_in', 'deposit_processing', 'completed',
   'pending_manual_conflict', 'external_synced',
 ];
+
+// 有日期、但房間還沒鎖定的狀態（報價階段）。房況行事曆要顯示這些訂單，讓管理員看得到
+// 「有人在問這幾天」，但它們不參與任何「這天被佔用了嗎」的判斷——所以刻意跟
+// OCCUPYING_STATUSES 分開，不要合併成同一份清單。
+export const UNRESERVED_WITH_DATES_STATUSES = ['inquiring', 'awaiting_deposit'];
 
 // 已經核對收過訂金（含）以後的狀態，供「客戶資料」頁判斷客戶是否已經「下訂」（而不只是詢問/報價）。
 // 不含 awaiting_confirmation：客人「說」已經匯款了，但客服還沒核對到帳，還不能算數。

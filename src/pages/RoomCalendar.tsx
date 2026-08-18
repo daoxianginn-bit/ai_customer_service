@@ -8,7 +8,7 @@ import { supabase } from '../lib/supabase';
 import { Box, Paper, Stack, Typography, IconButton, Button, Tooltip, Chip, Dialog, DialogTitle, DialogContent } from '@mui/material';
 import { ChevronLeft, ChevronRight, CalendarDays, SlidersHorizontal, X } from 'lucide-react';
 import PageHeaderMui from '../components/ui-mui/PageHeaderMui';
-import { OCCUPYING_STATUSES, bookingStatusLabel } from '../lib/bookingStatus';
+import { OCCUPYING_STATUSES, UNRESERVED_WITH_DATES_STATUSES, bookingStatusLabel } from '../lib/bookingStatus';
 import DateRangeSettingsModal from '../components/DateRangeSettingsModal';
 
 // 行事曆事件用實心色塊呈現，這裡單獨定義（十六進位色碼，直接當 MUI sx/style 用）。
@@ -24,7 +24,7 @@ const STATUS_HEX: Record<string, string> = {
   completed: '#22c55e',
   pending_manual_conflict: '#ef4444',
 };
-const INQUIRING_HEX = '#9ca3af'; // 待報價（已算過價但客人還沒決定，尚未鎖定房型），顏色跟其他狀態區隔用灰色＋虛線框
+const UNRESERVED_HEX = '#9ca3af'; // 報價階段（待報價／待預定：已算過價但客人還沒回「是」，尚未鎖定房間），顏色跟其他狀態區隔用灰色＋虛線框
 
 const CALENDAR_STATUSES = [...OCCUPYING_STATUSES];
 
@@ -52,7 +52,8 @@ interface BookingEvent {
   end: Date;
   allDay: true;
   status: string;
-  inquiring: boolean;
+  /** 報價階段（待報價／待預定）：有日期但房間還沒鎖定，行事曆上用灰色虛線框跟正式訂單區隔 */
+  unreserved: boolean;
   booking: any;
 }
 
@@ -86,9 +87,9 @@ export default function RoomCalendar() {
       const { data: bookings } = await supabase
         .from('bookings')
         .select('id, name, nickname, whole_house, status, checkin_date, checkout_date, room_type_label, total_amount')
-        // inquiring（待報價）也要撈：quoted 已併入 inquiring，「已算過價但客人還沒決定」
-        // 這種有日期、但尚未鎖定房型的訂單，現在就是狀態=inquiring 且有 checkin/checkout_date。
-        .in('status', [...CALENDAR_STATUSES, 'inquiring'])
+        // 報價階段（待報價／待預定）的訂單也要撈：這些有日期、但還沒鎖定房間，
+        // 管理員仍然需要看到「有人在問這幾天」，只是要跟真正鎖房的訂單區隔開來顯示。
+        .in('status', [...CALENDAR_STATUSES, ...UNRESERVED_WITH_DATES_STATUSES])
         .lte('checkin_date', monthEndIso)
         .gt('checkout_date', monthStartIso);
 
@@ -96,7 +97,8 @@ export default function RoomCalendar() {
         .filter((b: any) => b.checkin_date && b.checkout_date)
         .map((b: any) => {
           const guestName = b.name || b.nickname || '未取得';
-          const roomLabel = b.whole_house ? '包棟' : b.room_type_label || (b.status === 'inquiring' ? '未指定房型' : '房型未定');
+          const unreserved = UNRESERVED_WITH_DATES_STATUSES.includes(b.status);
+          const roomLabel = b.whole_house ? '包棟' : b.room_type_label || (unreserved ? '未指定房型' : '房型未定');
           return {
             id: b.id,
             title: `${guestName}（${roomLabel}）`,
@@ -104,7 +106,7 @@ export default function RoomCalendar() {
             end: new Date(`${b.checkout_date}T00:00:00`), // 退房日不算住宿夜，跟 react-big-calendar 多日事件「end 不含」的慣例一致
             allDay: true,
             status: b.status,
-            inquiring: b.status === 'inquiring',
+            unreserved,
             booking: b,
           };
         });
@@ -158,10 +160,10 @@ export default function RoomCalendar() {
 
   const eventPropGetter = (event: BookingEvent) => ({
     style: {
-      backgroundColor: event.inquiring ? INQUIRING_HEX : STATUS_HEX[event.status] || '#9ca3af',
+      backgroundColor: event.unreserved ? UNRESERVED_HEX : STATUS_HEX[event.status] || '#9ca3af',
       color: '#fff',
-      border: event.inquiring ? '1px dashed #fff' : 'none',
-      opacity: event.inquiring ? 0.85 : 1,
+      border: event.unreserved ? '1px dashed #fff' : 'none',
+      opacity: event.unreserved ? 0.85 : 1,
     },
   });
 
@@ -194,8 +196,8 @@ export default function RoomCalendar() {
           </Stack>
         ))}
         <Stack direction="row" alignItems="center" spacing={0.75}>
-          <Box sx={{ width: 12, height: 12, borderRadius: 0.5, bgcolor: INQUIRING_HEX, border: '1px dashed #fff', outline: '1px solid #d1d5db' }} />
-          <Typography variant="caption" color="text.secondary">待報價（未鎖房型）</Typography>
+          <Box sx={{ width: 12, height: 12, borderRadius: 0.5, bgcolor: UNRESERVED_HEX, border: '1px dashed #fff', outline: '1px solid #d1d5db' }} />
+          <Typography variant="caption" color="text.secondary">報價中（未鎖房間）</Typography>
         </Stack>
         <Chip label="旺季" size="small" sx={{ height: 20, fontSize: '0.65rem', bgcolor: '#fed7aa', color: '#9a3412' }} />
         <Chip label="連假" size="small" sx={{ height: 20, fontSize: '0.65rem', bgcolor: '#fecaca', color: '#991b1b' }} />
@@ -246,7 +248,7 @@ export default function RoomCalendar() {
                 <Chip
                   label={bookingStatusLabel(selectedEvent.status)}
                   size="small"
-                  sx={{ bgcolor: selectedEvent.inquiring ? INQUIRING_HEX : STATUS_HEX[selectedEvent.status] || '#9ca3af', color: '#fff' }}
+                  sx={{ bgcolor: selectedEvent.unreserved ? UNRESERVED_HEX : STATUS_HEX[selectedEvent.status] || '#9ca3af', color: '#fff' }}
                 />
               </Box>
             </Stack>

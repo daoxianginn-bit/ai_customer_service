@@ -1053,6 +1053,10 @@ async function findWaitlistWatchTarget(
     .from('bookings')
     .select('id, checkin_date, checkout_date')
     .in('status', OCCUPYING_STATUSES)
+    // 待人工確認的訂單本身沒有真的佔到房間（排不出房的那筆從頭到尾沒登記房間；確認時撞期的
+    // 那筆已經把暫時登記的房間放掉了），拿它當監看對象只會讓候補空等一筆永遠不會自然「有結果」
+    // 的訂單，所以排除掉，改挑真正握著房間的那筆。
+    .neq('status', 'pending_manual_conflict')
     .neq('id', excludeBookingId)
     .lt('checkin_date', checkoutIso)
     .gt('checkout_date', checkinIso)
@@ -1534,6 +1538,23 @@ async function finishBookingFlow(
     if (f.quote_field && collected[f.key] !== undefined) quoteValues[f.quote_field] = collected[f.key];
   }
 
+  // 報價沒算成功時（資料不齊、日期怪怪的、排不出房…），客人最自然的下一步就是把同一張表單
+  // 改一改再送一次。過去這些分支都直接 clearBookingSession()，於是那則重送的表單既沒有進行中的
+  // session、內容又不含流程觸發關鍵字（客人常常只回填數值、沒帶「我要訂房」那幾個字），
+  // 就會一路掉到最下面的一般 AI 問答，由 AI 自己編一句「我們會幫您確認，稍後回覆您」——
+  // 實際上完全沒有建立訂單、也沒有通知任何客服，客人卻以為已經送出了，等於直接掉單。
+  // 改成把 session 停在最後一個步驟：客人重送表單就會被當成重新回答那一步，直接重算報價。
+  // 沒有再送的話，session 自己會在 30 分鐘後逾時，客人會收到「請重新輸入一次」的提示。
+  const keepSessionForRetry = () =>
+    saveBookingSession(userId, {
+      flowId: flow.id,
+      stepIndex: Math.max(0, flow.steps.length - 1),
+      collected,
+      bookingId,
+      phase: 'in_flow',
+      quote: null,
+    });
+
   const hasAllQuoteFields = ['checkin_date', 'checkout_date', 'headcount'].every((k) => quoteValues[k] !== undefined);
 
   if (!hasAllQuoteFields) {
@@ -1558,7 +1579,7 @@ async function finishBookingFlow(
         });
       } catch {}
     }
-    await clearBookingSession(userId);
+    await keepSessionForRetry();
     return;
   }
 
@@ -1572,10 +1593,10 @@ async function finishBookingFlow(
 
   if (!Number.isFinite(nights) || nights <= 0 || !Number.isFinite(headcount) || headcount <= 0) {
     await supabase.from('bookings').update({ collected_answers: collected, updated_at: new Date().toISOString() }).eq('id', bookingId);
-    const replyText = '不好意思，入住日期、退房日期或人數看起來有點對不上，麻煩您點選「真人客服」，我們會盡快為您確認。';
+    const replyText = '不好意思，入住日期、退房日期或人數看起來有點對不上，麻煩您重新填一次，或點選「真人客服」由專人為您確認。';
     await sendReply(replyText);
     await logConversation(userId, nickname, 'outbound', replyText, 'system');
-    await clearBookingSession(userId);
+    await keepSessionForRetry();
     return;
   }
 
@@ -1618,10 +1639,10 @@ async function finishBookingFlow(
         .from('bookings')
         .update({ collected_answers: collected, checkin_date: checkinIso, checkout_date: checkoutIso, nights, headcount, updated_at: new Date().toISOString() })
         .eq('id', bookingId);
-      const replyText = '不好意思，這個日期／人數組合目前無法自動試算（可能是超過可接待人數，或低於最少接待人數），麻煩您點選「真人客服」，我們會盡快為您確認房況與價格。';
+      const replyText = '不好意思，這個日期／人數組合目前無法自動試算（可能是超過可接待人數，或低於最少接待人數），您可以改一下人數或日期再試一次，或點選「真人客服」由專人為您確認房況與價格。';
       await sendReply(replyText);
       await logConversation(userId, nickname, 'outbound', replyText, 'system');
-      await clearBookingSession(userId);
+      await keepSessionForRetry();
       return;
     }
 
@@ -1660,8 +1681,10 @@ async function finishBookingFlow(
         updated_at: new Date().toISOString(),
       }).eq('id', bookingId);
 
+      // 報價階段不再鎖房之後，會走到這裡就代表房間是被「已經確認要訂」的訂單佔走的，
+      // 不是被別人的報價卡住，所以措辭直接講「已經訂滿」，不要含糊說成「有人也在候位」。
       const replyText = watchTarget
-        ? `感謝您提供的資訊！您想預訂 ${toSlashDate(checkinIso)}~${toSlashDate(checkoutIso)}、${headcount}人入住，不過 ${formatOverlapRange(checkinIso, checkoutIso, watchTarget.checkin_date, watchTarget.checkout_date)} 目前剛好有其他客人也在候位中，我們先幫您排入候補，一有結果會盡快主動回覆您，謝謝您的耐心等候 🙏`
+        ? `感謝您提供的資訊！您想預訂 ${toSlashDate(checkinIso)}~${toSlashDate(checkoutIso)}、${headcount}人入住，不過 ${formatOverlapRange(checkinIso, checkoutIso, watchTarget.checkin_date, watchTarget.checkout_date)} 的房間目前已經被訂滿了 🙏\n我們先幫您排入候補，如果這段期間有人取消，會第一時間主動通知您；也歡迎您直接改其他日期讓我們重新試算。`
         : `不好意思，您指定的房型組合目前排不出來（${describeShortfall(openedRooms.shortfall)}），已經請真人客服為您確認實際空房，我們會盡快與您聯繫 🙏`;
       await sendReply(replyText);
       await logConversation(userId, nickname, 'outbound', replyText, 'system');
@@ -1676,7 +1699,7 @@ async function finishBookingFlow(
           });
         } catch {}
       }
-      await clearBookingSession(userId);
+      await keepSessionForRetry();
       return;
     }
 
@@ -1752,10 +1775,10 @@ async function finishBookingFlow(
     });
   } catch (e: any) {
     console.error('[Booking] quote failed:', e.message);
-    const replyText = '不好意思，剛剛試算報價時出了一點狀況，麻煩您點選「真人客服」按鈕，我們會盡快為您確認房況與價格。';
+    const replyText = '不好意思，剛剛試算報價時出了一點狀況，麻煩您再送一次，或點選「真人客服」按鈕，我們會盡快為您確認房況與價格。';
     await sendReply(replyText);
     await logConversation(userId, nickname, 'outbound', replyText, 'system');
-    await clearBookingSession(userId);
+    await keepSessionForRetry();
   }
 }
 
@@ -1827,19 +1850,25 @@ async function handleBookingConfirmation(
   }
 
   if (hasConflict) {
-    // 客人回「是」的當下才發現撞期，通常就是另一位客人剛好搶先確認走了同一批房間——
-    // 找出是被哪一筆訂單卡住（watchTarget），排入候補監看，「排程管理」的候補排程之後
-    // 會在那筆訂單「有結果」（已預定或取消/退款）時自動重新試算、主動推播，不用客人自己再問一次。
+    // 報價階段不鎖房（見 bookingStatus.ts 的 OCCUPYING_STATUSES），所以兩位客人有可能同時拿到
+    // 同一批房的報價；先回「是」的人在這裡把房間鎖走，後回的人就會走到這個分支。
+    //
+    // 這種情況刻意「不排候補」：客人是在明確要下訂的當下被擋，含糊地說「幫您排候補」會讓他
+    // 以為還有機會、繼續空等，不如直接講清楚已經被訂走了，他才能馬上決定要不要改日期。
+    // watchTarget 這裡只拿來算出「是哪幾天」被訂走，不寫進 waitlist_blocked_by。
     const watchTarget = await findWaitlistWatchTarget(booking.checkin_date, booking.checkout_date, booking.id);
+    // 報價當下暫時登記的房間要放掉：這筆訂單沒搶到房，狀態轉成待人工確認後會被算進佔用中，
+    // 不清掉的話等於用一筆沒訂成的訂單把房間鎖住，擋到後面真的要訂的人。
+    await saveBookingRooms(booking.id, []);
     await supabase.from('bookings').update({
       status: 'pending_manual_conflict',
-      waitlist_blocked_by: watchTarget?.id ?? null,
       updated_at: new Date().toISOString(),
     }).eq('id', booking.id);
 
-    const replyText = watchTarget
-      ? `非常抱歉，${formatOverlapRange(booking.checkin_date, booking.checkout_date, watchTarget.checkin_date, watchTarget.checkout_date)} 剛剛被其他客人預訂了，我們先幫您排入候補，一有結果會盡快主動回覆您，謝謝您的耐心等候 🙏`
-      : '非常抱歉，這個日期範圍目前可能已經有其他訂單衝突，需要請真人客服為您確認實際空房狀況，我們會盡快與您聯繫，謝謝您的耐心等候 🙏';
+    const takenRange = watchTarget
+      ? formatOverlapRange(booking.checkin_date, booking.checkout_date, watchTarget.checkin_date, watchTarget.checkout_date)
+      : `${toSlashDate(booking.checkin_date)}~${toSlashDate(booking.checkout_date)}`;
+    const replyText = `非常抱歉，${takenRange} 剛剛已經被其他客人預訂走了，這次沒辦法為您保留 🙏\n如果您想改其他日期，歡迎重新輸入訂房關鍵字為您重新試算，或點選「真人客服」由專人協助您。`;
     await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
     await logConversation(userId, nickname, 'outbound', replyText, 'system');
     const agentIds = parseCsvKeywords(settings.agent_user_ids);
@@ -1847,9 +1876,7 @@ async function handleBookingConfirmation(
       try {
         await lineClient.pushMessage(id, {
           type: 'text',
-          text: watchTarget
-            ? `🕒 檔期衝突（已排候補）：【${booking.name || ''}】想確認 ${toSlashDate(booking.checkin_date)}~${toSlashDate(booking.checkout_date)} 訂房，但已有其他訂單重疊，已排入自動候補，等對方有結果會自動重新試算並通知客人，不用立即處理。`
-            : `⚠️ 檔期衝突通知：【${booking.name || ''}】想確認 ${toSlashDate(booking.checkin_date)}~${toSlashDate(booking.checkout_date)} 訂房，但已有其他訂單日期/房型重疊，請人工核實實際空房狀況並跟客人聯繫。`,
+          text: `⚠️ 檔期被搶先預訂：【${booking.name || nickname || ''}】想確認 ${toSlashDate(booking.checkin_date)}~${toSlashDate(booking.checkout_date)} 訂房，但 ${takenRange} 已被其他客人先行預訂，已如實告知客人。如要協助改期請主動跟進。`,
         });
       } catch {}
     }
