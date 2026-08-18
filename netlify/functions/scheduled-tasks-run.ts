@@ -749,12 +749,19 @@ async function pushBookingsToGoogleCalendar(settings: any): Promise<string> {
 
   for (const b of toPush) {
     const isExternal = b.booking_source !== 'direct';
-    // 外部平台來源的事件標題直接標示頻道名稱（管理員在「第三方平台 iCal 同步」自訂的名字，
-    // 例如「Airbnb 整棟」），讓 Google 行事曆上一眼看得出是哪個平台/頻道來的，不用自己再去猜。
+    const platformLabel = otaPlatformLabel(b.booking_source);
+    // 外部平台剛匯入時沒有真實姓名/人數可用——OTA 的 iCal 只給日期，不會附房客身份資料，
+    // 匯入當下 name 一律是通用預留字串「Airbnb 訂單」（見 syncOneOtaChannel）。如果客服後來
+    // 到「訂單管理」把姓名/人數補上去了（例如去 Airbnb 後台自己查到房客名字），這裡就改用
+    // 跟直接訂單一樣的「平台-姓名 人數人」格式；還沒補之前繼續用「[頻道名] 已預訂」，
+    // 避免顯示出還沒填的空白欄位。
+    const hasRealName = isExternal && b.name && b.name !== `${platformLabel} 訂單`;
     const summaryParts = isExternal
-      ? [`[${channelNameById[b.external_channel_id] || otaPlatformLabel(b.booking_source)}] 已預訂`]
+      ? hasRealName
+        ? [`${platformLabel}-${b.name}${b.headcount ? ` ${b.headcount}人` : ''}`]
+        : [`[${channelNameById[b.external_channel_id] || platformLabel}] 已預訂`]
       : [`${b.name || b.nickname || '未填姓名'} ${b.headcount ?? ''}人`.trim()];
-    if (!isExternal && b.whole_house) summaryParts.push('·包棟');
+    if ((!isExternal || hasRealName) && b.whole_house) summaryParts.push('·包棟');
     if (!isExternal && !BALANCE_PAID_STATUSES.includes(b.status)) summaryParts.push(' ⚠️尾款未收');
     const summary = summaryParts.join('');
 
