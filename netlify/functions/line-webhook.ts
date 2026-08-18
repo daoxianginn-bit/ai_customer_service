@@ -1609,11 +1609,11 @@ async function finishBookingFlow(
         total_amount: amounts.total_amount,
         deposit: amounts.deposit,
         room_type_label: roomTypeLabel,
-        // quoted 已併入 inquiring（待報價本來就涵蓋「已報價、等客人決定」），這裡不需要
-        // 也不應該再把狀態切走——insertNewBooking 建立時就是 inquiring，報價算完仍停在
-        // 同一個狀態，等客人回「是」才會由 handleBookingConfirmation() 轉成 awaiting_deposit。
-        // 顯式寫出來是為了防呆：萬一這張訂單是重新試算（狀態理論上還是 inquiring），也不會不小心被改壞。
-        status: 'inquiring',
+        // 2026-08 改版：報價算完（AI 卡片送出的當下）狀態就直接進「待預定」，不用等客人回「是」——
+        // 「待預定」現在代表「報價已送出，等客人決定是否要訂」；客人回「是」之後轉成「待確認」
+        // （見 handleBookingConfirmation()），等客服核對匯款。顯式寫出來是為了防呆：萬一這張訂單
+        // 是重新試算（狀態理論上還是 inquiring），也不會不小心被改壞。
+        status: 'awaiting_deposit',
         collected_answers: collected,
         updated_at: new Date().toISOString(),
       })
@@ -1723,14 +1723,16 @@ async function handleBookingConfirmation(
     return;
   }
 
-  // 客戶口頭確認、房間鎖定、匯款資訊已送出，但實際匯款尚未核實，所以是「待預定」不是「已預定」；
-  // 之後管理員核對到真的收到訂金匯款，要在「訂單管理」手動改成「已預定」並填入匯款末5碼。
+  // 客戶口頭確認要訂房了，房間鎖定、匯款資訊已送出，但實際匯款尚未核實，所以是「待確認」
+  // 不是「已預定」；之後管理員核對到真的收到訂金匯款，要在「訂單管理」手動改成「已預定」並填入匯款末5碼。
   const nowIso = new Date().toISOString();
   // payment_deadline_at 存真實時間戳（跟訊息裡 [匯款日時間] 顯示的是同一個截止時間），
-  // 供「排程管理」的自動取消逾期未匯款訂單使用。
+  // 供「排程管理」的自動取消逾期未匯款訂單使用——「訂單自動取消」現在對應的是「待確認」狀態
+  // （見 scheduled-tasks-run.ts 的 cancelUnpaidBookings），不是「待預定」，因為「待預定」現在
+  // 代表「報價已送出、還在等客人回是否要訂」，客人根本還沒確認要訂，不該被當成逾期未匯款取消。
   await supabase
     .from('bookings')
-    .update({ status: 'awaiting_deposit', reserved_at: nowIso, payment_deadline_at: computePaymentDeadlineDate(settings).toISOString(), updated_at: nowIso })
+    .update({ status: 'awaiting_confirmation', reserved_at: nowIso, payment_deadline_at: computePaymentDeadlineDate(settings).toISOString(), updated_at: nowIso })
     .eq('id', booking.id);
 
   if (quote.roomNights?.length) {
@@ -1785,19 +1787,14 @@ async function handleRemittanceReport(
   const last5Match = userMessage.match(/\d{5}/); // 抓第一組連續 5 位數字當作匯款帳號後五碼
   const remit_last5 = last5Match ? last5Match[0] : null;
 
-  // 客人回報匯款＝待預定(2)→待確認(3) 的觸發點：客人「說」已經匯款了，但客服還沒核對到帳，
-  // 所以只轉到「待確認」，不是直接進「已預定」——已預定要等客服核對完手動改（見 bookingStatus.ts）。
-  // 只在目前確實是 awaiting_deposit 時才轉，避免在其他狀態下被這句話誤觸發狀態倒退/跳躍。
+  // 2026-08 改版後，狀態早在客人回「是」的當下就已經轉成「待確認」（見 handleBookingConfirmation()），
+  // 這裡不用也不該再轉一次狀態——單純只是把客人這句回報裡抓到的末五碼記錄下來，供客服核對用。
   const { data: booking } = await supabase
     .from('bookings')
     .update({ ...(remit_last5 ? { remit_last5 } : {}), updated_at: new Date().toISOString() })
     .eq('id', session.bookingId)
     .select()
     .single();
-
-  if (booking?.status === 'awaiting_deposit') {
-    await supabase.from('bookings').update({ status: 'awaiting_confirmation' }).eq('id', session.bookingId);
-  }
 
   const replyText = '好的，已收到您的匯款回報，我們核對後會盡快為您確認訂房，謝謝您的耐心等候 🙏';
   await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
@@ -1809,7 +1806,7 @@ async function handleRemittanceReport(
     try {
       await lineClient.pushMessage(id, {
         type: 'text',
-        text: `💰 匯款回報：【${nickname || '匿名用戶'}】訂單 ${orderNumber} 回報${last5Text}\n原文：${userMessage}\n已自動轉為「待確認」，查帳無誤後請至「訂單管理」將狀態改為已預定。`,
+        text: `💰 匯款回報：【${nickname || '匿名用戶'}】訂單 ${orderNumber} 回報${last5Text}\n原文：${userMessage}\n查帳無誤後請至「訂單管理」將狀態改為已預定。`,
       });
     } catch {}
   }

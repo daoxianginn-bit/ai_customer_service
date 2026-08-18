@@ -45,7 +45,7 @@ interface OrderForm {
 const emptyForm = (): OrderForm => ({
   name: '', nickname: '', line_user_id: '', phone: '',
   checkin_date: '', checkout_date: '', headcount: '', adults: '', kids: '', infants: '',
-  whole_house: false, room_type_label: '', room_amount: '', security_deposit: '', total_amount: '', deposit: '', remit_last5: '',
+  whole_house: true, room_type_label: '', room_amount: '', security_deposit: '', total_amount: '', deposit: '', remit_last5: '',
   check_in_password: '', status: 'inquiring', notes: '', linen_change_count: '1',
 });
 
@@ -372,8 +372,11 @@ export default function OrderManagement() {
   const openNew = () => {
     setEditingId(null);
     setForm(emptyForm());
-    skipRecompute.current = true;
-    setSelectedRoomIds([]);
+    // 新訂單預設「是否包棟」為勾選狀態，房間也跟著預設全選（跟打勾 checkbox 的行為一致）——
+    // 這是全新訂單，沒有既有資料要保護，skipRecompute 設 false 讓下面的 effect 直接算出
+    // 預設布巾組合，不用像編輯既有訂單那樣跳過第一次重算。
+    skipRecompute.current = false;
+    setSelectedRoomIds(rooms.map((r) => r.id));
     setUsageRows([]);
     setFormError('');
     setShowForm(true);

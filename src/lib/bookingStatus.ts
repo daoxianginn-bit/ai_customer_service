@@ -30,9 +30,9 @@ export interface BookingStatusOption {
 // 管理員可以在「訂單管理」手動選擇的狀態，依正常流程先後排序（1~9），
 // 例外分支（取消/退款）緊接在後（20~22）。
 export const BOOKING_STATUS_OPTIONS: BookingStatusOption[] = [
-  { value: 'inquiring', label: '待報價', description: '客戶資訊都收集了、或已給報價金額，尚未確認要預訂。', badgeClassName: 'bg-gray-100 text-gray-600', code: 1 },
-  { value: 'awaiting_deposit', label: '待預定', description: '已發送預定單資訊，等待客戶匯款訂金。', badgeClassName: 'bg-yellow-100 text-yellow-700', code: 2 },
-  { value: 'awaiting_confirmation', label: '待確認', description: '客戶已回報已匯款，等待客服核對匯款是否到帳。', badgeClassName: 'bg-amber-100 text-amber-700', code: 3 },
+  { value: 'inquiring', label: '待報價', description: '客戶資訊都收集了，AI 尚未算出報價。', badgeClassName: 'bg-gray-100 text-gray-600', code: 1 },
+  { value: 'awaiting_deposit', label: '待預定', description: 'AI 已算出報價並送出，等待客戶回覆是否要預訂。', badgeClassName: 'bg-yellow-100 text-yellow-700', code: 2 },
+  { value: 'awaiting_confirmation', label: '待確認', description: '客戶已回覆確認要預訂，等待客服核對匯款是否到帳。', badgeClassName: 'bg-amber-100 text-amber-700', code: 3 },
   { value: 'reserved', label: '已預定', description: '已核對收到訂金，距離入住日還早。', badgeClassName: 'bg-purple-100 text-purple-700', code: 4 },
   { value: 'awaiting_balance', label: '待收尾款', description: '已收訂金、未收尾款，距離入住日剩 3 天內。', badgeClassName: 'bg-orange-100 text-orange-700', code: 5 },
   { value: 'awaiting_checkin', label: '待入住', description: '已收尾款，等待入住日到來。', badgeClassName: 'bg-sky-100 text-sky-700', code: 6 },
