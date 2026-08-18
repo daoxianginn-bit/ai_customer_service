@@ -37,7 +37,10 @@ async function fetchCustomerChannel(): Promise<any | null> {
   return data || null;
 }
 
-// 取消逾期未匯款的訂單：status='awaiting_deposit' 且 payment_deadline_at 已過的訂單改成 cancelled。
+// 取消逾期未匯款的訂單：status='awaiting_confirmation' 且 payment_deadline_at 已過的訂單改成 cancelled。
+// 2026-08 改版後，payment_deadline_at 是客人回「是」的當下才寫入（見 handleBookingConfirmation()），
+// 那個時間點狀態已經是「待確認」不是「待預定」——「待預定」現在代表「報價已送出、還在等客人回是否要訂」，
+// 客人根本還沒確認要訂，沒有匯款期限可言，不該被這個排程碰到。
 // 罐頭訊息裡寫「系統將自動取消訂房，不另行通知」是指不通知顧客本人，但客服還是要知道發生了什麼事，
 // 所以會推播給 agent_user_ids。
 async function cancelUnpaidBookings(_config: Record<string, any>, settings: any): Promise<{ ok: boolean; summary: string }> {
@@ -45,7 +48,7 @@ async function cancelUnpaidBookings(_config: Record<string, any>, settings: any)
   const { data: overdue, error } = await supabase
     .from('bookings')
     .select('id, order_number, name, nickname')
-    .eq('status', 'awaiting_deposit')
+    .eq('status', 'awaiting_confirmation')
     .lt('payment_deadline_at', nowIso);
 
   if (error) return { ok: false, summary: `查詢逾期訂單失敗：${error.message}` };
@@ -340,7 +343,11 @@ async function balanceReminder(config: Record<string, any>, settings: any): Prom
   return { ok: true, summary: parts.join('；') };
 }
 
-// 待預定匯款通知：客戶用帳號底下，狀態仍是待預定、且是「昨天」建立的訂單——提醒客人該匯款了。
+// 待預定回覆提醒：客戶用帳號底下，狀態仍是待預定（報價已送出、客人還沒回是否要訂）、
+// 且是「昨天」建立的訂單——提醒客人記得回覆是否要訂房，不是提醒匯款（匯款期限是回「是」之後才開始算，
+// 見 line-webhook.ts 的 handleBookingConfirmation()）。這裡沿用 deposit_awaiting_notice 這個
+// task_type 值不改名，避免已經設定好的排程失效；管理員如果之前用「提醒匯款」的措辭寫過訊息範本，
+// 這次改版後要記得把範本內容改成「提醒回覆」的措辭。
 async function depositAwaitingNotice(config: Record<string, any>, settings: any): Promise<{ ok: boolean; summary: string }> {
   const yesterday = addDaysIso(taiwanTodayIso(), -1);
   const today = taiwanTodayIso();
@@ -358,23 +365,57 @@ async function depositAwaitingNotice(config: Record<string, any>, settings: any)
   return { ok: true, summary: `${data.length} 筆符合條件，通知客人 ${result.pushed} 位成功、${result.failed} 位失敗` };
 }
 
-// 待確認訂單通知：客戶用帳號底下，客人已回報匯款、待客服核對的訂單，彙整通知給通知名單。
-async function awaitingConfirmationNotice(config: Record<string, any>): Promise<{ ok: boolean; summary: string }> {
+// 待確認訂單通知：客戶用帳號底下，客人已回覆確認要訂房、待客服核對匯款的訂單，彙整通知給通知名單。
+// 客人不一定已經回報匯款末五碼（那是選填的後續動作，見 handleRemittanceReport()），
+// 沒提供的話下面的推播訊息會顯示「未提供」，客服要自己去對帳戶核對有沒有收到這筆款項。
+//
+// 訂單建立時間為昨天、狀態仍是待確認的，另外直接推播提醒客人本人記得完成匯款。這件事原本是
+// 「待預定匯款通知」（deposit_awaiting_notice）在做，但 2026-08 那次改版把「待預定」的意思
+// 改成「客人還沒確認要不要訂」，已經不適合拿來提醒匯款；「待確認」才是「客人已經確認、
+// 等核對到帳」，所以直接提醒客人這個動作搬到這裡——待預定回覆提醒維持原本的用途不變
+// （提醒客人記得回覆是否要訂房），兩者分工不同、不是互相取代。
+async function awaitingConfirmationNotice(config: Record<string, any>, settings: any): Promise<{ ok: boolean; summary: string }> {
   const { data, error } = await supabase
     .from('bookings')
     .select('id, order_number, name, nickname, checkin_date, checkout_date, remit_last5')
     .eq('status', 'awaiting_confirmation')
     .order('updated_at');
   if (error) return { ok: false, summary: `查詢失敗：${error.message}` };
-  if (!data?.length) return { ok: true, summary: '沒有待確認的訂單' };
 
-  const result = await pushSummaryToGroup(
-    data,
-    config.notification_group_id,
-    '📋 待確認訂單通知：以下訂單客人已回報匯款，待核對到帳',
-    (b) => `・${b.order_number || b.id.slice(0, 8)}　${b.name || b.nickname || '未知'}　末五碼:${b.remit_last5 || '未提供'}`
-  );
-  return { ok: true, summary: result.skipped ? `${data.length} 筆待確認訂單，${result.skipped}` : `${data.length} 筆待確認訂單，通知 ${result.pushed} 位` };
+  const parts: string[] = [];
+  if (!data?.length) {
+    parts.push('沒有待確認的訂單');
+  } else {
+    const result = await pushSummaryToGroup(
+      data,
+      config.notification_group_id,
+      '📋 待確認訂單通知：以下訂單客人已確認要訂房，待核對匯款到帳',
+      (b) => `・${b.order_number || b.id.slice(0, 8)}　${b.name || b.nickname || '未知'}　末五碼:${b.remit_last5 || '未提供'}`
+    );
+    parts.push(result.skipped ? `${data.length} 筆待確認訂單，${result.skipped}` : `${data.length} 筆待確認訂單，通知 ${result.pushed} 位`);
+  }
+
+  const yesterday = addDaysIso(taiwanTodayIso(), -1);
+  const today = taiwanTodayIso();
+  const { data: createdYesterday, error: cyError } = await supabase
+    .from('bookings')
+    .select('id, order_number, name, nickname, line_user_id, checkin_date, checkout_date, total_amount, deposit, status, created_at')
+    .eq('status', 'awaiting_confirmation')
+    .gte('created_at', `${yesterday}T00:00:00+08:00`)
+    .lt('created_at', `${today}T00:00:00+08:00`);
+
+  if (cyError) {
+    parts.push(`查詢昨天建立的待確認訂單失敗：${cyError.message}`);
+  } else if (createdYesterday?.length) {
+    const direct = await pushToCustomersWithTemplate(createdYesterday, config.template_id, settings);
+    parts.push(
+      direct.skippedNoTemplate
+        ? `${createdYesterday.length} 筆昨天建立、仍待確認，但尚未設定客人提醒範本，略過發送`
+        : `${createdYesterday.length} 筆昨天建立、仍待確認，提醒客人 ${direct.pushed} 位成功、${direct.failed} 位失敗`
+    );
+  }
+
+  return { ok: true, summary: parts.join('；') };
 }
 
 // 入住排程：狀態為待入住、且入住日就是今天的訂單，通知客人本人（含入住密碼——這是唯一會把
@@ -856,7 +897,57 @@ function toScheduleConfig(task: any): ScheduleConfig {
   };
 }
 
-export const handler: Handler = async () => {
+// 「立即執行」（排程管理頁的測試按鈕）：手動觸發單一任務，不管 next_run_at 是否已到期，
+// 也不影響原本的排程節奏——只更新 last_run_*，刻意不動 next_run_at/is_active，
+// 這樣測試完不會打亂使用者原本設定好的排程時間。
+// 這支函式本來是給 Netlify 排程器打的公開端點（cron 觸發沒有登入權杖），但手動觸發是新增的
+// 攻擊面，而且有些任務會實際取消訂單、發 LINE 訊息給客人，所以這條路徑額外要求 Supabase 登入權杖，
+// 跟 custom-messages.ts 同一套作法。
+async function runTaskNow(event: any, taskId: string) {
+  const authHeader = event.headers?.['authorization'] || event.headers?.['Authorization'];
+  const token = authHeader?.replace(/^Bearer\s+/i, '');
+  if (!token) return { statusCode: 401, body: JSON.stringify({ error: '未登入' }) };
+  const { data: userData, error: userError } = await supabase.auth.getUser(token);
+  if (userError || !userData?.user) return { statusCode: 401, body: JSON.stringify({ error: '登入已過期，請重新整理頁面' }) };
+
+  const { data: task, error: taskError } = await supabase.from('scheduled_tasks').select('*').eq('id', taskId).maybeSingle();
+  if (taskError) return { statusCode: 500, body: JSON.stringify({ error: taskError.message }) };
+  if (!task) return { statusCode: 404, body: JSON.stringify({ error: '找不到這個排程' }) };
+
+  const { data: settings } = await supabase.from('settings').select('*').single();
+  if (!settings) return { statusCode: 500, body: JSON.stringify({ error: '讀取系統設定失敗' }) };
+
+  const executor = TASK_EXECUTORS[task.task_type];
+  let result: { ok: boolean; summary: string };
+  if (!executor) {
+    result = { ok: false, summary: `未知的排程類型：${task.task_type}` };
+  } else {
+    try {
+      result = await executor(task.config || {}, settings);
+    } catch (e: any) {
+      result = { ok: false, summary: `執行失敗：${e.message}` };
+    }
+  }
+
+  await supabase
+    .from('scheduled_tasks')
+    .update({
+      last_run_at: new Date().toISOString(),
+      last_run_status: result.ok ? 'success' : 'failed',
+      last_run_summary: `[手動測試] ${result.summary}`,
+    })
+    .eq('id', task.id);
+
+  return { statusCode: 200, body: JSON.stringify(result) };
+}
+
+export const handler: Handler = async (event) => {
+  if (event?.httpMethod === 'POST' && event.body) {
+    let body: any = null;
+    try { body = JSON.parse(event.body); } catch { body = null; }
+    if (body?.taskId) return runTaskNow(event, body.taskId);
+  }
+
   const { data: settings } = await supabase.from('settings').select('*').single();
   if (!settings) return { statusCode: 200, body: 'settings not found, skipped' };
 

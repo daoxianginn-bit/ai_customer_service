@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase';
-import { Clock, Plus, Pencil, Trash2, AlertTriangle, CheckCircle2, XCircle } from 'lucide-react';
+import { Clock, Plus, Pencil, Trash2, AlertTriangle, CheckCircle2, XCircle, PlayCircle } from 'lucide-react';
 import { PageHeader, Button, Modal, ConfirmDialog, Switch, EmptyState } from '../components/ui';
 import { Recurrence, ScheduleConfig, computeNextRunAt, describeSchedule, MIN_INTERVAL_MINUTES } from '../lib/scheduleRecurrence';
 
@@ -18,7 +18,7 @@ const TASK_TYPE_OPTIONS: { value: string; label: string; description: string; ne
   {
     value: 'cancel_unpaid_bookings',
     label: '訂單自動取消',
-    description: '取消狀態為「待預定」、且已經超過匯款期限（[匯款日時間]）的訂單。不會另外通知顧客，但會推播給真人客服帳號。',
+    description: '取消狀態為「待確認」（客人已回是要訂房，但超過匯款期限 [匯款日時間] 仍未回報匯款）的訂單。不會另外通知顧客，但會推播給真人客服帳號。',
   },
   {
     value: 'notify_checkout_completed',
@@ -49,14 +49,15 @@ const TASK_TYPE_OPTIONS: { value: string; label: string; description: string; ne
   },
   {
     value: 'deposit_awaiting_notice',
-    label: '待預定匯款通知',
-    description: '狀態仍是「待預定」、且是昨天建立的訂單，提醒客人本人該匯款了。建議設定為每天 09:00。',
+    label: '待預定回覆提醒',
+    description: '狀態仍是「待預定」（報價已送出、客人還沒回是否要訂）、且是昨天建立的訂單，提醒客人記得回覆是否要訂房。建議設定為每天 09:00。範本內容請寫「提醒回覆」而非「提醒匯款」——匯款是客人回「是」之後才需要做的事。',
     needsTemplate: true,
   },
   {
     value: 'awaiting_confirmation_notice',
     label: '待確認訂單通知',
-    description: '狀態為「待確認」（客人已回報匯款、待核對到帳）的訂單，彙整清單通知給通知名單。建議設定為每天 09:00。',
+    description: '狀態為「待確認」（客人已確認要訂房、待核對匯款到帳）的訂單，彙整清單通知給通知名單；其中訂單建立時間是昨天的，另外直接推播提醒客人本人記得完成匯款。建議設定為每天 09:00。',
+    needsTemplate: true,
     needsGroup: true,
   },
   {
@@ -196,6 +197,8 @@ export default function ScheduledTasks() {
 
   const [deleteTarget, setDeleteTarget] = useState<ScheduledTask | null>(null);
   const [deleting, setDeleting] = useState(false);
+
+  const [runningId, setRunningId] = useState<string | null>(null);
 
   useEffect(() => {
     fetchRows();
@@ -341,6 +344,28 @@ export default function ScheduledTasks() {
     await fetchRows();
   };
 
+  // 立即執行（測試用）：不管 next_run_at 有沒有到期都馬上跑一次，但不影響原本排程的下次執行時間。
+  const runNow = async (row: ScheduledTask) => {
+    setRunningId(row.id);
+    setErrorMsg('');
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const token = sessionData.session?.access_token;
+      const res = await fetch('/.netlify/functions/scheduled-tasks-run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ taskId: row.id }),
+      });
+      const result = await res.json();
+      if (!res.ok) throw new Error(result.error || '執行失敗');
+      await fetchRows();
+    } catch (e: any) {
+      setErrorMsg(`立即執行失敗：${e.message}`);
+    } finally {
+      setRunningId(null);
+    }
+  };
+
   const previewConfig = formToConfig(form);
   const previewNextRun = computeNextRunAt(previewConfig, Date.now());
 
@@ -402,7 +427,15 @@ export default function ScheduledTasks() {
                   </span>
                 </p>
               )}
-              <div className="flex items-center gap-2 pt-1 mt-auto border-t">
+              <div className="flex items-center gap-2 pt-1 mt-auto border-t flex-wrap">
+                <button
+                  onClick={() => runNow(row)}
+                  disabled={runningId === row.id}
+                  className="flex items-center gap-1 text-xs text-blue-600 hover:bg-blue-50 rounded-lg px-2 py-1.5 mt-1 disabled:opacity-50"
+                  title="不管排程時間到了沒，立即測試執行一次；不會影響原本的下次執行時間"
+                >
+                  <PlayCircle className="w-3.5 h-3.5" />{runningId === row.id ? '執行中...' : '立即執行'}
+                </button>
                 <button onClick={() => openEdit(row)} className="flex items-center gap-1 text-xs text-gray-600 hover:bg-gray-100 rounded-lg px-2 py-1.5 mt-1"><Pencil className="w-3.5 h-3.5" />編輯</button>
                 <button onClick={() => setDeleteTarget(row)} className="flex items-center gap-1 text-xs text-red-500 hover:bg-red-50 rounded-lg px-2 py-1.5 mt-1"><Trash2 className="w-3.5 h-3.5" />刪除</button>
               </div>
