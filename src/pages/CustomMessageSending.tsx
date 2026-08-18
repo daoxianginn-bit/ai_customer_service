@@ -46,6 +46,17 @@ interface OrderRow {
   fields: Record<string, string>;
 }
 
+// 「客戶名單」模式專用：一人一列，不像 OrderRow 那樣一筆訂單一列（同一人訂兩次房會出現兩列）。
+interface CustomerRow {
+  line_user_id: string;
+  nickname: string;
+  last_message_at: string | null;
+  booking_count: number;
+  fields: Record<string, string>;
+}
+
+type ListMode = 'orders' | 'customers';
+
 const MAX_BATCH_SEND = 50;
 const PAGE_SIZE = 10;
 
@@ -107,6 +118,13 @@ export default function CustomMessageSending() {
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   const [page, setPage] = useState(0);
 
+  // 「依訂單篩選」（一筆訂單一列）跟「客戶名單」（一人一列，去重）兩種查詢模式切換，
+  // 只有客戶用帳號才有意義（其他帳號本來就是用下方「發送對象」挑該帳號自己的聯絡人）。
+  const [listMode, setListMode] = useState<ListMode>('orders');
+  const [customerRows, setCustomerRows] = useState<CustomerRow[]>([]);
+  const [selectedCustomerKeys, setSelectedCustomerKeys] = useState<Set<string>>(new Set());
+  const [customerPage, setCustomerPage] = useState(0);
+
   const [quota, setQuota] = useState<QuotaInfo | null>(null);
 
   const [showTemplateModal, setShowTemplateModal] = useState(false);
@@ -131,8 +149,15 @@ export default function CustomMessageSending() {
   useEffect(() => {
     if (!channelId) return;
     fetchQuota(channelId);
-    if (channelId !== customerChannelId) fetchContacts(channelId);
-    else { setContacts([]); setContactGroups([]); setSelectedContactIds(new Set()); }
+    if (channelId !== customerChannelId) {
+      fetchContacts(channelId);
+      // 「客戶名單」模式的切換鈕只在客戶用帳號才顯示，離開客戶用帳號時如果還停在那個模式，
+      // 使用者會被卡住（看得到客戶名單面板，卻沒有按鈕能切回訂單模式）。離開時強制切回訂單模式。
+      setListMode('orders');
+      setSelectedCustomerKeys(new Set());
+    } else {
+      setContacts([]); setContactGroups([]); setSelectedContactIds(new Set());
+    }
   }, [channelId, customerChannelId]);
 
   const fetchChannels = async () => {
@@ -210,7 +235,7 @@ export default function CustomMessageSending() {
   const rowKey = (row: OrderRow, index: number) => row.id || row.line_user_id || `row-${index}`;
   const displayName = (row: OrderRow) => row.name || '（未知）';
 
-  const runQuery = async (overrideStatus?: string) => {
+  const runOrderQuery = async (overrideStatus?: string) => {
     setQuerying(true);
     setSelectedKeys(new Set());
     setPage(0);
@@ -233,6 +258,35 @@ export default function CustomMessageSending() {
     }
   };
 
+  // 「客戶名單」模式：一人一列，不吃訂單篩選條件（入住日期/訂單狀態/房型），只吃關鍵字搜尋暱稱。
+  const runCustomerQuery = async () => {
+    setQuerying(true);
+    setSelectedCustomerKeys(new Set());
+    setCustomerPage(0);
+    try {
+      const result = await callCustomMessagesFunction('customers', { keyword });
+      setCustomerRows(result.rows || []);
+      if (result.variables?.length) setVariables(result.variables);
+    } catch (e: any) {
+      alert(`查詢失敗：${e.message}`);
+    } finally {
+      setQuerying(false);
+    }
+  };
+
+  // 「查詢」鈕／Enter／快速篩選都是使用者互動當下觸發，讀取當下的 listMode 不會有 stale closure 問題，
+  // 直接依目前模式分派給對應的查詢函式即可。
+  const runQuery = (overrideStatus?: string) => (listMode === 'customers' ? runCustomerQuery() : runOrderQuery(overrideStatus));
+
+  // 切換模式跟「查詢」鈕不同：這裡是先 setListMode 再馬上要用新模式查詢，如果沿用 runQuery()
+  // 讀 state 會撞到 React 還沒 re-render、listMode 讀到舊值的 stale closure 問題，
+  // 所以直接依「要切換過去的模式」分派，不透過 state 判斷。
+  const switchListMode = (mode: ListMode) => {
+    if (mode === listMode) return;
+    setListMode(mode);
+    if (mode === 'customers') runCustomerQuery(); else runOrderQuery();
+  };
+
   const clearFilters = () => {
     setKeyword('');
     setStartDate('');
@@ -245,7 +299,7 @@ export default function CustomMessageSending() {
   const toggleQuickFilter = (value: string) => {
     const next = status === value ? '' : value;
     setStatus(next);
-    runQuery(next);
+    runOrderQuery(next);
   };
 
   const toggleSelected = (key: string) => {
@@ -273,14 +327,51 @@ export default function CustomMessageSending() {
 
   const selectedOrderRows = rows.filter((r, i) => selectedKeys.has(rowKey(r, i)));
   const selectedTemplate = templates.find((t) => t.id === selectedTemplateId) || null;
-  // 參考訂單：兩種發送模式都可能用到——客戶用帳號時就是「這次要發的那位客人」；
-  // 其他帳號時是選填的「這則通知是關於哪張訂單」，借用它的合併欄位（例如通知內部某張訂單待確認），
-  // 沒選訂單就照原樣發送、不做欄位替換。
-  const referenceOrder = selectedOrderRows[0] || null;
+
+  const pagedCustomerRows = useMemo(() => customerRows.slice(customerPage * PAGE_SIZE, customerPage * PAGE_SIZE + PAGE_SIZE), [customerRows, customerPage]);
+  const totalCustomerPages = Math.max(1, Math.ceil(customerRows.length / PAGE_SIZE));
+
+  const toggleCustomerSelected = (id: string) => {
+    setSelectedCustomerKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSelectAllCustomersOnPage = () => {
+    const pageKeys = pagedCustomerRows.map((r) => r.line_user_id);
+    const allSelected = pageKeys.every((k) => selectedCustomerKeys.has(k));
+    setSelectedCustomerKeys((prev) => {
+      const next = new Set(prev);
+      if (allSelected) pageKeys.forEach((k) => next.delete(k));
+      else pageKeys.forEach((k) => next.add(k));
+      return next;
+    });
+  };
+
+  const selectedCustomerRows = customerRows.filter((r) => selectedCustomerKeys.has(r.line_user_id));
+
+  // 參考資料：客戶用帳號時就是「這次要發的那位客人／那幾位客人」；其他帳號時是選填的
+  // 「這則通知是關於哪張訂單」，借用它的合併欄位（例如通知內部某張訂單待確認），
+  // 沒選就照原樣發送、不做欄位替換。客戶名單模式下沒有「訂單」可以參考，用客戶本身的
+  // 合併欄位（例如 [LINE暱稱]）。
+  const referenceOrder = listMode === 'customers' ? (selectedCustomerRows[0] || null) : (selectedOrderRows[0] || null);
   const previewCustomer = referenceOrder;
 
-  // 實際收件人數量：客戶用帳號＝訂單清單勾選人數；其他帳號＝聯絡人清單勾選人數。
-  const recipientCount = isCustomerChannel ? selectedOrderRows.length : selectedContactIds.size;
+  // 人看得懂的「資料來源」描述，給跨帳號發送時的狀態列／確認視窗用——原本只顯示「已選 N 筆」，
+  // 使用者反應看不出來「勾的到底是哪個客人/訂單」，尤其切到廠商帳號發送時完全看不出這筆資料
+  // 最後會套到哪批收件人身上。這裡把「誰」講清楚，不要只顯示數字。
+  const referenceLabel = !referenceOrder
+    ? null
+    : listMode === 'customers'
+      ? (referenceOrder as CustomerRow).nickname || '（未取得暱稱）'
+      : `${displayName(referenceOrder as OrderRow)}${(referenceOrder as OrderRow).order_number ? `（訂單 ${(referenceOrder as OrderRow).order_number}）` : ''}`;
+
+  // 實際收件人數量：客戶用帳號＝依目前模式（訂單清單或客戶名單）勾選人數；其他帳號＝聯絡人清單勾選人數。
+  const recipientCount = isCustomerChannel
+    ? (listMode === 'customers' ? selectedCustomerRows.length : selectedOrderRows.length)
+    : selectedContactIds.size;
 
   const mergeTemplateLocal = (template: string, fields: Record<string, string>): string => {
     let result = template;
@@ -370,11 +461,14 @@ export default function CustomMessageSending() {
   const confirmSend = async () => {
     setSending(true);
     try {
-      // 客戶用帳號：每位客人各自的訂單欄位（原本的行為）。
+      // 客戶用帳號：依目前模式，訂單清單模式是每位客人各自的訂單欄位（原本的行為）；
+      // 客戶名單模式是每位客人各自的客戶欄位（一人一列，不會因為訂過好幾次房而重複發送）。
       // 其他帳號：收件人是該帳號的聯絡人，line_user_id 池子完全不同；合併欄位借用左側「有沒有
       // 選到參考訂單」——選了就整批通知都套用那張訂單的資訊（例如「請確認訂單 A001」），沒選就照原文發送。
       const recipients = isCustomerChannel
-        ? selectedOrderRows.filter((r) => r.line_user_id).map((r) => ({ lineUserId: r.line_user_id, fields: r.fields, bookingId: r.id }))
+        ? listMode === 'customers'
+          ? selectedCustomerRows.map((r) => ({ lineUserId: r.line_user_id, fields: r.fields }))
+          : selectedOrderRows.filter((r) => r.line_user_id).map((r) => ({ lineUserId: r.line_user_id, fields: r.fields, bookingId: r.id }))
         : [...selectedContactIds].map((id) => ({ lineUserId: id, fields: referenceOrder?.fields || {} }));
 
       const result = await callCustomMessagesFunction('send', { recipients, template: draftBody, channelId });
@@ -392,7 +486,9 @@ export default function CustomMessageSending() {
   };
 
   const recipientDisplayNames = isCustomerChannel
-    ? selectedOrderRows.map((r) => `${displayName(r)}${r.checkin_date ? `（入住 ${r.checkin_date}）` : ''}`)
+    ? listMode === 'customers'
+      ? selectedCustomerRows.map((r) => `${r.nickname || '（未取得暱稱）'}${r.booking_count ? `（累計 ${r.booking_count} 筆訂單）` : ''}`)
+      : selectedOrderRows.map((r) => `${displayName(r)}${r.checkin_date ? `（入住 ${r.checkin_date}）` : ''}`)
     : [...selectedContactIds].map((id) => contacts.find((c) => c.line_user_id === id)?.nickname || id);
 
   return (
@@ -433,11 +529,26 @@ export default function CustomMessageSending() {
       />
 
       {!isCustomerChannel && (
-        <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
-          目前發送帳號是「{channels.find((c) => c.id === channelId)?.name}」（{channelRoleLabel(channels.find((c) => c.id === channelId)?.role)}）——
-          收件人請到下方「發送對象」勾選這個帳號自己的聯絡人，不是左側的訂單清單。左側訂單清單仍可查詢瀏覽，
-          若有勾選一筆訂單，會把它的資訊當作合併欄位套用到這次要發送的內容裡。
-        </p>
+        <div className="bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 space-y-2">
+          <p className="text-xs text-amber-700">
+            目前發送帳號是「<strong>{channels.find((c) => c.id === channelId)?.name}</strong>」（{channelRoleLabel(channels.find((c) => c.id === channelId)?.role)}）。
+            收件人請到下方「發送對象」勾選這個帳號自己的聯絡人或群組，不是左側的訂單清單。
+          </p>
+          {/* 明確畫出「資料來源 → 發送對象」這條線——原本只顯示「已選 N 筆」數字，
+              使用者反應看不出來到底是哪個客人的資料，最後會套到哪批收件人身上。 */}
+          <div className="flex flex-wrap items-center gap-2 text-xs bg-white rounded-lg border border-amber-200 px-3 py-2">
+            <span className="text-gray-400 shrink-0">📋 資料來源</span>
+            <span className={`font-medium ${referenceLabel ? 'text-gray-800' : 'text-gray-400'}`}>
+              {referenceLabel || '未選擇（訊息將原文發送，不套用合併欄位）'}
+            </span>
+            <span className="text-amber-400 shrink-0">→</span>
+            <span className="text-gray-400 shrink-0">📤 發送給</span>
+            <span className={`font-medium ${recipientCount ? 'text-gray-800' : 'text-gray-400'}`}>
+              {channels.find((c) => c.id === channelId)?.name || ''}
+              {recipientCount > 0 ? `　${recipientCount} 位聯絡人/群組` : '（尚未勾選發送對象）'}
+            </span>
+          </div>
+        </div>
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
@@ -445,120 +556,207 @@ export default function CustomMessageSending() {
         <div className="lg:col-span-5 space-y-4">
           <div className="bg-white rounded-xl shadow-sm border overflow-hidden">
             <div className="p-4 border-b space-y-3">
-              <h3 className="font-bold text-gray-800 text-sm">1. 查詢客戶名單</h3>
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="font-bold text-gray-800 text-sm">1. 查詢客戶名單</h3>
+                {isCustomerChannel && (
+                  <div className="flex gap-0.5 p-0.5 bg-gray-100 rounded-lg">
+                    <button
+                      onClick={() => switchListMode('orders')}
+                      className={`px-2.5 py-1 text-xs rounded-md transition-colors ${listMode === 'orders' ? 'bg-white shadow-sm text-gray-800 font-medium' : 'text-gray-500 hover:text-gray-700'}`}
+                    >
+                      依訂單篩選
+                    </button>
+                    <button
+                      onClick={() => switchListMode('customers')}
+                      className={`px-2.5 py-1 text-xs rounded-md transition-colors ${listMode === 'customers' ? 'bg-white shadow-sm text-gray-800 font-medium' : 'text-gray-500 hover:text-gray-700'}`}
+                    >
+                      客戶名單（去重）
+                    </button>
+                  </div>
+                )}
+              </div>
+              {listMode === 'customers' && (
+                <p className="text-xs text-gray-400">
+                  一位客戶一列，不管訂過幾次房都只會出現一次，避免勾到同一人的多筆訂單重複發送。
+                </p>
+              )}
               <input
                 value={keyword}
                 onChange={(e) => setKeyword(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && runQuery()}
-                placeholder="搜尋姓名、電話或訂單編號..."
+                placeholder={listMode === 'customers' ? '搜尋 LINE 暱稱...' : '搜尋姓名、電話或訂單編號...'}
                 className="w-full px-3 py-2 border rounded-lg text-sm"
               />
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="block text-xs text-gray-500 mb-1">入住日期（起）</label>
-                  <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="w-full px-2 py-1.5 border rounded-lg text-sm" />
+              {listMode === 'orders' && (
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">入住日期（起）</label>
+                    <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="w-full px-2 py-1.5 border rounded-lg text-sm" />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">入住日期（迄）</label>
+                    <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} className="w-full px-2 py-1.5 border rounded-lg text-sm" />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">訂單狀態</label>
+                    <select value={status} onChange={(e) => setStatus(e.target.value)} className="w-full px-2 py-1.5 border rounded-lg text-sm bg-white">
+                      {STATUS_OPTIONS.map((o) => (
+                        <option key={o.value} value={o.value}>{o.label}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">房型</label>
+                    <select value={roomType} onChange={(e) => setRoomType(e.target.value)} className="w-full px-2 py-1.5 border rounded-lg text-sm bg-white">
+                      <option value="">全部房型</option>
+                      <option value="包棟">包棟</option>
+                      {roomTypeOptions.map((r) => (
+                        <option key={r.id} value={r.id}>{r.name}</option>
+                      ))}
+                    </select>
+                  </div>
                 </div>
-                <div>
-                  <label className="block text-xs text-gray-500 mb-1">入住日期（迄）</label>
-                  <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} className="w-full px-2 py-1.5 border rounded-lg text-sm" />
-                </div>
-                <div>
-                  <label className="block text-xs text-gray-500 mb-1">訂單狀態</label>
-                  <select value={status} onChange={(e) => setStatus(e.target.value)} className="w-full px-2 py-1.5 border rounded-lg text-sm bg-white">
-                    {STATUS_OPTIONS.map((o) => (
-                      <option key={o.value} value={o.value}>{o.label}</option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-xs text-gray-500 mb-1">房型</label>
-                  <select value={roomType} onChange={(e) => setRoomType(e.target.value)} className="w-full px-2 py-1.5 border rounded-lg text-sm bg-white">
-                    <option value="">全部房型</option>
-                    <option value="包棟">包棟</option>
-                    {roomTypeOptions.map((r) => (
-                      <option key={r.id} value={r.id}>{r.name}</option>
-                    ))}
-                  </select>
-                </div>
-              </div>
+              )}
               <div className="flex gap-2">
                 <Button onClick={() => runQuery()} loading={querying} icon={<Search className="w-4 h-4" />} className="flex-1">
                   {querying ? '查詢中...' : '查詢'}
                 </Button>
                 <Button variant="secondary" onClick={clearFilters} icon={<RotateCcw className="w-4 h-4" />}>清除條件</Button>
               </div>
-              <div className="flex flex-wrap gap-2 pt-1">
-                <span className="text-xs text-gray-400 self-center">快速篩選：</span>
-                {QUICK_FILTER_CHIPS.map((c) => (
-                  <button
-                    key={c.value}
-                    onClick={() => toggleQuickFilter(c.value)}
-                    className={`px-3 py-1 text-xs rounded-full border transition-colors ${status === c.value ? 'bg-green-600 text-white border-green-600' : 'bg-gray-50 text-gray-600 border-gray-200 hover:bg-gray-100'}`}
-                  >
-                    {c.label}
-                  </button>
-                ))}
-              </div>
+              {listMode === 'orders' && (
+                <div className="flex flex-wrap gap-2 pt-1">
+                  <span className="text-xs text-gray-400 self-center">快速篩選：</span>
+                  {QUICK_FILTER_CHIPS.map((c) => (
+                    <button
+                      key={c.value}
+                      onClick={() => toggleQuickFilter(c.value)}
+                      className={`px-3 py-1 text-xs rounded-full border transition-colors ${status === c.value ? 'bg-green-600 text-white border-green-600' : 'bg-gray-50 text-gray-600 border-gray-200 hover:bg-gray-100'}`}
+                    >
+                      {c.label}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
 
-            <div className="overflow-x-auto max-h-[420px] overflow-y-auto">
-              <table className="w-full text-left text-sm">
-                <thead className="bg-gray-50 border-b sticky top-0">
-                  <tr className="text-gray-600">
-                    <th className="py-2 px-3">
-                      <input type="checkbox" checked={pagedRows.length > 0 && pagedRows.every((r, i) => selectedKeys.has(rowKey(r, page * PAGE_SIZE + i)))} onChange={toggleSelectAllOnPage} disabled={!pagedRows.length} />
-                    </th>
-                    <th className="py-2 px-3">姓名</th>
-                    <th className="py-2 px-3">入住日期</th>
-                    <th className="py-2 px-3">人數</th>
-                    <th className="py-2 px-3">房型</th>
-                    <th className="py-2 px-3">訂單狀態</th>
-                    <th className="py-2 px-3">預估報價</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100">
-                  {pagedRows.map((r, i) => {
-                    const key = rowKey(r, page * PAGE_SIZE + i);
-                    return (
-                      <tr key={key} className={selectedKeys.has(key) ? 'bg-green-50' : ''}>
-                        <td className="py-2 px-3">
-                          <input type="checkbox" checked={selectedKeys.has(key)} onChange={() => toggleSelected(key)} />
-                        </td>
-                        <td className="py-2 px-3">{displayName(r)}</td>
-                        <td className="py-2 px-3 whitespace-nowrap">{r.checkin_date}</td>
-                        <td className="py-2 px-3">{r.headcount}</td>
-                        <td className="py-2 px-3">{r.room_type_label}</td>
-                        <td className="py-2 px-3">
-                          {r.status ? <StatusBadge status={r.status} /> : <span className="text-gray-400">-</span>}
-                        </td>
-                        <td className="py-2 px-3 whitespace-nowrap">{r.total_amount ? `NT$ ${Number(r.total_amount).toLocaleString()}` : ''}</td>
+            {listMode === 'customers' ? (
+              <>
+                <div className="overflow-x-auto max-h-[420px] overflow-y-auto">
+                  <table className="w-full text-left text-sm">
+                    <thead className="bg-gray-50 border-b sticky top-0">
+                      <tr className="text-gray-600">
+                        <th className="py-2 px-3">
+                          <input type="checkbox" checked={pagedCustomerRows.length > 0 && pagedCustomerRows.every((r) => selectedCustomerKeys.has(r.line_user_id))} onChange={toggleSelectAllCustomersOnPage} disabled={!pagedCustomerRows.length} />
+                        </th>
+                        <th className="py-2 px-3">LINE 暱稱</th>
+                        <th className="py-2 px-3">累計訂單數</th>
+                        <th className="py-2 px-3">最近互動時間</th>
                       </tr>
-                    );
-                  })}
-                  {pagedRows.length === 0 && (
-                    <tr>
-                      <td colSpan={7} className="py-16 text-center text-gray-400">
-                        {querying
-                          ? '查詢中...'
-                          : roomType && roomType !== '包棟'
-                            ? '這間房目前沒有訂單。房型是依訂單管理裡連結的房間篩選的，舊訂單要先在訂單管理打開、勾選實際開出去的房間才會出現。'
-                            : '查無符合條件的訂單'}
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100">
+                      {pagedCustomerRows.map((r) => (
+                        <tr key={r.line_user_id} className={selectedCustomerKeys.has(r.line_user_id) ? 'bg-green-50' : ''}>
+                          <td className="py-2 px-3">
+                            <input type="checkbox" checked={selectedCustomerKeys.has(r.line_user_id)} onChange={() => toggleCustomerSelected(r.line_user_id)} />
+                          </td>
+                          <td className="py-2 px-3">{r.nickname || '（未取得暱稱）'}</td>
+                          <td className="py-2 px-3">{r.booking_count}</td>
+                          <td className="py-2 px-3 whitespace-nowrap">{r.last_message_at ? new Date(r.last_message_at).toLocaleDateString('zh-TW') : '-'}</td>
+                        </tr>
+                      ))}
+                      {pagedCustomerRows.length === 0 && (
+                        <tr>
+                          <td colSpan={4} className="py-16 text-center text-gray-400">
+                            {querying ? '查詢中...' : '查無符合條件的客戶'}
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+                <div className="flex justify-between items-center px-4 py-3 border-t text-xs text-gray-500">
+                  <span>已選取 {selectedCustomerRows.length} 位（即發送對象）</span>
+                  <div className="flex items-center gap-2">
+                    <button disabled={customerPage === 0} onClick={() => setCustomerPage((p) => p - 1)} className="px-2 py-1 border rounded disabled:opacity-40">‹</button>
+                    <span>{customerPage + 1} / {totalCustomerPages}</span>
+                    <button disabled={customerPage >= totalCustomerPages - 1} onClick={() => setCustomerPage((p) => p + 1)} className="px-2 py-1 border rounded disabled:opacity-40">›</button>
+                  </div>
+                  <span>每頁顯示 {PAGE_SIZE}</span>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="overflow-x-auto max-h-[420px] overflow-y-auto">
+                  <table className="w-full text-left text-sm">
+                    <thead className="bg-gray-50 border-b sticky top-0">
+                      <tr className="text-gray-600">
+                        <th className="py-2 px-3">
+                          <input type="checkbox" checked={pagedRows.length > 0 && pagedRows.every((r, i) => selectedKeys.has(rowKey(r, page * PAGE_SIZE + i)))} onChange={toggleSelectAllOnPage} disabled={!pagedRows.length} />
+                        </th>
+                        <th className="py-2 px-3">姓名</th>
+                        <th className="py-2 px-3">入住日期</th>
+                        <th className="py-2 px-3">人數</th>
+                        <th className="py-2 px-3">房型</th>
+                        <th className="py-2 px-3">訂單狀態</th>
+                        <th className="py-2 px-3">預估報價</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100">
+                      {pagedRows.map((r, i) => {
+                        const key = rowKey(r, page * PAGE_SIZE + i);
+                        const isReference = !isCustomerChannel && referenceOrder === r;
+                        return (
+                          <tr key={key} className={selectedKeys.has(key) ? 'bg-green-50' : ''}>
+                            <td className="py-2 px-3">
+                              <input type="checkbox" checked={selectedKeys.has(key)} onChange={() => toggleSelected(key)} />
+                            </td>
+                            <td className="py-2 px-3">
+                              <span className="inline-flex items-center gap-1">
+                                {displayName(r)}
+                                {isReference && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 border border-amber-200 shrink-0">資料來源</span>}
+                              </span>
+                            </td>
+                            <td className="py-2 px-3 whitespace-nowrap">{r.checkin_date}</td>
+                            <td className="py-2 px-3">{r.headcount}</td>
+                            <td className="py-2 px-3">{r.room_type_label}</td>
+                            <td className="py-2 px-3">
+                              {r.status ? <StatusBadge status={r.status} /> : <span className="text-gray-400">-</span>}
+                            </td>
+                            <td className="py-2 px-3 whitespace-nowrap">{r.total_amount ? `NT$ ${Number(r.total_amount).toLocaleString()}` : ''}</td>
+                          </tr>
+                        );
+                      })}
+                      {pagedRows.length === 0 && (
+                        <tr>
+                          <td colSpan={7} className="py-16 text-center text-gray-400">
+                            {querying
+                              ? '查詢中...'
+                              : roomType && roomType !== '包棟'
+                                ? '這間房目前沒有訂單。房型是依訂單管理裡連結的房間篩選的，舊訂單要先在訂單管理打開、勾選實際開出去的房間才會出現。'
+                                : '查無符合條件的訂單'}
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
 
-            <div className="flex justify-between items-center px-4 py-3 border-t text-xs text-gray-500">
-              <span>已選取 {selectedOrderRows.length} 筆{isCustomerChannel ? '（即發送對象）' : '（供合併欄位參考，非發送對象）'}</span>
-              <div className="flex items-center gap-2">
-                <button disabled={page === 0} onClick={() => setPage((p) => p - 1)} className="px-2 py-1 border rounded disabled:opacity-40">‹</button>
-                <span>{page + 1} / {totalPages}</span>
-                <button disabled={page >= totalPages - 1} onClick={() => setPage((p) => p + 1)} className="px-2 py-1 border rounded disabled:opacity-40">›</button>
-              </div>
-              <span>每頁顯示 {PAGE_SIZE}</span>
-            </div>
+                <div className="px-4 pt-3 pb-1 flex justify-between items-center text-xs text-gray-500 border-t">
+                  <span>已選取 {selectedOrderRows.length} 筆{isCustomerChannel ? '（即發送對象，同一人選多筆訂單會重複發送）' : '（供合併欄位參考，非發送對象）'}</span>
+                  <div className="flex items-center gap-2">
+                    <button disabled={page === 0} onClick={() => setPage((p) => p - 1)} className="px-2 py-1 border rounded disabled:opacity-40">‹</button>
+                    <span>{page + 1} / {totalPages}</span>
+                    <button disabled={page >= totalPages - 1} onClick={() => setPage((p) => p + 1)} className="px-2 py-1 border rounded disabled:opacity-40">›</button>
+                  </div>
+                  <span>每頁顯示 {PAGE_SIZE}</span>
+                </div>
+                {!isCustomerChannel && selectedOrderRows.length > 1 && (
+                  <p className="px-4 pb-3 text-xs text-amber-600">
+                    ⚠️ 只有標示「資料來源」的第一筆會被套用，其餘 {selectedOrderRows.length - 1} 筆勾選不會影響發送內容。
+                  </p>
+                )}
+              </>
+            )}
           </div>
 
           {/* 發送對象：客戶用帳號以外的頻道，收件人從這裡的聯絡人清單勾選（不是上面的訂單清單，
@@ -656,13 +854,16 @@ export default function CustomMessageSending() {
             <h3 className="font-bold text-gray-800 text-sm">3. 發送預覽</h3>
 
             {previewCustomer ? (
-              <div className="border rounded-lg p-3 text-xs space-y-1 bg-gray-50 max-h-48 overflow-y-auto">
-                {Object.entries(previewCustomer.fields).map(([key, value]) => (
-                  <div key={key} className="flex justify-between gap-2">
-                    <span className="text-gray-400 shrink-0">{key}</span>
-                    <span className="text-right break-all">{value || '-'}</span>
-                  </div>
-                ))}
+              <div className="space-y-1">
+                <p className="text-xs text-gray-400">資料來源：<span className="text-gray-700 font-medium">{referenceLabel}</span></p>
+                <div className="border rounded-lg p-3 text-xs space-y-1 bg-gray-50 max-h-48 overflow-y-auto">
+                  {Object.entries(previewCustomer.fields).map(([key, value]) => (
+                    <div key={key} className="flex justify-between gap-2">
+                      <span className="text-gray-400 shrink-0">{key}</span>
+                      <span className="text-right break-all">{value || '-'}</span>
+                    </div>
+                  ))}
+                </div>
               </div>
             ) : (
               <p className="text-xs text-gray-400">勾選左側名單中的顧客，這裡會即時預覽套版後的訊息內容。</p>
@@ -682,6 +883,9 @@ export default function CustomMessageSending() {
 
             <p className="text-xs text-gray-500 pt-2 border-t">
               已勾選 <strong className={recipientCount > MAX_BATCH_SEND ? 'text-red-600' : ''}>{recipientCount}</strong> 位（單次上限 {MAX_BATCH_SEND} 位）
+              {!isCustomerChannel && (
+                <span className="block text-gray-400 mt-0.5">發送帳號：{channels.find((c) => c.id === channelId)?.name}</span>
+              )}
             </p>
 
             <Button onClick={handleSendClick} icon={<Send className="w-4 h-4" />} fullWidth>
@@ -755,10 +959,14 @@ export default function CustomMessageSending() {
           <div className="space-y-3">
             <p>
               即將用「{channels.find((c) => c.id === channelId)?.name}」發送給 <strong>{recipientCount}</strong> 位
-              {isCustomerChannel ? '顧客，訊息內容會依各顧客的報價資訊自動帶入' : '聯絡人'}。是否確認發送？
+              {isCustomerChannel
+                ? listMode === 'customers' ? '顧客' : '顧客，訊息內容會依各顧客的訂單資訊自動帶入'
+                : '聯絡人'}。是否確認發送？
             </p>
             <div className="space-y-1.5">
               <p>✅ 已套用範本：{selectedTemplate?.title || '（自訂內容）'}</p>
+              {!isCustomerChannel && <p>📋 資料來源：{referenceLabel || '無（原文發送，不套用合併欄位）'}</p>}
+              <p>✅ 發送帳號：{channels.find((c) => c.id === channelId)?.name}</p>
               <p>✅ 發送對象：{recipientCount} 位{isCustomerChannel ? '顧客' : '聯絡人'}</p>
               <p>✅ 發送方式：LINE 訊息</p>
             </div>

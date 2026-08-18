@@ -64,6 +64,14 @@ export const handler: Handler = async (event) => {
       return { statusCode: 200, body: JSON.stringify({ variables, rows }) };
     }
 
+    if (body.action === 'customers') {
+      // 「客戶名單」模式：查客戶用帳號底下互動過的人，一人一列（不像 list 那樣一筆訂單一列，
+      // 同一人訂過兩次房會出現兩列，勾兩列發送就會重複發送給同一人）。用於單純想發廣播訊息、
+      // 不需要依訂單條件篩選的情境。
+      const { variables, rows } = await listCustomers(settings, body.keyword);
+      return { statusCode: 200, body: JSON.stringify({ variables, rows }) };
+    }
+
     if (body.action === 'channels') {
       // 給前端的官方帳號下拉選單，以及選定帳號後可以套用的通知名單（不用打開後台另一頁去查）。
       const { data: channels } = await supabase.from('line_channels').select('id, name, role').eq('is_active', true).order('display_order');
@@ -272,6 +280,57 @@ async function listOrders(settings: any, filters: OrderFilters): Promise<{ varia
       fields,
     };
   });
+
+  return { variables: variables.map((v) => v.variable_name), rows };
+}
+
+// ========================================================================
+// 客戶名單查詢：以 user_states 為主要來源（客戶用帳號底下互動過的人，一人一列），
+// 供「客製訊息發送」的「客戶名單」模式使用——跟上面 listOrders() 的差異是不依訂單條件篩選，
+// 單純針對「人」，同一人不會因為訂過好幾次房就出現好幾列、選了就重複發送。
+// ========================================================================
+
+async function listCustomers(settings: any, keyword?: string): Promise<{ variables: string[]; rows: any[] }> {
+  const customerChannel = await fetchChannelById(); // 不帶 id 時退回客戶用帳號，「客戶名單」概念本來就只對客戶用帳號有意義
+  const variables = await fetchMessageVariables();
+  if (!customerChannel) return { variables: variables.map((v) => v.variable_name), rows: [] };
+
+  let query = supabase
+    .from('user_states')
+    .select('line_user_id, nickname, last_message_at, first_message_at, marketing_opt_out')
+    .eq('channel_id', customerChannel.id)
+    .order('last_message_at', { ascending: false, nullsFirst: false })
+    .limit(MAX_ORDERS);
+
+  if (keyword && keyword.trim()) {
+    const kw = keyword.trim().replace(/[%,()]/g, '');
+    query = query.ilike('nickname', `%${kw}%`); // user_states 沒有電話/訂單編號欄位，只能搜暱稱
+  }
+
+  const { data, error } = await query;
+  if (error) throw new Error(error.message || '查詢客戶名單失敗');
+
+  // 不接收行銷訊息的客人一律排除，不能只靠客人自己封鎖官方帳號才退得掉——跟 listOrders() 同一套規則。
+  // marketing_opt_out 舊資料可能是 NULL（欄位加入前就存在的客戶），NULL 要當「沒有退訂」處理，
+  // 所以用 JS 過濾（!c.marketing_opt_out）而不是資料庫層級的 .eq('marketing_opt_out', false)——
+  // 後者在 PostgREST 裡不會比對到 NULL，會把這批老客戶整批誤刪掉。
+  const customers = (data || []).filter((c: any) => !c.marketing_opt_out);
+
+  // 訂單數量純粹是後台顯示用的參考資訊（幫管理員判斷這個人是不是熟客），不影響發送邏輯。
+  const userIds = customers.map((c: any) => c.line_user_id);
+  const bookingCountByUser: Record<string, number> = {};
+  if (userIds.length) {
+    const { data: bookingRows } = await supabase.from('bookings').select('line_user_id').in('line_user_id', userIds);
+    for (const b of bookingRows || []) bookingCountByUser[b.line_user_id] = (bookingCountByUser[b.line_user_id] || 0) + 1;
+  }
+
+  const rows = customers.map((c: any) => ({
+    line_user_id: c.line_user_id,
+    nickname: c.nickname || '',
+    last_message_at: c.last_message_at,
+    booking_count: bookingCountByUser[c.line_user_id] || 0,
+    fields: buildMergeFields(variables, { customer: c, settings }),
+  }));
 
   return { variables: variables.map((v) => v.variable_name), rows };
 }
