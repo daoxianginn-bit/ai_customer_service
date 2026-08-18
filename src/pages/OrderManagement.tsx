@@ -731,7 +731,17 @@ export default function OrderManagement() {
           </div>
           <div className="flex items-end pb-2">
             <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
-              <input type="checkbox" checked={form.whole_house} onChange={(e) => setForm({ ...form, whole_house: e.target.checked })} className="w-4 h-4" />
+              <input
+                type="checkbox"
+                checked={form.whole_house}
+                onChange={(e) => {
+                  setForm({ ...form, whole_house: e.target.checked });
+                  // 包棟＝所有房間都開，勾選當下直接把全部房間帶進去，不用管理員自己一間一間點——
+                  // 房間一變動，下面的布巾用量會透過既有的 useEffect 自動照每間房的預設組合重算。
+                  if (e.target.checked) setSelectedRoomIds(rooms.map((r) => r.id));
+                }}
+                className="w-4 h-4"
+              />
               是否包棟
             </label>
           </div>
