@@ -354,24 +354,32 @@ async function processLineEvent(
     }
 
     // 4.5 動態訂房流程：管理員在「訂房流程設定」自訂的多步驟對話（最多 5 步，每步最多擷取 3 個答案）。
+    //
+    // 進行中的 session 一定要先檢查、優先於「這句話符不符合某個流程的觸發關鍵字」——
+    // 特別是已經送出報價、正在等客人回「是/否」的 awaiting_confirmation 階段。過去這裡是反過來：
+    // 先比對觸發關鍵字，符合就直接開新流程，導致客人明明已經在等報價結果，只要這時候點了
+    // 「其他問題」之類剛好也對到某個流程觸發字的自動回覆圖文選單，就會被悄悄開一個全新的空白
+    // session，把已經收集好的資訊整個蓋掉——客人會看到報價卡片後面立刻接一句「還需要補充」，
+    // 而且怎麼回「是」都卡在同一句，因為當下其實是在回答一個他根本不知道自己開啟的新流程。
     if (settings.is_ai_enabled) {
       const existingSession = loadBookingSession(userState, settings);
-      const activeFlows = await fetchActiveFlows();
-      const matchedFlow = activeFlows.find((f) => matchTriggerRules(userMessage, f.triggerRules));
 
-      if (matchedFlow) {
-        try {
-          await startBookingFlow(lineClient, lineEvent, settings, userId, nickname, matchedFlow);
-        } catch (e: any) {
-          console.error('[Booking] start flow failed:', e.message);
-        }
-        return;
-      }
       if (existingSession) {
         try {
           await continueBookingFlow(lineClient, lineEvent, settings, userId, nickname, userMessage, existingSession);
         } catch (e: any) {
           console.error('[Booking] continue flow failed:', e.message);
+        }
+        return;
+      }
+
+      const activeFlows = await fetchActiveFlows();
+      const matchedFlow = activeFlows.find((f) => matchTriggerRules(userMessage, f.triggerRules));
+      if (matchedFlow) {
+        try {
+          await startBookingFlow(lineClient, lineEvent, settings, userId, nickname, matchedFlow);
+        } catch (e: any) {
+          console.error('[Booking] start flow failed:', e.message);
         }
         return;
       }
