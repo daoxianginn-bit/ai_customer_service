@@ -352,6 +352,12 @@ ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS deposit_percent NUMERIC NOT
 -- 半夜的客服又看不到通知。現在改成後台可調整的「送出後 N 小時」，見 line-webhook.ts 的
 -- computePaymentDeadlineDate()。
 ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS payment_deadline_hours INTEGER NOT NULL DEFAULT 10;
+-- 全流程系統自行比對：開啟後，訂房流程（不分各流程自己的 reply_mode 設定）一律強制走
+-- 純程式規則解析、不呼叫 AI——包含用顧客訊息裡直接出現的日期/人數等資訊，在完全沒對到
+-- 觸發關鍵字的情況下也能自動進入報價流程（見 line-webhook.ts 的 tryStartFlowFromDirectInfo）。
+-- 唯一的例外是付款確認階段的轉帳截圖判讀，那個永遠需要視覺模型，不受這個開關影響。
+-- 預設關閉，不影響任何既有安裝的行為；開啟前請確認目前用的 AI 型號支援圖片輸入。
+ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS booking_system_only_mode BOOLEAN NOT NULL DEFAULT false;
 -- 包棟押金：見上面 security_deposit_amount 的說明，這是給新的（個別房型押金加總 vs 包棟固定金額）
 -- 兩種算法用的正式欄位名稱；security_deposit_amount 保留給包棟繼續用，新程式碼一律讀這個。
 ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS whole_house_security_deposit NUMERIC NOT NULL DEFAULT 3000;
@@ -608,6 +614,16 @@ ALTER TABLE public.booking_flows ADD COLUMN IF NOT EXISTS notify_agent_on_comple
 ALTER TABLE public.booking_flows ADD COLUMN IF NOT EXISTS found_message TEXT;
 ALTER TABLE public.booking_flows ADD COLUMN IF NOT EXISTS not_found_message TEXT;
 
+-- quote 型流程在「報價之後」會用到的三則訊息，全部 NULL 時各自用程式內建的預設文字。
+-- taken_message：顧客回「是」的當下才發現房間已被別人訂走時的回覆。報價階段不鎖房
+--   （見 src/lib/bookingStatus.ts 的 OCCUPYING_STATUSES），所以兩個人可能同時拿到同一批房的
+--   報價，先回「是」的人拿走，後回的人會收到這則訊息、訂單直接取消。
+-- remittance_received_message：顧客回報匯款（末五碼或轉帳成功截圖）且確認內容真的是轉帳資訊後的回覆。
+-- remittance_unclear_message：顧客傳了圖，但看不出是轉帳/交易成功、或抓不到金額與末五碼時的回覆。
+ALTER TABLE public.booking_flows ADD COLUMN IF NOT EXISTS taken_message TEXT;
+ALTER TABLE public.booking_flows ADD COLUMN IF NOT EXISTS remittance_received_message TEXT;
+ALTER TABLE public.booking_flows ADD COLUMN IF NOT EXISTS remittance_unclear_message TEXT;
+
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'booking_flows_flow_type_check') THEN
@@ -759,6 +775,15 @@ ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS payment_deadline_at TIMESTA
 -- 頂多晚一點才重新檢查，不影響正確性。重新試算過（不管成功或放棄）就會清空，不會一直重試。
 ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS waitlist_blocked_by UUID REFERENCES public.bookings(id) ON DELETE SET NULL;
 CREATE INDEX IF NOT EXISTS idx_bookings_waitlist_blocked_by ON public.bookings(waitlist_blocked_by) WHERE waitlist_blocked_by IS NOT NULL;
+
+-- 顧客在報價之後、還沒走完訂房流程之前，又丟了一組新的日期/人數要重新報價時，系統會另外開一筆
+-- 新訂單，並在這裡記下它取代的是哪一筆舊訂單。兩個用途：
+--   1. 重新報價時要把舊那筆排除在「這幾天哪些房被佔用」之外，否則客人會被自己上一筆訂單擋住，
+--      新報價永遠算不出來。
+--   2. 新訂單被顧客確認（回「是」）的當下，把舊那筆一併取消——舊訂單如果還停在「待預定」則是
+--      在重新報價的當下就直接取消（那個狀態沒鎖房，留著沒有意義）。
+ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS supersedes_booking_id UUID REFERENCES public.bookings(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS idx_bookings_supersedes ON public.bookings(supersedes_booking_id) WHERE supersedes_booking_id IS NOT NULL;
 
 UPDATE public.bookings SET room_amount = total_amount WHERE room_amount IS NULL AND total_amount IS NOT NULL;
 

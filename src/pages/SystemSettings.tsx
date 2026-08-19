@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Save, Bot, MessageCircle, UserCheck, Clock, SlidersHorizontal, CalendarDays, CheckCircle2, XCircle } from 'lucide-react';
 import { useSettings } from '../lib/useSettings';
-import { PageHeader, Button } from '../components/ui';
+import { PageHeader, Button, Switch } from '../components/ui';
 import LineChannelsPanel from '../components/LineChannelsPanel';
 import NotificationGroupsPanel from '../components/NotificationGroupsPanel';
 import OtaChannelsPanel from '../components/OtaChannelsPanel';
@@ -127,6 +127,31 @@ export default function SystemSettings() {
             <label className="block text-sm font-medium text-gray-700 mb-1">AI 系統指令 (System Prompt)</label>
             <textarea name="system_prompt" value={settings.system_prompt || ''} onChange={handleChange} rows={4} className="w-full px-4 py-2 border rounded-lg" />
             <p className="text-xs text-gray-400 mt-1">參考資料請至「AI知識庫」新增，會自動附加到此指令後方。</p>
+          </div>
+
+          <div className="border-t pt-6 space-y-3">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h4 className="text-sm font-bold text-gray-600">訂房流程全流程系統自行比對</h4>
+                <p className="text-xs text-gray-400 mt-1">
+                  開啟後，訂房報價流程（收集資訊、系統試算、報價確認、付款確認）一律用純程式規則解析，
+                  不呼叫 AI、不消耗 token——不管每個「訂房流程」自己選的是 AI 模式還是系統模式，
+                  這個開關開著都會強制走系統模式。
+                </p>
+              </div>
+              <Switch
+                checked={settings.booking_system_only_mode === true}
+                onChange={() => setSettings({ ...settings, booking_system_only_mode: !settings.booking_system_only_mode })}
+                title={settings.booking_system_only_mode ? '已開啟' : '已關閉'}
+              />
+            </div>
+            {settings.booking_system_only_mode && (
+              <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 space-y-1">
+                <p>開啟後同時會多一個能力：客人不用先講「訂房」，只要訊息裡直接帶了入住資訊（例如「8/25入住、8/27退房、4人、2間雙人房」），也會自動進報價流程；資料不齊只會問缺少的欄位。</p>
+                <p>只認得比較標準的日期/數字寫法（例如「下週五」這種相對日期讀不出來），讀不出來的欄位一樣會用文字問一次。</p>
+                <p>唯一的例外是<strong>付款確認階段的轉帳截圖判讀</strong>，那個永遠需要視覺模型，不受這個開關影響——請確認「AI 引擎設定」上方選的型號支援圖片輸入。</p>
+              </div>
+            )}
           </div>
         </div>
         )}

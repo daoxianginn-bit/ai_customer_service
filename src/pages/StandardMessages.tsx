@@ -115,6 +115,10 @@ type Flow = {
   notify_agent_on_complete: boolean; // collect 型：完成後要不要推播通知真人客服
   found_message: string; // query 型：查到訂單時的回覆，空字串＝用內建預設文字
   not_found_message: string; // query 型：查無訂單時的回覆，空字串＝用內建預設文字
+  // quote 型「報價之後」的三則訊息，空字串＝用內建預設文字
+  taken_message: string; // 顧客回「是」時房間已被別人訂走
+  remittance_received_message: string; // 確認顧客回報的確實是轉帳資訊之後的回覆
+  remittance_unclear_message: string; // 顧客傳的圖看不出轉帳成功
   is_active: boolean;
   display_order: number;
   steps: FlowStep[];
@@ -133,6 +137,9 @@ const emptyFlow = (displayOrder: number): Flow => ({
   notify_agent_on_complete: true,
   found_message: '',
   not_found_message: '',
+  taken_message: '',
+  remittance_received_message: '',
+  remittance_unclear_message: '',
   is_active: true,
   display_order: displayOrder,
   steps: [{ step_order: 1, message_template: '', fields: [{ key: newId(), label: '', quote_field: '', value_type: '' }] }],
@@ -285,6 +292,9 @@ export default function StandardMessages() {
       notify_agent_on_complete: f.notify_agent_on_complete !== false,
       found_message: f.found_message ?? '',
       not_found_message: f.not_found_message ?? '',
+      taken_message: f.taken_message ?? '',
+      remittance_received_message: f.remittance_received_message ?? '',
+      remittance_unclear_message: f.remittance_unclear_message ?? '',
       is_active: f.is_active,
       display_order: f.display_order,
       steps: (stepRes.data || [])
@@ -414,6 +424,9 @@ export default function StandardMessages() {
         notify_agent_on_complete: draft.notify_agent_on_complete,
         found_message: draft.found_message || null,
         not_found_message: draft.not_found_message || null,
+        taken_message: draft.taken_message || null,
+        remittance_received_message: draft.remittance_received_message || null,
+        remittance_unclear_message: draft.remittance_unclear_message || null,
         is_active: draft.is_active,
         display_order: draft.display_order,
         updated_at: new Date().toISOString(),
@@ -918,6 +931,72 @@ export default function StandardMessages() {
                           </p>
                         </div>
                       )}
+                    </Stage>
+
+                    {/* ⑥ 匯款回報與例外 */}
+                    <Stage index={6} title="匯款回報與例外" icon={<Wallet className="w-4 h-4" />} muted={!quoteCapable}>
+                      <div className="space-y-4">
+                        <p className="text-xs text-gray-400">
+                          付款確認送出後，顧客要回傳「帳號後五碼」或「轉帳明細截圖」。
+                          文字要抓得到 5 位數字、截圖要看得出「轉帳成功／交易成功」才算數；
+                          都不是的話系統不會當成匯款回報，會照顧客的問題正常回答。
+                        </p>
+                        <div>
+                          <label className="block text-xs text-gray-500 mb-1">確認收到匯款回報時的回覆</label>
+                          {editing ? (
+                            <MessageTemplateEditor
+                              value={draft!.remittance_received_message}
+                              onChange={(v) => patchDraft({ remittance_received_message: v })}
+                              placeholders={variables}
+                              rows={3}
+                              placeholder="好的，已收到您的匯款回報，我們核對後會盡快為您確認訂房，謝謝您的耐心等候 🙏"
+                            />
+                          ) : (
+                            <div className="bg-gray-50 rounded-lg p-3">
+                              <VariableText value={current.remittance_received_message || '（未設定，會用內建預設文字）'} knownVariables={variables} />
+                            </div>
+                          )}
+                        </div>
+                        <div>
+                          <label className="block text-xs text-gray-500 mb-1">截圖看不出轉帳成功時的回覆</label>
+                          {editing ? (
+                            <MessageTemplateEditor
+                              value={draft!.remittance_unclear_message}
+                              onChange={(v) => patchDraft({ remittance_unclear_message: v })}
+                              placeholders={variables}
+                              rows={3}
+                              placeholder="不好意思，這張圖我們看不太出來是否為轉帳成功的畫面，麻煩您再傳一次完整的轉帳明細，或直接回覆匯款帳號的後五碼，謝謝您！"
+                            />
+                          ) : (
+                            <div className="bg-gray-50 rounded-lg p-3">
+                              <VariableText value={current.remittance_unclear_message || '（未設定，會用內建預設文字）'} knownVariables={variables} />
+                            </div>
+                          )}
+                        </div>
+                        <div>
+                          <label className="block text-xs text-gray-500 mb-1">
+                            房間已被別人訂走時的回覆
+                            <span className="text-gray-400 ml-1">可用 [已被預訂日期] 帶入實際被訂走的日期</span>
+                          </label>
+                          {editing ? (
+                            <MessageTemplateEditor
+                              value={draft!.taken_message}
+                              onChange={(v) => patchDraft({ taken_message: v })}
+                              placeholders={variables}
+                              rows={4}
+                              placeholder={'非常抱歉，[已被預訂日期] 剛剛已經被其他客人預訂走了，這次沒辦法為您保留 🙏\n如果您想改其他日期，直接把新的日期與人數傳給我們就可以重新為您試算。'}
+                            />
+                          ) : (
+                            <div className="bg-gray-50 rounded-lg p-3">
+                              <VariableText value={current.taken_message || '（未設定，會用內建預設文字）'} knownVariables={variables} />
+                            </div>
+                          )}
+                          <p className="text-xs text-gray-400 mt-1">
+                            報價階段不鎖房，所以兩位顧客可能同時拿到同一批房的報價；先回「是」的人拿到，
+                            後回的那筆會直接取消並送出這則訊息。
+                          </p>
+                        </div>
+                      </div>
                     </Stage>
                   </>
                 ) : flowType === 'query' ? (
