@@ -883,13 +883,23 @@ async function extractStepFields(settings: any, userMessage: string, fields: Flo
 
 // ------------------------------------------------------------------------
 // 系統模式（reply_mode = 'system'）的欄位擷取：完全不呼叫 AI，用純程式解析顧客回覆。
-// 好處是每則訊息省下一次 LLM 呼叫；代價是只認得標準寫法，「下週五」這種相對日期讀不出來，
+// 好處是每則訊息省下一次 LLM 呼叫；代價是只認得具體寫法，「下週五」「明天」這種相對日期讀不出來，
 // 讀不出來的欄位會留空，continueBookingFlow() 就會照原本的邏輯再問一次。
+// 日期支援西元與民國、有無分隔符共 6 種寫法，見 DATE_SCAN_RE。
 // ------------------------------------------------------------------------
 
-// 依序比對：完整年月日 → 「7月30日」→ 「7/30」。最後一組用 (?<!\d)/(?!\d) 夾住，
-// 避免把 2026-07-30 的片段重複當成一個獨立日期。
-const DATE_SCAN_RE = /(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})|(\d{1,2})\s*月\s*(\d{1,2})\s*[日號]?|(?<!\d)(\d{1,2})[-/.](\d{1,2})(?!\d)/g;
+// 支援的寫法（依序比對，先長後短，避免長字串被短規則咬掉一半）：
+//   ce8  西元 8 碼無分隔  20261003
+//   roc7 民國 7 碼無分隔  1151003
+//   fy   年月日帶分隔符   2026/10/03、2026-10-03、115/10/03、115-10-03（3 碼＝民國，4 碼＝西元）
+//   cm   中文月日        10月3日
+//   sm   只有月日        10/3
+// 純數字那幾組一定要用 (?<!\d)/(?!\d) 夾住，否則會從電話、金額這類長數字中間切出一段當日期
+// （例如 0912345678 會被咬出 09123456）。帶分隔符的那組也夾，避免把 2026/10/03 尾巴的
+// 10/03 重複當成第二個日期。
+// 這裡認得的寫法必須跟 normalizeDateInput() 對齊——擷取不到的話，後面的驗證再寬鬆也沒用。
+const DATE_SCAN_RE =
+  /(?<!\d)(?<ce8>\d{8})(?!\d)|(?<!\d)(?<roc7>\d{7})(?!\d)|(?<!\d)(?<fy>\d{3,4})[-/.](?<fm>\d{1,2})[-/.](?<fd>\d{1,2})(?!\d)|(?<cm>\d{1,2})\s*月\s*(?<cd>\d{1,2})\s*[日號]?|(?<!\d)(?<sm>\d{1,2})[-/.](?<sd>\d{1,2})(?!\d)/g;
 
 function taiwanToday(): Date {
   const tw = new Date(Date.now() + 8 * 60 * 60 * 1000);
@@ -910,13 +920,26 @@ function buildIsoDate(month: number, day: number, year?: number): string | null 
   return `${y}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
 }
 
+// 民國年轉西元。民國 115 年＝西元 2026 年，3 碼年份一律當民國——不可能有西元 115 年的訂房。
+const ROC_YEAR_OFFSET = 1911;
+
 function scanDates(message: string): string[] {
   const found: string[] = [];
   for (const m of message.matchAll(DATE_SCAN_RE)) {
+    const g = m.groups || {};
     let iso: string | null = null;
-    if (m[1]) iso = buildIsoDate(Number(m[2]), Number(m[3]), Number(m[1]));
-    else if (m[4]) iso = buildIsoDate(Number(m[4]), Number(m[5]));
-    else if (m[6]) iso = buildIsoDate(Number(m[6]), Number(m[7]));
+    if (g.ce8) {
+      iso = buildIsoDate(Number(g.ce8.slice(4, 6)), Number(g.ce8.slice(6, 8)), Number(g.ce8.slice(0, 4)));
+    } else if (g.roc7) {
+      iso = buildIsoDate(Number(g.roc7.slice(3, 5)), Number(g.roc7.slice(5, 7)), Number(g.roc7.slice(0, 3)) + ROC_YEAR_OFFSET);
+    } else if (g.fy) {
+      iso = buildIsoDate(Number(g.fm), Number(g.fd), g.fy.length === 4 ? Number(g.fy) : Number(g.fy) + ROC_YEAR_OFFSET);
+    } else if (g.cm) {
+      iso = buildIsoDate(Number(g.cm), Number(g.cd));
+    } else if (g.sm) {
+      iso = buildIsoDate(Number(g.sm), Number(g.sd));
+    }
+    // buildIsoDate 會擋掉月份 13、2/30 這種不存在的日期，回 null 就當作沒抓到。
     if (iso && !found.includes(iso)) found.push(iso);
   }
   return found;
@@ -925,9 +948,10 @@ function scanDates(message: string): string[] {
 // 「這句話裡有沒有看起來像日期的東西」——純字串比對，不呼叫 AI。
 // 用途是當一道便宜的閘門：顧客在等回「是」或等回報匯款的階段又丟訊息過來時，只有在真的
 // 像是「改了日期要重新報價」的時候，才值得花一次 AI 擷取去確認（見 tryRequoteWithNewBookingInfo）。
-// 認得 DATE_SCAN_RE 的所有寫法，外加顧客照著表單直接填的「20261003」這種 8 碼寫法——
-// 那種寫法 DATE_SCAN_RE 認不出來，但 AI 擷取得出來，所以閘門這裡要放行。
-// 8 碼會驗年月日是否合理，避免把帳號、金額之類的長數字誤認成日期。
+// 認得 DATE_SCAN_RE 的所有寫法。另外多放行一種 DATE_SCAN_RE 會擋掉的情況：8 碼數字的年月
+// 合理、但「日」不存在（例如 20260230）。那種顯然是顧客想填日期只是填錯了，值得讓 AI 去看一眼
+// 順便糾正他，不該被當成「跟訂房無關的訊息」丟給知識庫問答。年份限 2000~2100，
+// 避免把帳號、金額之類的長數字誤認成日期。
 function looksLikeBookingDates(message: string): boolean {
   if (scanDates(message).length > 0) return true;
   for (const m of message.matchAll(/(?<!\d)(\d{4})(\d{2})(\d{2})(?!\d)/g)) {
