@@ -726,6 +726,10 @@ CREATE TABLE IF NOT EXISTS public.ota_channels (
     created_at TIMESTAMPTZ DEFAULT now(),
     updated_at TIMESTAMPTZ DEFAULT now()
 );
+-- 這個頻道專屬的「關房字樣」補充清單（逗號分隔，比對時不分大小寫）。
+-- 判斷「真訂單 vs 關房」的內建規則在 src/lib/otaEventFilter.ts，平台改措辭時管理員可以在後台
+-- 直接補字樣、不用改程式。留空就只套內建規則。
+ALTER TABLE public.ota_channels ADD COLUMN IF NOT EXISTS extra_block_keywords TEXT;
 CREATE INDEX IF NOT EXISTS idx_ota_channels_active ON public.ota_channels(is_active) WHERE is_active;
 
 -- booking_source：這筆訂單是怎麼來的。'direct' 涵蓋 LINE 訂房流程與後台手動建單，
@@ -734,6 +738,19 @@ ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS booking_source TEXT NOT NUL
   CHECK (booking_source IN ('direct', 'airbnb', 'booking', 'agoda', 'trip'));
 ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS external_channel_id UUID REFERENCES public.ota_channels(id) ON DELETE SET NULL;
 ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS external_uid TEXT; -- 來源平台 iCal 裡的 VEVENT UID，供比對是否為同一筆、是否已從來源移除
+-- 平台端的訂單確認碼（Airbnb 的 HMYSQ5EZ8R 這種，藏在 DESCRIPTION 的訂房連結裡）。
+-- 跟 external_uid 是兩個不同的東西：UID 一定存在、格式穩定，所以拿它當去重鍵；確認碼可能撈不到，
+-- 只用來顯示與人工對帳（Google 行事曆標題、客服到平台後台查訂單）。
+ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS external_confirmation_code TEXT;
+-- 來源事件原文（該筆 VEVENT 的完整內容），規格要求保留原始資料供日後查核與重新同步；
+-- 平台改格式導致判讀出錯時，有原文才查得出當初實際收到什麼。
+ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS external_raw_payload TEXT;
+-- 第三方訂單跟其他訂單撞期時的旗標。刻意不改 status——status 表達的是訂單生命週期，
+-- 而「撞期待查核」是額外的註記，混在一起會分不出「外部匯入的撞期」跟「LINE 訂房流程的撞期」。
+-- 依規格：只標記第三方那一筆，本地訂單不動。處理完由人工在「訂單管理」清除。
+ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS ota_conflict_with UUID REFERENCES public.bookings(id) ON DELETE SET NULL;
+ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS ota_conflict_detected_at TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS idx_bookings_ota_conflict ON public.bookings(ota_conflict_detected_at) WHERE ota_conflict_detected_at IS NOT NULL;
 -- 同一個頻道底下 external_uid 不能重複，但允許多個頻道各自用到相同的 UID 字串（不同平台的 UID 互不相關），
 -- 也允許 external_channel_id 是 null（一般訂單，這個限制不適用）。
 CREATE UNIQUE INDEX IF NOT EXISTS idx_bookings_external_uid ON public.bookings(external_channel_id, external_uid) WHERE external_channel_id IS NOT NULL;

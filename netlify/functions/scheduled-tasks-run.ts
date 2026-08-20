@@ -7,6 +7,7 @@ import { computeNextRunAt, ScheduleConfig } from '../../src/lib/scheduleRecurren
 import { OCCUPYING_STATUSES, BALANCE_PAID_STATUSES } from '../../src/lib/bookingStatus';
 import { parseIcsEvents } from '../../src/lib/icsParser';
 import { otaPlatformLabel } from '../../src/lib/otaChannels';
+import { classifyOtaEvent } from '../../src/lib/otaEventFilter';
 import { processWaitlist } from './line-webhook';
 
 // ========================================================================
@@ -494,7 +495,9 @@ async function laundryNotice(config: Record<string, any>): Promise<{ ok: boolean
 
 // 跟 line-webhook.ts 的 checkBookingConflict 同一套邏輯（日期重疊 + whole_house/booking_rooms
 // 房型比對），這裡另外排除自己這筆（更新既有匯入事件時，不該把自己算成衝突對象）。
-async function checkOtaConflict(channel: any, ev: { startIso: string; endIso: string }, selfBookingId: string | null): Promise<boolean> {
+// 回傳撞到的那一筆訂單 id（沒撞到就是 null）——要記進 bookings.ota_conflict_with 供人工查核，
+// 所以不能只回傳 true/false。
+async function checkOtaConflict(channel: any, ev: { startIso: string; endIso: string }, selfBookingId: string | null): Promise<string | null> {
   let query = supabase
     .from('bookings')
     .select('id, whole_house')
@@ -503,19 +506,20 @@ async function checkOtaConflict(channel: any, ev: { startIso: string; endIso: st
     .gt('checkout_date', ev.startIso);
   if (selfBookingId) query = query.neq('id', selfBookingId);
   const { data: overlapping } = await query;
-  if (!overlapping?.length) return false;
+  if (!overlapping?.length) return null;
 
-  if (!channel.room_type_id) return true; // 整棟頻道：任何日期重疊都算衝突
-  if (overlapping.some((b: any) => b.whole_house)) return true;
+  if (!channel.room_type_id) return overlapping[0].id; // 整棟頻道：任何日期重疊都算衝突
+  const wholeHouseHit = overlapping.find((b: any) => b.whole_house);
+  if (wholeHouseHit) return wholeHouseHit.id;
 
   const individualIds = overlapping.filter((b: any) => !b.whole_house).map((b: any) => b.id);
-  if (!individualIds.length) return false;
+  if (!individualIds.length) return null;
   const { data: roomLinks } = await supabase
     .from('booking_rooms')
     .select('booking_id')
     .eq('room_type_id', channel.room_type_id)
     .in('booking_id', individualIds);
-  return !!(roomLinks && roomLinks.length);
+  return roomLinks?.length ? roomLinks[0].booking_id : null;
 }
 
 async function syncOneOtaChannel(channel: any): Promise<{ summary: string; conflictLines: string[] }> {
@@ -531,37 +535,75 @@ async function syncOneOtaChannel(channel: any): Promise<{ summary: string; confl
     return { summary: `${channel.name}：${msg}`, conflictLines: [] };
   }
 
-  const events = parseIcsEvents(icsText);
-  const seenUids = new Set(events.map((e) => e.uid));
+  const allEvents = parseIcsEvents(icsText);
+
+  // 只收「該平台真正成立的訂單」，關房事件一律忽略（見 src/lib/otaEventFilter.ts）。
+  // 關房的來源可能是房東手動封房、平台的可預訂範圍上限，也可能是我們自己匯出過去的本地訂單
+  // 被平台轉成 Not available 又吐回來；照收會讓同一段日期變成兩筆，也會被那種長達數個月的
+  // 「超出可預訂範圍」封鎖整段鎖死房況。
+  const extraBlockKeywords = parseCsvKeywords(channel.extra_block_keywords);
+  const reservations: { ev: (typeof allEvents)[number]; info: ReturnType<typeof classifyOtaEvent> }[] = [];
+  const blockedUids = new Set<string>();
+  for (const ev of allEvents) {
+    const info = classifyOtaEvent(channel.platform, ev, extraBlockKeywords);
+    if (info.kind === 'reservation') reservations.push({ ev, info });
+    else blockedUids.add(ev.uid);
+  }
+
+  // 「這次抓到的 UID」要包含被過濾掉的關房事件——下面判斷「來源已移除」時用的是這一份。
+  // 如果只放真訂單，那些被規則擋下的 UID 會被誤判成「平台那邊刪掉了」而把對應訂單自動取消；
+  // 一旦平台改措辭導致真訂單被誤判成關房，就會反過來把已收的真訂單取消掉、房間被釋出，
+  // 靜悄悄超賣。分開兩份之後，規則寫錯最多是「漏收新訂單」，不會取消既有訂單。
+  const seenUids = new Set(allEvents.map((e) => e.uid));
 
   const { data: existingRows } = await supabase
     .from('bookings')
-    .select('id, external_uid, checkin_date, checkout_date')
+    .select('id, external_uid, checkin_date, checkout_date, order_number, status')
     .eq('external_channel_id', channel.id);
   const existingByUid = new Map((existingRows || []).map((r: any) => [r.external_uid, r]));
+
+  // 過濾規則上線前就已經被當成訂單匯入的關房事件（例如平台那筆長達數個月的「超出可預訂範圍」
+  // 封鎖），現在依規則判定成關房，但刻意不自動取消——那跟「規則誤判真訂單」在資料上長得一樣，
+  // 自動取消等於把保護機制繞過去。改成列出來讓人工到「訂單管理」確認後自行取消。
+  const staleBlocks = (existingRows || []).filter(
+    (r: any) => r.external_uid && blockedUids.has(r.external_uid) && r.status !== 'cancelled'
+  );
 
   let created = 0;
   let updated = 0;
   const conflictLines: string[] = [];
 
-  for (const ev of events) {
+  // 撞期只在「旗標從無到有」時才推播，否則每 15 分鐘跑一次排程就會把同一筆重複轟炸客服。
+  const notifyConflict = async (bookingId: string, conflictWith: string, ev: { startIso: string; endIso: string }) => {
+    const { data: before } = await supabase.from('bookings').select('ota_conflict_detected_at').eq('id', bookingId).maybeSingle();
+    await supabase.from('bookings').update({ ota_conflict_with: conflictWith, ota_conflict_detected_at: nowIso }).eq('id', bookingId);
+    if (!before?.ota_conflict_detected_at) conflictLines.push(`・${channel.name}　${ev.startIso}~${ev.endIso}`);
+  };
+
+  for (const { ev, info } of reservations) {
     const existing = existingByUid.get(ev.uid);
 
     if (existing) {
       const changed = existing.checkin_date !== ev.startIso || existing.checkout_date !== ev.endIso;
       if (changed) {
-        await supabase.from('bookings').update({ checkin_date: ev.startIso, checkout_date: ev.endIso, status: 'external_synced', updated_at: nowIso }).eq('id', existing.id);
+        await supabase.from('bookings').update({
+          checkin_date: ev.startIso,
+          checkout_date: ev.endIso,
+          status: 'external_synced',
+          external_confirmation_code: info.confirmationCode,
+          external_raw_payload: ev.raw,
+          updated_at: nowIso,
+        }).eq('id', existing.id);
         updated++;
-        if (await checkOtaConflict(channel, ev, existing.id)) {
-          conflictLines.push(`・${channel.name}　${ev.startIso}~${ev.endIso}`);
-        }
       }
+      // 日期沒變也要重驗衝突：擋住它的那筆本地訂單可能是這次同步之後才被取消或新增的。
+      const conflictWith = await checkOtaConflict(channel, ev, existing.id);
+      if (conflictWith) await notifyConflict(existing.id, conflictWith, ev);
+      else await supabase.from('bookings').update({ ota_conflict_with: null, ota_conflict_detected_at: null }).eq('id', existing.id);
       continue;
     }
 
-    if (await checkOtaConflict(channel, ev, null)) {
-      conflictLines.push(`・${channel.name}　${ev.startIso}~${ev.endIso}`);
-    }
+    const conflictWith = await checkOtaConflict(channel, ev, null);
 
     // 訂單編號用「頻道名稱-短碼」，讓後台列表跟 Google 行事曆上都能一眼看出這筆是從哪個
     // 平台/頻道匯入的（頻道名稱本來就是管理員在「第三方平台 iCal 同步」自訂的，例如
@@ -580,12 +622,19 @@ async function syncOneOtaChannel(channel: any): Promise<{ summary: string; confl
         booking_source: channel.platform,
         external_channel_id: channel.id,
         external_uid: ev.uid,
+        external_confirmation_code: info.confirmationCode,
+        external_raw_payload: ev.raw,
         order_number: `${channel.name}-${newId.slice(0, 8)}`,
         name: `${otaPlatformLabel(channel.platform)} 訂單`,
         room_type_label: channel.room_type_id ? channel.name : null,
+        // 平台不給客人姓名，只給得到電話末 4 碼（Airbnb）。寫進備註讓客服到平台後台查真實姓名時
+        // 有東西可以核對，確認撈到的是同一筆。
+        notes: info.phoneLast4 ? `電話末4碼：${info.phoneLast4}` : null,
+        ...(conflictWith ? { ota_conflict_with: conflictWith, ota_conflict_detected_at: nowIso } : {}),
       });
     if (insertError) continue;
     created++;
+    if (conflictWith) conflictLines.push(`・${channel.name}　${ev.startIso}~${ev.endIso}`);
 
     // 綁定特定房型的頻道：連動寫進 booking_rooms，讓房型層級的檔期衝突檢查（fetchOccupiedRoomIds
     // 等既有邏輯）看得到這筆外部訂單佔用了哪個房型，跟人工建單（OrderManagement.tsx）同一套機制。
@@ -595,14 +644,19 @@ async function syncOneOtaChannel(channel: any): Promise<{ summary: string; confl
   }
 
   // 來源已消失的事件（平台那邊取消/刪除了）：標記為取消，不整批刪除。
+  // 注意這裡比對的是 seenUids（含被過濾掉的關房事件），不是只有真訂單，理由見上面的說明。
   const disappeared = (existingRows || []).filter((r: any) => r.external_uid && !seenUids.has(r.external_uid));
   if (disappeared.length) {
     await supabase.from('bookings').update({ status: 'cancelled', updated_at: nowIso }).in('id', disappeared.map((r: any) => r.id));
   }
 
   const parts = [`新增 ${created} 筆`, `更新 ${updated} 筆`];
+  if (blockedUids.size) parts.push(`略過關房 ${blockedUids.size} 筆`);
   if (disappeared.length) parts.push(`來源移除 ${disappeared.length} 筆（已標記取消）`);
   if (conflictLines.length) parts.push(`⚠️ ${conflictLines.length} 筆疑似撞期`);
+  if (staleBlocks.length) {
+    parts.push(`⚠️ ${staleBlocks.length} 筆既有訂單依現行規則應為關房，請人工確認後取消（${staleBlocks.slice(0, 5).map((r: any) => `${r.order_number || r.id} ${r.checkin_date}~${r.checkout_date}`).join('、')}${staleBlocks.length > 5 ? ' 等' : ''}）`);
+  }
   const summary = parts.join('、');
 
   await supabase.from('ota_channels').update({ last_imported_at: nowIso, last_import_status: 'success', last_import_summary: summary }).eq('id', channel.id);
@@ -723,7 +777,7 @@ async function pushBookingsToGoogleCalendar(settings: any): Promise<string> {
 
   const { data: bookings, error: bookingsError } = await supabase
     .from('bookings')
-    .select('id, order_number, name, nickname, checkin_date, checkout_date, headcount, adults, kids, infants, whole_house, room_type_label, status, notes, booking_source, external_channel_id, google_event_id, google_synced_at, updated_at')
+    .select('id, order_number, name, nickname, checkin_date, checkout_date, headcount, adults, kids, infants, whole_house, room_type_label, status, notes, booking_source, external_channel_id, external_confirmation_code, ota_conflict_detected_at, google_event_id, google_synced_at, updated_at')
     .in('status', OCCUPYING_STATUSES)
     .not('checkin_date', 'is', null)
     .not('checkout_date', 'is', null)
@@ -736,13 +790,6 @@ async function pushBookingsToGoogleCalendar(settings: any): Promise<string> {
     (b: any) => !b.google_synced_at || new Date(b.updated_at).getTime() > new Date(b.google_synced_at).getTime()
   );
 
-  const channelIds = [...new Set(toPush.filter((b: any) => b.external_channel_id).map((b: any) => b.external_channel_id))];
-  let channelNameById: Record<string, string> = {};
-  if (channelIds.length) {
-    const { data: channels } = await supabase.from('ota_channels').select('id, name').in('id', channelIds);
-    channelNameById = Object.fromEntries((channels || []).map((c: any) => [c.id, c.name]));
-  }
-
   let created = 0;
   let updated = 0;
   let removed = 0;
@@ -751,24 +798,29 @@ async function pushBookingsToGoogleCalendar(settings: any): Promise<string> {
   for (const b of toPush) {
     const isExternal = b.booking_source !== 'direct';
     const platformLabel = otaPlatformLabel(b.booking_source);
-    // 外部平台剛匯入時沒有真實姓名/人數可用——OTA 的 iCal 只給日期，不會附房客身份資料，
-    // 匯入當下 name 一律是通用預留字串「Airbnb 訂單」（見 syncOneOtaChannel）。如果客服後來
-    // 到「訂單管理」把姓名/人數補上去了（例如去 Airbnb 後台自己查到房客名字），這裡就改用
-    // 跟直接訂單一樣的「平台-姓名 人數人」格式；還沒補之前繼續用「[頻道名] 已預訂」，
-    // 避免顯示出還沒填的空白欄位。
+    // 事件標題一律帶來源前綴，一眼看得出這個檔期是誰來的：
+    //   本地（LINE 自動成立與後台人工建單都算）：【Line】王先生 4人
+    //   第三方：【Airbnb】張小姐 9人 (HMYSQ5EZ8R)
+    // 第三方剛匯入時沒有真實姓名/人數——OTA 的 iCal 不給房客身份資料，匯入當下 name 一律是
+    // 通用預留字串「Airbnb 訂單」（見 syncOneOtaChannel）。客服到平台後台查到真實姓名、
+    // 在「訂單管理」補上去之後才會顯示姓名人數；還沒補之前顯示「已預訂」，不要秀空欄位。
+    // 確認碼撈得到才加括號那一段（Airbnb 有，其他平台的規則還沒建立時會是 null）。
+    const sourcePrefix = isExternal ? `【${platformLabel}】` : '【Line】';
     const hasRealName = isExternal && b.name && b.name !== `${platformLabel} 訂單`;
+    const code = b.external_confirmation_code ? ` (${b.external_confirmation_code})` : '';
     const summaryParts = isExternal
-      ? hasRealName
-        ? [`${platformLabel}-${b.name}${b.headcount ? ` ${b.headcount}人` : ''}`]
-        : [`[${channelNameById[b.external_channel_id] || platformLabel}] 已預訂`]
-      : [`${b.name || b.nickname || '未填姓名'} ${b.headcount ?? ''}人`.trim()];
+      ? [`${sourcePrefix}${hasRealName ? `${b.name}${b.headcount ? ` ${b.headcount}人` : ''}` : '已預訂'}${code}`]
+      : [`${sourcePrefix}${`${b.name || b.nickname || '未填姓名'} ${b.headcount ?? ''}人`.trim()}`];
     if ((!isExternal || hasRealName) && b.whole_house) summaryParts.push('·包棟');
     if (!isExternal && !BALANCE_PAID_STATUSES.includes(b.status)) summaryParts.push(' ⚠️尾款未收');
+    if (b.ota_conflict_detected_at) summaryParts.push(' ⚠️疑似撞期');
     const summary = summaryParts.join('');
 
     const descParts = [`訂單編號: ${b.order_number || ''}`];
     if (isExternal) {
       descParts.push(`來源平台: ${otaPlatformLabel(b.booking_source)}`);
+      if (b.external_confirmation_code) descParts.push(`平台訂單編號: ${b.external_confirmation_code}`);
+      if (b.notes) descParts.push(`備註: ${b.notes}`); // 平台只給得到電話末 4 碼，匯入時寫在這裡
     } else {
       descParts.push(`大人小孩: ${formatAdultsKidsGCal(b.adults, b.kids, b.infants)}`);
       if (b.room_type_label) descParts.push(`房型: ${b.room_type_label}`);

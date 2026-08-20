@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { supabase } from '../lib/supabase';
-import { ClipboardList, Search, RotateCcw, Save, Plus, Trash2, AlertCircle, Shirt, RefreshCw, CalendarDays, ListFilter, DoorOpen, ArrowRight } from 'lucide-react';
+import { ClipboardList, Search, RotateCcw, Save, Plus, Trash2, AlertCircle, AlertTriangle, Shirt, RefreshCw, CalendarDays, ListFilter, DoorOpen, ArrowRight } from 'lucide-react';
 import { Button, Modal, StatusBadge, EmptyState, ConfirmDialog } from '../components/ui';
 import { BOOKING_STATUS_OPTIONS, SYSTEM_ONLY_STATUSES, REQUIRES_REMIT_LAST5_STATUS, REQUIRES_CHECKIN_PASSWORD_STATUS, FLOW_STEP_STATUSES, flowStepIndex, bookingStatusLabel } from '../lib/bookingStatus';
 import { computeOrderAmounts } from '../lib/messageVariables';
@@ -615,7 +615,17 @@ export default function OrderManagement() {
                 rows.map((row) => (
                   <tr key={row.id} onClick={() => openEdit(row)} className="hover:bg-green-50 transition-colors cursor-pointer">
                     <td className="py-3 px-4 font-mono text-xs text-gray-500">{row.order_number || '-'}</td>
-                    <td className="py-3 px-4 font-medium text-gray-800">{row.name || row.nickname || '未取得'}</td>
+                    <td className="py-3 px-4 font-medium text-gray-800">
+                      {row.name || row.nickname || '未取得'}
+                      {/* 第三方同步進來、日期跟其他訂單重疊的訂單。依規格兩筆都保留不自動合併，
+                          只在這裡標記出來讓人工核實是不是真的超賣（推播只會在偵測到的當下發一次，
+                          漏看就沒了，所以清單上也要看得到）。 */}
+                      {row.ota_conflict_detected_at && (
+                        <span className="ml-2 inline-flex items-center gap-1 text-xs bg-red-100 text-red-700 rounded-full px-2 py-0.5 align-middle" title="這筆第三方訂單跟其他訂單日期重疊，請人工核實是否超賣">
+                          <AlertTriangle className="w-3 h-3" />疑似撞期
+                        </span>
+                      )}
+                    </td>
                     <td className="py-3 px-4 whitespace-nowrap">{row.checkin_date ? String(row.checkin_date).replace(/-/g, '/') : '-'}</td>
                     <td className="py-3 px-4 whitespace-nowrap">{row.checkout_date ? String(row.checkout_date).replace(/-/g, '/') : '-'}</td>
                     <td className="py-3 px-4">{row.headcount ?? '-'}</td>

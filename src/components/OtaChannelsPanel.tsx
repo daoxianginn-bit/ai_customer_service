@@ -32,11 +32,12 @@ interface FormValue {
   name: string;
   room_type_id: string;
   import_ics_url: string;
+  extra_block_keywords: string;
   is_active: boolean;
 }
 
 const EMPTY_FORM: FormValue = {
-  platform: 'airbnb', name: '', room_type_id: '', import_ics_url: '', is_active: true,
+  platform: 'airbnb', name: '', room_type_id: '', import_ics_url: '', extra_block_keywords: '', is_active: true,
 };
 
 export default function OtaChannelsPanel() {
@@ -81,6 +82,7 @@ export default function OtaChannelsPanel() {
       name: c.name,
       room_type_id: c.room_type_id || '',
       import_ics_url: c.import_ics_url || '',
+      extra_block_keywords: c.extra_block_keywords || '',
       is_active: c.is_active,
     });
     setShowForm(true);
@@ -97,6 +99,7 @@ export default function OtaChannelsPanel() {
         name,
         room_type_id: form.value.room_type_id || null,
         import_ics_url: form.value.import_ics_url.trim() || null,
+        extra_block_keywords: form.value.extra_block_keywords.trim() || null,
         is_active: form.value.is_active,
         updated_at: new Date().toISOString(),
       };
@@ -283,6 +286,13 @@ export default function OtaChannelsPanel() {
             value={form.value.import_ics_url}
             onChange={(e) => form.setValue({ ...form.value, import_ics_url: e.target.value })}
             helperText="不填就只做匯出（單向：只讓該平台知道我方房況），之後隨時可以回來補上。"
+          />
+          <TextField
+            label="額外的關房字樣（逗號分隔，選填）"
+            fullWidth
+            value={form.value.extra_block_keywords}
+            onChange={(e) => form.setValue({ ...form.value, extra_block_keywords: e.target.value })}
+            helperText="匯入時只收該平台真正成立的訂單，關房事件（Not available／Blocked／CLOSED 等）一律略過，常見字樣系統已內建。平台改了措辭導致關房被當成訂單收進來時，把新字樣補在這裡即可，不分大小寫。"
           />
           <Stack direction="row" alignItems="center" spacing={1}>
             <Switch

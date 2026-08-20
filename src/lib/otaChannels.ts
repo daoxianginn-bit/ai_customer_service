@@ -11,6 +11,9 @@ export interface OtaChannel {
   name: string;
   room_type_id: string | null; // null＝整棟
   import_ics_url: string | null;
+  // 這個頻道專屬的關房字樣補充清單（逗號分隔）。判斷「真訂單 vs 關房」的內建規則在
+  // src/lib/otaEventFilter.ts，平台改措辭時管理員可以在後台補字樣、不用改程式。
+  extra_block_keywords: string | null;
   export_token: string;
   is_active: boolean;
   display_order: number;

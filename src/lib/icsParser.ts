@@ -13,6 +13,8 @@ export interface ParsedIcsEvent {
   startIso: string; // YYYY-MM-DD
   endIso: string; // YYYY-MM-DD（沿用 iCal 全天事件慣例：不含這一天，跟 checkout_date 的語意一致）
   summary: string;
+  description: string; // 沒有這個屬性時是空字串（Airbnb 的關房事件就完全沒有 DESCRIPTION）
+  raw: string; // 這個 VEVENT 的原文（不含 BEGIN/END 兩行），供查核與重新判讀用
 }
 
 // RFC 5545 折行：邏輯上的一行如果太長，會被拆成多行，除了第一行以外，
@@ -78,6 +80,8 @@ export function parseIcsEvents(icsText: string): ParsedIcsEvent[] {
   let startIso = '';
   let endIso = '';
   let summary = '';
+  let description = '';
+  let rawLines: string[] = [];
 
   for (const line of lines) {
     const trimmed = line.trim();
@@ -87,16 +91,22 @@ export function parseIcsEvents(icsText: string): ParsedIcsEvent[] {
       startIso = '';
       endIso = '';
       summary = '';
+      description = '';
+      rawLines = [];
       continue;
     }
     if (trimmed === 'END:VEVENT') {
       if (inEvent && uid && startIso && endIso) {
-        events.push({ uid, startIso, endIso, summary });
+        events.push({ uid, startIso, endIso, summary, description, raw: rawLines.join('\n') });
       }
       inEvent = false;
       continue;
     }
     if (!inEvent) continue;
+
+    // 原文逐行留著：真正成立的訂單要保存來源資料供日後查核／重新同步，
+    // 而且平台改格式導致判讀出錯時，有原文才查得出當初到底收到什麼。
+    rawLines.push(line);
 
     const prop = parsePropertyLine(line);
     if (!prop) continue;
@@ -105,6 +115,9 @@ export function parseIcsEvents(icsText: string): ParsedIcsEvent[] {
     else if (prop.name === 'DTSTART') startIso = toDateIso(prop.value) || '';
     else if (prop.name === 'DTEND') endIso = toDateIso(prop.value) || '';
     else if (prop.name === 'SUMMARY') summary = unescapeIcsText(prop.value.trim());
+    // DESCRIPTION 是判斷「這是真訂單還是關房」的關鍵：Airbnb 真訂單會帶
+    // 「Reservation URL: .../details/<確認碼>」，關房事件則完全沒有這個屬性。
+    else if (prop.name === 'DESCRIPTION') description = unescapeIcsText(prop.value.trim());
   }
 
   return events;
