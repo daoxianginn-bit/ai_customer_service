@@ -5,11 +5,13 @@ import { zhTW } from 'date-fns/locale';
 import 'react-big-calendar/lib/css/react-big-calendar.css';
 import './RoomCalendar.css';
 import { supabase } from '../lib/supabase';
-import { Box, Paper, Stack, Typography, IconButton, Button, Tooltip, Chip, Dialog, DialogTitle, DialogContent } from '@mui/material';
-import { ChevronLeft, ChevronRight, CalendarDays, SlidersHorizontal, X } from 'lucide-react';
+import { Box, Paper, Stack, Typography, IconButton, Button, Tooltip, Chip, Dialog, DialogTitle, DialogContent, Alert, CircularProgress } from '@mui/material';
+import { ChevronLeft, ChevronRight, CalendarDays, SlidersHorizontal, X, RefreshCw, Eye } from 'lucide-react';
 import PageHeaderMui from '../components/ui-mui/PageHeaderMui';
 import { OCCUPYING_STATUSES, UNRESERVED_WITH_DATES_STATUSES, bookingStatusLabel } from '../lib/bookingStatus';
 import DateRangeSettingsModal from '../components/DateRangeSettingsModal';
+import { OtaChannel, otaPlatformLabel, otaChannelExportUrl } from '../lib/otaChannels';
+import { parseIcsEvents } from '../lib/icsParser';
 
 // 行事曆事件用實心色塊呈現，這裡單獨定義（十六進位色碼，直接當 MUI sx/style 用）。
 // 跟 bookingStatus.ts 的 badgeClassName 用同一套顏色邏輯（同色系），只是換成十六進位。
@@ -66,6 +68,22 @@ export default function RoomCalendar() {
   const [selectedEvent, setSelectedEvent] = useState<BookingEvent | null>(null);
   const [dateRangeModalOpen, setDateRangeModalOpen] = useState(false);
 
+  // 手動整合第三方：對應「排程管理」裡 task_type = sync_calendars 的那筆排程，直接借用它
+  // 現成的「立即執行」邏輯，不用另外做一套同步流程——這樣兩邊行為（含衝突偵測、Google
+  // 行事曆同步）永遠一致，不會有兩份邏輯之後跑掉的風險。
+  const [syncTaskId, setSyncTaskId] = useState<string | null>(null);
+  const [syncRunning, setSyncRunning] = useState(false);
+  const [syncResult, setSyncResult] = useState<{ ok: boolean; text: string } | null>(null);
+
+  // 預覽匯出行事曆：選一個 OTA 頻道，直接抓它對外公開的 ICS 網址來解析顯示——
+  // 跟平台實際抓到的內容保證一致，因為就是同一份（calendar-feed.ts）。
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [otaChannelList, setOtaChannelList] = useState<OtaChannel[]>([]);
+  const [previewChannelId, setPreviewChannelId] = useState<string | null>(null);
+  const [previewEvents, setPreviewEvents] = useState<{ id: string; title: string; start: Date; end: Date; allDay: true }[]>([]);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState('');
+
   const year = calendarDate.getFullYear();
   const month = calendarDate.getMonth();
 
@@ -75,6 +93,8 @@ export default function RoomCalendar() {
 
   useEffect(() => {
     fetchDateRanges();
+    fetchSyncTask();
+    fetchOtaChannels();
   }, []);
 
   const fetchMonthData = async () => {
@@ -119,6 +139,82 @@ export default function RoomCalendar() {
   const fetchDateRanges = async () => {
     const { data: dr } = await supabase.from('booking_date_ranges').select('*').order('start_date');
     setDateRanges(dr || []);
+  };
+
+  const fetchSyncTask = async () => {
+    const { data } = await supabase.from('scheduled_tasks').select('id').eq('task_type', 'sync_calendars').limit(1).maybeSingle();
+    setSyncTaskId(data?.id || null);
+  };
+
+  const fetchOtaChannels = async () => {
+    const { data } = await supabase.from('ota_channels').select('*').eq('is_active', true).order('display_order');
+    setOtaChannelList((data || []) as OtaChannel[]);
+  };
+
+  // 借用「排程管理」的立即執行邏輯：POST taskId 給 scheduled-tasks-run，完成後把摘要顯示出來，
+  // 讓管理員不用跳頁去排程管理也能知道這次同步有沒有成功、抓到幾筆。
+  const runSyncNow = async () => {
+    if (!syncTaskId) return;
+    setSyncRunning(true);
+    setSyncResult(null);
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const token = sessionData.session?.access_token;
+      const res = await fetch('/.netlify/functions/scheduled-tasks-run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ taskId: syncTaskId }),
+      });
+      const result = await res.json();
+      if (!res.ok) throw new Error(result.error || '執行失敗');
+      setSyncResult({ ok: true, text: result.summary || '整合完成' });
+      fetchMonthData();
+    } catch (e: any) {
+      setSyncResult({ ok: false, text: `整合失敗：${e.message}` });
+    } finally {
+      setSyncRunning(false);
+    }
+  };
+
+  const openPreview = () => {
+    setPreviewOpen(true);
+    setPreviewError('');
+    if (!previewChannelId && otaChannelList.length) {
+      selectPreviewChannel(otaChannelList[0].id);
+    } else if (previewChannelId) {
+      selectPreviewChannel(previewChannelId);
+    }
+  };
+
+  // 直接抓頻道對外公開的匯出網址（跟平台實際訂閱的是同一份），解析出來的事件本來就不含
+  // 房客姓名等個資（見 calendar-feed.ts 的隱私限制），這裡忠實呈現，不額外補資料。
+  const selectPreviewChannel = async (channelId: string) => {
+    setPreviewChannelId(channelId);
+    const channel = otaChannelList.find((c) => c.id === channelId);
+    if (!channel) return;
+    setPreviewLoading(true);
+    setPreviewError('');
+    try {
+      const url = otaChannelExportUrl(window.location.origin, channel.export_token);
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const icsText = await res.text();
+      const parsed = parseIcsEvents(icsText);
+      setPreviewEvents(
+        parsed.map((ev) => ({
+          id: ev.uid,
+          title: '已預訂 Reserved',
+          start: new Date(`${ev.startIso}T00:00:00`),
+          end: new Date(`${ev.endIso}T00:00:00`),
+          allDay: true,
+        }))
+      );
+    } catch (e: any) {
+      setPreviewError(`讀取失敗：${e.message}`);
+      setPreviewEvents([]);
+    } finally {
+      setPreviewLoading(false);
+    }
   };
 
   // 這個日期落在哪個「旺季」或「連假」區間，回傳命中的那幾筆（可能同時有多筆重疊，例如手動加的跟匯入的重複）。
@@ -184,9 +280,30 @@ export default function RoomCalendar() {
             <Button variant="contained" startIcon={<SlidersHorizontal size={16} />} onClick={() => setDateRangeModalOpen(true)} sx={{ ml: 1 }}>
               旺季/連假日期設定
             </Button>
+            <Tooltip title={syncTaskId ? '手動抓取第三方平台行事曆、同步進系統並推播到 Google 行事曆' : '請先到「排程管理」新增一筆「第三方平台 iCal 同步」排程'}>
+              <span>
+                <Button
+                  variant="outlined"
+                  startIcon={syncRunning ? <CircularProgress size={14} /> : <RefreshCw size={16} />}
+                  onClick={runSyncNow}
+                  disabled={!syncTaskId || syncRunning}
+                >
+                  {syncRunning ? '整合中...' : '手動整合第三方'}
+                </Button>
+              </span>
+            </Tooltip>
+            <Button variant="outlined" startIcon={<Eye size={16} />} onClick={openPreview}>
+              預覽匯出行事曆
+            </Button>
           </Stack>
         }
       />
+
+      {syncResult && (
+        <Alert severity={syncResult.ok ? 'success' : 'error'} onClose={() => setSyncResult(null)}>
+          {syncResult.text}
+        </Alert>
+      )}
 
       <Stack direction="row" flexWrap="wrap" gap={2} rowGap={1} alignItems="center">
         {CALENDAR_STATUSES.map((status) => (
@@ -261,6 +378,57 @@ export default function RoomCalendar() {
         onClose={() => setDateRangeModalOpen(false)}
         onSaved={fetchDateRanges}
       />
+
+      {/* ============== 預覽匯出行事曆：跟平台實際訂閱到的內容一致（同一份 ICS 網址） ============== */}
+      <Dialog open={previewOpen} onClose={() => setPreviewOpen(false)} maxWidth="md" fullWidth>
+        <DialogTitle sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          預覽匯出行事曆
+          <IconButton size="small" onClick={() => setPreviewOpen(false)}><X size={18} /></IconButton>
+        </DialogTitle>
+        <DialogContent sx={{ pb: 3 }}>
+          {otaChannelList.length === 0 ? (
+            <Typography variant="body2" color="text.secondary" sx={{ py: 2 }}>
+              還沒有啟用中的第三方平台頻道，請先到「OTA 頻道管理」新增。
+            </Typography>
+          ) : (
+            <Stack spacing={2}>
+              <Stack direction="row" flexWrap="wrap" gap={1}>
+                {otaChannelList.map((c) => (
+                  <Chip
+                    key={c.id}
+                    label={`${otaPlatformLabel(c.platform)}｜${c.name}`}
+                    onClick={() => selectPreviewChannel(c.id)}
+                    color={previewChannelId === c.id ? 'success' : 'default'}
+                    variant={previewChannelId === c.id ? 'filled' : 'outlined'}
+                  />
+                ))}
+              </Stack>
+              <Typography variant="caption" color="text.secondary">
+                這是這個頻道實際對外公開的行事曆內容（平台訂閱到的就是這一份），基於隱私考量不含房客姓名／訂單編號。
+              </Typography>
+              {previewError && <Alert severity="error">{previewError}</Alert>}
+              {previewLoading ? (
+                <Box sx={{ py: 6, textAlign: 'center' }}><CircularProgress size={24} /></Box>
+              ) : (
+                <Paper variant="outlined" sx={{ height: 480, p: 1 }}>
+                  <Calendar
+                    localizer={localizer}
+                    culture="zh-TW"
+                    events={previewEvents}
+                    views={[Views.MONTH]}
+                    view={Views.MONTH}
+                    toolbar
+                    popup
+                    eventPropGetter={() => ({ style: { backgroundColor: '#16a34a', color: '#fff', border: 'none' } })}
+                    messages={{ noEventsInRange: '這段期間沒有已預訂日期', showMore: (total: number) => `還有 ${total} 筆` }}
+                    style={{ height: '100%' }}
+                  />
+                </Paper>
+              )}
+            </Stack>
+          )}
+        </DialogContent>
+      </Dialog>
     </Box>
   );
 }
