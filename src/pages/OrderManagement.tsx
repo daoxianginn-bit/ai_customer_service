@@ -191,6 +191,13 @@ export default function OrderManagement() {
   const [deleteTarget, setDeleteTarget] = useState<any | null>(null);
   const [deleting, setDeleting] = useState(false);
 
+  // 批次刪除：開關打開才顯示勾選欄位，避免平常誤觸；換頁/重新查詢時清掉勾選，
+  // 因為畫面上的列已經換了一批，殘留的勾選 id 對不上新的清單。
+  const [batchMode, setBatchMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [batchDeleting, setBatchDeleting] = useState(false);
+  const [showBatchConfirm, setShowBatchConfirm] = useState(false);
+
   // 押金與訂金比例的預設值來自「房型與報價」的設定，人工建單時按「重算」就會套用同一套算法，
   // 跟 LINE 自動報價算出來的金額一致。
   const [moneyDefaults, setMoneyDefaults] = useState({ wholeHouseSecurity: 3000, percent: 30 });
@@ -357,7 +364,38 @@ export default function OrderManagement() {
       setHasMore((data || []).length === PAGE_SIZE);
     }
     setPage(pageIndex);
+    setSelectedIds([]);
     setLoading(false);
+  };
+
+  const toggleBatchMode = () => {
+    setBatchMode((v) => !v);
+    setSelectedIds([]);
+  };
+
+  const toggleSelectRow = (id: string) => {
+    setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  };
+
+  const toggleSelectAll = () => {
+    setSelectedIds((prev) => (prev.length === rows.length ? [] : rows.map((r) => r.id)));
+  };
+
+  const confirmBatchDelete = async () => {
+    if (!selectedIds.length) return;
+    setBatchDeleting(true);
+    try {
+      const { error } = await supabase.from('bookings').delete().in('id', selectedIds);
+      if (error) throw error;
+      setShowBatchConfirm(false);
+      setSelectedIds([]);
+      runQuery(page);
+      fetchStatusCounts();
+    } catch (err: any) {
+      alert(`批次刪除失敗：${err.message}`);
+    } finally {
+      setBatchDeleting(false);
+    }
   };
 
   const clearFilters = () => {
@@ -550,7 +588,21 @@ export default function OrderManagement() {
             </h2>
             <p className="text-gray-500 mt-1">新增、查詢、檢視與編輯所有訂房紀錄。</p>
           </div>
-          <Button onClick={openNew} icon={<Plus className="w-4 h-4" />}>新增訂單</Button>
+          <div className="flex items-center gap-2">
+            <Button
+              variant={batchMode ? 'primary' : 'secondary'}
+              onClick={toggleBatchMode}
+              icon={<Trash2 className="w-4 h-4" />}
+            >
+              {batchMode ? '取消批次刪除' : '批次刪除'}
+            </Button>
+            {batchMode && selectedIds.length > 0 && (
+              <Button variant="danger" onClick={() => setShowBatchConfirm(true)} icon={<Trash2 className="w-4 h-4" />}>
+                刪除選取（{selectedIds.length}）
+              </Button>
+            )}
+            <Button onClick={openNew} icon={<Plus className="w-4 h-4" />}>新增訂單</Button>
+          </div>
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3 border-t pt-4">
           <div className="lg:col-span-2">
@@ -593,6 +645,16 @@ export default function OrderManagement() {
           <table className="w-full text-left text-sm">
             <thead className="bg-gray-50 border-b">
               <tr className="text-gray-600">
+                {batchMode && (
+                  <th className="py-3 px-4 w-10">
+                    <input
+                      type="checkbox"
+                      checked={rows.length > 0 && selectedIds.length === rows.length}
+                      onChange={toggleSelectAll}
+                      className="w-4 h-4"
+                    />
+                  </th>
+                )}
                 <th className="py-3 px-4">訂單編號</th>
                 <th className="py-3 px-4">姓名</th>
                 <th className="py-3 px-4">入住日期</th>
@@ -608,12 +670,22 @@ export default function OrderManagement() {
             </thead>
             <tbody className="divide-y divide-gray-100">
               {loading ? (
-                <tr><td colSpan={11} className="py-10 text-center text-gray-400">載入中...</td></tr>
+                <tr><td colSpan={batchMode ? 12 : 11} className="py-10 text-center text-gray-400">載入中...</td></tr>
               ) : rows.length === 0 ? (
-                <tr><td colSpan={11}><EmptyState icon={<ClipboardList className="w-12 h-12 text-gray-200" />} message="查無符合條件的訂單" /></td></tr>
+                <tr><td colSpan={batchMode ? 12 : 11}><EmptyState icon={<ClipboardList className="w-12 h-12 text-gray-200" />} message="查無符合條件的訂單" /></td></tr>
               ) : (
                 rows.map((row) => (
-                  <tr key={row.id} onClick={() => openEdit(row)} className="hover:bg-green-50 transition-colors cursor-pointer">
+                  <tr key={row.id} onClick={() => (batchMode ? toggleSelectRow(row.id) : openEdit(row))} className="hover:bg-green-50 transition-colors cursor-pointer">
+                    {batchMode && (
+                      <td className="py-3 px-4" onClick={(e) => e.stopPropagation()}>
+                        <input
+                          type="checkbox"
+                          checked={selectedIds.includes(row.id)}
+                          onChange={() => toggleSelectRow(row.id)}
+                          className="w-4 h-4"
+                        />
+                      </td>
+                    )}
                     <td className="py-3 px-4 font-mono text-xs text-gray-500">{row.order_number || '-'}</td>
                     <td className="py-3 px-4 font-medium text-gray-800">
                       {row.name || row.nickname || '未取得'}
@@ -922,6 +994,17 @@ export default function OrderManagement() {
         loading={deleting}
         onConfirm={confirmDelete}
         onCancel={() => setDeleteTarget(null)}
+      />
+
+      <ConfirmDialog
+        open={showBatchConfirm}
+        title="批次刪除訂單"
+        message={`確定要刪除選取的 ${selectedIds.length} 筆訂單嗎？此操作無法復原。`}
+        confirmLabel="刪除"
+        danger
+        loading={batchDeleting}
+        onConfirm={confirmBatchDelete}
+        onCancel={() => setShowBatchConfirm(false)}
       />
     </div>
   );
