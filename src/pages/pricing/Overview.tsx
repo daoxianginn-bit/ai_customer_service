@@ -58,7 +58,7 @@ export default function PricingOverview() {
       supabase.from('special_prices').select('*', { count: 'exact', head: true }),
       supabase
         .from('bookings')
-        .select('room_amount, checkin_date, status')
+        .select('room_amount, total_amount, checkin_date, status')
         .gte('checkin_date', monthStart)
         .lt('checkin_date', nextMonthStart)
         .in('status', OCCUPYING_STATUSES),
@@ -76,7 +76,9 @@ export default function PricingOverview() {
     setCapacityFees((cap.data || []).map((c: any) => ({ capacity: c.capacity, extra_room_fee: c.extra_room_fee })));
     setPromotions(promo.data || []);
     setSpecialPriceCount(sp.count ?? 0);
-    setMonthRevenue((bk.data || []).reduce((sum: number, b: any) => sum + Number(b.room_amount || 0), 0));
+    // 舊訂單沒有 room_amount，改版前 total_amount 存的就是房價，退回它才不會漏算
+    // （跟 messageVariables.ts、OrderManagement.tsx 讀取舊訂單金額的邏輯一致）。
+    setMonthRevenue((bk.data || []).reduce((sum: number, b: any) => sum + Number(b.room_amount ?? b.total_amount ?? 0), 0));
     setLoading(false);
   };
 
