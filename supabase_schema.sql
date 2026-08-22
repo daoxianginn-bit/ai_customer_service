@@ -471,6 +471,11 @@ CREATE INDEX IF NOT EXISTS idx_notification_groups_channel ON public.notificatio
 -- 沒設定時退回舊行為：用客戶用官方帳號推播給 settings.agent_user_ids，既有安裝不會突然收不到通知。
 ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS handover_notification_group_id UUID REFERENCES public.notification_recipient_groups(id) ON DELETE SET NULL;
 
+-- AI 忽略關鍵字（逗號分隔）：訊息只要含有其中一個字就整則跳過，不進訂房流程、不轉真人、
+-- 也不呼叫 AI，純粹留一筆對話紀錄。給不該被系統接住的雜訊訊息用，跟 handover_keywords（觸發轉真人）
+-- 用途相反，兩者互相獨立。
+ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS ai_ignore_keywords TEXT DEFAULT '';
+
 -- LINE 群組（機器人被邀進去的群組聊天，例如內部用來接收推播通知的群組），
 -- 跟上面的 notification_recipient_groups（本系統自訂的收件人名單）是完全不同的兩件事——
 -- 這裡存的是「LINE 平台本身的群組」，group_id 是 LINE 那邊的群組識別碼。

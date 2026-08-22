@@ -321,6 +321,13 @@ async function processLineEvent(
 
     logConversation(userId, nickname, 'inbound', userMessage, 'user', channel.id);
 
+    // AI 忽略關鍵字：訊息只要含有其中一個字，整則完全跳過——不進訂房流程、不轉真人、也不呼叫
+    // AI，只留一筆對話紀錄。給不該被系統/AI 接住的雜訊訊息用（例如特定貼圖轉出來的固定文字、
+    // 測試用字串），跟上面「轉真人客服」的關鍵字用途相反，兩者互相獨立、不要合併判斷。
+    if (!isImageMessage && matchKeyword(userMessage, parseCsvKeywords(settings.ai_ignore_keywords))) {
+      return;
+    }
+
     // 廠商／團隊內部帳號：不跑訂房流程也不跑知識庫問答，只記錄聯絡人並把回覆轉給客服知道。
     // 這兩種帳號的用途是「接收訂單完成統計」，對方回一句「已備貨」時我們要收得到，
     // 但不該讓 AI 拿民宿的知識庫去回答廠商，那只會答非所問。

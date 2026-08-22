@@ -151,6 +151,15 @@ export default function SystemSettings() {
             <textarea name="system_prompt" value={settings.system_prompt || ''} onChange={handleChange} rows={4} className="w-full px-4 py-2 border rounded-lg" />
             <p className="text-xs text-gray-400 mt-1">參考資料請至「AI知識庫」新增，會自動附加到此指令後方。</p>
           </div>
+
+          <div className="border-t pt-6">
+            <label className="block text-sm font-medium text-gray-700 mb-1">AI 忽略關鍵字（逗號分隔）</label>
+            <input type="text" name="ai_ignore_keywords" value={settings.ai_ignore_keywords || ''} onChange={handleChange} className="w-full px-4 py-2 border rounded-lg" placeholder="例如：測試,廣告" />
+            <p className="text-xs text-gray-400 mt-1">
+              顧客訊息只要含有其中一個關鍵字，就整則完全跳過——不進訂房流程、不轉真人、也不會呼叫 AI 回答，只會留一筆對話紀錄。
+              跟下面「轉接規則」的真人客服關鍵字用途相反，兩者互不影響。
+            </p>
+          </div>
         </div>
         )}
 
