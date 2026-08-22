@@ -1010,13 +1010,31 @@ function scanDates(message: string): string[] {
   return found;
 }
 
+// 人數擷取的候選寫法，由「最可信」排到「最沒把握」，依序試、先中先用：
+//   1. 明確標示的「人數：16」——客人照著問句逐行回答時最常見，也最不可能誤判。
+//   2. 帶單位的「16人」「16位」「2大人」——但要排掉「4人房」這種其實在講房型的寫法，
+//      否則問人數會抓到房型名稱裡的數字。
+//   3. 前兩種都沒有，才退回「訊息裡第一個獨立的數字」（例如整個步驟就只問人數、客人只回一個數字）。
+//
+// 三個 pattern 的數字都用 (?<!\d)/(?!\d) 夾住，確保抓到的是一整串完整的數字、不是從更長的
+// 數字裡切一段出來（跟 DATE_SCAN_RE 同一招）。少了這道邊界，「0902」這種寫壞的日期會被切成
+// 「090」當作 90 人——客人完全看不出哪裡錯了，卻會收到一張 90 人的報價。
+const HEADCOUNT_PATTERNS = [
+  /人數\s*[:：]?\s*(?<!\d)(\d{1,3})(?!\d)/,
+  /(?<!\d)(\d{1,3})(?!\d)\s*(?:位|個人|大人|人)(?!房)/,
+  /(?<!\d)(\d{1,3})(?!\d)/,
+];
+
 function scanHeadcount(message: string): string | undefined {
   // 先把日期字樣挖掉，否則「7/30 入住」的 7 會被誤判成人數
   const withoutDates = message.replace(DATE_SCAN_RE, ' ');
-  const m = withoutDates.match(/(\d{1,3})\s*(?:位|人|個人|大人)?/);
-  if (!m) return undefined;
-  const n = Number(m[1]);
-  return Number.isFinite(n) && n > 0 ? String(n) : undefined;
+  for (const re of HEADCOUNT_PATTERNS) {
+    const m = withoutDates.match(re);
+    if (!m) continue;
+    const n = Number(m[1]);
+    if (Number.isFinite(n) && n > 0) return String(n);
+  }
+  return undefined;
 }
 
 function scanWholeHouse(message: string): string | undefined {
