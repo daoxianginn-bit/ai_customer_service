@@ -123,7 +123,20 @@ export const SOURCE_OPTIONS: { value: VariableSource; label: string; fields: { v
 //   匯款日時間：line-webhook.ts 即時算出的截止時間。
 //   入住密碼：scheduled-tasks-run.ts 的「入住排程」專用，故意不放進 BOOKING_FIELD_OPTIONS——
 //     那份白名單的設計本來就是要擋掉密碼類欄位被任意範本引用，只有這個排程本身會手動帶入這個值。
-export const ALWAYS_AVAILABLE_VARIABLES = ['匯款日時間', '入住密碼'];
+//   今日日期／明日日期：跟訂單完全無關（沒有訂單也算得出來），所以不放進 BOOKING_FIELD_OPTIONS，
+//     由 computeTodayTomorrowFields() 在每次渲染訊息時即時算。
+export const ALWAYS_AVAILABLE_VARIABLES = ['匯款日時間', '入住密碼', '今日日期', '明日日期'];
+
+// 「今日日期」「明日日期」：跟 [入住日期]／[退房日期] 用同一種 YYYY/MM/DD 格式，但算的是
+// 「現在」而不是訂單欄位，所以不透過 BOOKING_FIELD_OPTIONS，由呼叫端直接把這兩個值併進
+// buildMergeFields() 算出來的 fields 裡（跟 line-webhook.ts 帶入 [匯款日時間] 是同一套做法）。
+// 一律用台灣時間（UTC+8）算「今天」是哪一天，不受伺服器本身的系統時區影響。
+export function computeTodayTomorrowFields(): Record<string, string> {
+  const taiwanNow = new Date(Date.now() + 8 * 60 * 60 * 1000);
+  const taiwanTomorrow = new Date(taiwanNow.getTime() + 24 * 60 * 60 * 1000);
+  const fmt = (d: Date) => `${d.getUTCFullYear()}/${String(d.getUTCMonth() + 1).padStart(2, '0')}/${String(d.getUTCDate()).padStart(2, '0')}`;
+  return { 今日日期: fmt(taiwanNow), 明日日期: fmt(taiwanTomorrow) };
+}
 
 // ------------------------------------------------------------------------
 // 訊息範本切段：把 "您好 [姓名]" 切成 [文字, 變數]，

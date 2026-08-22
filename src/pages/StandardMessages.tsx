@@ -910,6 +910,7 @@ export default function StandardMessages() {
                           <p className="text-xs text-gray-400 mb-2">
                             顧客回「是」之後送出，同時把訂單建成「待預定」並鎖房。
                             [訂金] 會在這一刻重新讀一次訂房紀錄；[匯款日時間] 由系統自動算（18:00 前帶今天 21:00，之後帶明天 21:00）。
+                            另外 [今日日期]／[明日日期] 這兩個變數在任何一個階段的訊息都可以用，會即時算出當下的日期（例如 2026/08/22）。
                           </p>
                           <MessageTemplateEditor
                             value={draft!.confirm_message}

@@ -11,6 +11,7 @@ import {
   parseTriggerRules,
   matchTriggerRules,
   computeOrderAmounts,
+  computeTodayTomorrowFields,
 } from '../../src/lib/messageVariables';
 import { bookingStatusLabel, OCCUPYING_STATUSES } from '../../src/lib/bookingStatus';
 import { roomLabel } from '../../src/lib/rooms';
@@ -1091,14 +1092,14 @@ async function renderFlowMessage(
       bookingId ? supabase.from('bookings').select('*').eq('id', bookingId).maybeSingle() : Promise.resolve({ data: null }),
     ]);
     const booking: any = bookingRes.data;
-    return mergeTemplate(
-      template,
-      buildMergeFields(variables, {
+    return mergeTemplate(template, {
+      ...buildMergeFields(variables, {
         booking: booking || undefined,
         customer: { nickname, line_user_id: userId },
         settings,
-      })
-    );
+      }),
+      ...computeTodayTomorrowFields(),
+    });
   } catch (e: any) {
     // 替換失敗不能讓整個流程卡住，退回原文（顧客會看到 [變數名稱]，但對話能繼續）
     console.error('[Booking] render message failed:', e.message);
@@ -1935,14 +1936,14 @@ async function finishBookingFlow(
 
     const quoteVariables = await fetchMessageVariables();
     // 優先用流程自己的報價確認訊息；還沒設定（例如剛升級、欄位是 NULL）就退回 settings 的舊值。
-    const quoteMessage = mergeTemplate(
-      flow.quoteMessage ?? settings.booking_quote_message ?? '',
-      buildMergeFields(quoteVariables, {
+    const quoteMessage = mergeTemplate(flow.quoteMessage ?? settings.booking_quote_message ?? '', {
+      ...buildMergeFields(quoteVariables, {
         booking: updatedBooking,
         customer: { nickname, line_user_id: userId },
         settings,
-      })
-    );
+      }),
+      ...computeTodayTomorrowFields(),
+    });
 
     await sendReply(quoteMessage);
     await logConversation(userId, nickname, 'outbound', quoteMessage, 'system');
@@ -2330,6 +2331,7 @@ async function handleBookingConfirmation(
   // 匯款日時間是系統即時算出來的截止時間，不是任何資料表的欄位，永遠由這裡直接帶入，
   // 不受「訊息變數資料維護」頁面的設定影響（就算被刪除或改名也一樣會生效）。
   confirmFields['匯款日時間'] = computePaymentDeadline(settings);
+  Object.assign(confirmFields, computeTodayTomorrowFields());
 
   // 同報價確認：優先用流程自己的付款確認訊息，沒有才退回 settings 的舊值。
   const confirmMessage = mergeTemplate(flow?.confirmMessage ?? settings.booking_confirm_message ?? '', confirmFields);
