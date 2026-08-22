@@ -20,6 +20,11 @@ const SHARED_TEXT_CLASS = 'w-full px-3 py-2 border rounded-lg font-mono text-sm 
 const KNOWN_CHIP_STYLE = { backgroundColor: '#16a34a', color: '#ffffff', boxShadow: '0 0 0 1.5px #16a34a' };
 const UNKNOWN_CHIP_STYLE = { backgroundColor: '#fde68a', color: '#78350f', boxShadow: '0 0 0 1.5px #fde68a' };
 
+// ALWAYS_AVAILABLE_VARIABLES 裡不是每個都適合放進快選按鈕：[入住密碼] 只有「排程管理」的
+// 入住提醒範本用得到，其他地方點了也不會有值，放進來只會誤導。這裡只挑「任何範本都能用」的
+// 那幾個，跟 findUnknownVariables() 用的完整清單刻意分開。
+const QUICK_INSERT_EXTRA_VARIABLES = ['今日日期', '明日日期'];
+
 /**
  * 罐頭訊息編輯器：文字框 + 快捷插入按鈕，點按鈕會把 [欄位名稱] 插入到目前游標位置
  * （沒有選取位置就插在最後面），插入後游標自動移到 token 後方方便接著打字。
@@ -36,6 +41,10 @@ export default function MessageTemplateEditor({ value, onChange, placeholders, r
   const knownNames = useMemo(() => new Set([...placeholders, ...ALWAYS_AVAILABLE_VARIABLES]), [placeholders]);
   const segments = useMemo(() => parseTemplateSegments(value), [value]);
   const unknownNames = useMemo(() => findUnknownVariables(value, placeholders), [value, placeholders]);
+  const quickInsertNames = useMemo(
+    () => [...placeholders, ...QUICK_INSERT_EXTRA_VARIABLES.filter((n) => !placeholders.includes(n))],
+    [placeholders]
+  );
 
   const insertPlaceholder = (name: string) => {
     const token = `[${name}]`;
@@ -108,9 +117,9 @@ export default function MessageTemplateEditor({ value, onChange, placeholders, r
         </p>
       )}
 
-      {placeholders.length > 0 && (
+      {quickInsertNames.length > 0 && (
         <div className="flex flex-wrap gap-2 mt-2">
-          {placeholders.map((p) => (
+          {quickInsertNames.map((p) => (
             <button
               key={p}
               type="button"
