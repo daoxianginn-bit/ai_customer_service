@@ -437,6 +437,12 @@ async function processLineEvent(
           if (handled) return;
         } else {
           const activeFlows = await fetchActiveFlows();
+
+          // 先試「整組完整訂房資訊」，再比對觸發關鍵字——順序不能顛倒。客人把表單複製填好貼回來時，
+          // 那段文字往往連提示語（含觸發字）都一起貼進去了；先比對關鍵字的話會直接開一個全新流程、
+          // 送出第一步的問句，把客人已經填好的答案整組丟掉，等於逼他再一步一步重答一次。
+          if (!isImageMessage && (await tryStartQuoteFromCompleteInfo(lineClient, lineEvent, settings, userId, nickname, userMessage, activeFlows))) return;
+
           const matchedFlow = activeFlows.find((f) => matchTriggerRules(userMessage, f.triggerRules));
           if (matchedFlow) {
             try {
@@ -1448,6 +1454,111 @@ async function startBookingFlow(
   const firstMessage = await renderFlowMessage(firstStep.message_template, settings, userId, resolvedNickname, bookingId);
   await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: firstMessage });
   await logConversation(userId, resolvedNickname, 'outbound', firstMessage, 'system');
+}
+
+// 客人沒有進行中的 session，直接把「整組填好的訂房資訊」貼過來——最常見的就是把報價表單範本
+// 複製下來、填好再送回來。這種訊息幾乎不會剛好等於流程的觸發關鍵字，過去會一路掉到最下面的
+// 一般 AI 問答，由 AI 自己看著知識庫編一段「我們幫您確認」的回覆：實際上完全沒有建立訂單、
+// 沒有算過任何價格，也沒有通知任何人，客人卻以為已經送出了。
+//
+// 判斷標準刻意訂在「會影響算價與開房的欄位（入住/退房/人數/各房型間數）全部解析得到」，
+// 而不是「流程定義的每一個欄位」——備註這類純文字欄位客人本來就常常留空，把它算進必要條件
+// 會讓正常填好的表單反而不算數。反過來說門檻也不能更低：湊齊兩個日期＋人數＋房數才成立，
+// 隨口一句問句幾乎不可能全中，不會亂開單。
+//
+// 回傳 true 代表已經處理掉了（報價已送出，或試算失敗但也已經回覆顧客），呼叫端不要再動作。
+async function tryStartQuoteFromCompleteInfo(
+  lineClient: Client,
+  lineEvent: any,
+  settings: any,
+  userId: string,
+  nickname: string | null,
+  userMessage: string,
+  activeFlows: FlowDef[]
+): Promise<boolean> {
+  const normalizeInto = (extracted: Record<string, string>, fields: FlowFieldDef[]): Record<string, string> => {
+    const out: Record<string, string> = {};
+    for (const f of fields) {
+      if (extracted[f.key] === undefined) continue;
+      const normalized = normalizeFieldValue(f.value_type, extracted[f.key]);
+      if (normalized !== null) out[f.key] = normalized;
+    }
+    return out;
+  };
+
+  for (const flow of activeFlows) {
+    if (flow.flowType !== 'quote') continue;
+
+    const allFields = flow.steps.flatMap((s) => s.fields);
+    const quoteFields = allFields.filter((f) => f.quote_field);
+    // 這個流程必須真的問得到報價三要素，否則「所有算價欄位都齊了」會變成一句空話
+    // （沒設定任何算價欄位的流程，條件會永遠成立、每則訊息都被當成完整訂房資訊）。
+    const hasQuoteEssentials = ['checkin_date', 'checkout_date', 'headcount'].every((k) =>
+      quoteFields.some((f) => f.quote_field === k)
+    );
+    if (!hasQuoteEssentials) continue;
+
+    // 便宜的前置關卡：先用純程式擷取（不花 token）。沒有這一關的話，每一則沒有 session 的
+    // 閒聊都會多打一次 AI 擷取，等於所有非流程訊息的 AI 成本都翻倍。
+    const gate = normalizeInto(extractStepFieldsWithoutAi(userMessage, quoteFields), quoteFields);
+    if (quoteFields.some((f) => gate[f.key] === undefined)) continue;
+
+    // 過了關卡才值得問 AI。AI 模式再擷取一次是為了把備註這類自由文字欄位也帶出來；
+    // 擷取失敗或結果反而不完整時退回關卡的結果——算價要用的欄位本來就已經齊了，
+    // 不該因為 AI 這次抽風就整個放棄、把客人丟回給一般問答。
+    let collected = gate;
+    if (flow.replyMode !== 'system') {
+      const aiExtracted = await extractStepFields(settings, userMessage, allFields).catch((e: any) => {
+        console.error('[Booking] direct-info extraction failed:', e.message);
+        return {} as Record<string, string>;
+      });
+      const aiCollected = normalizeInto(aiExtracted, allFields);
+      if (quoteFields.every((f) => aiCollected[f.key] !== undefined)) collected = { ...gate, ...aiCollected };
+    }
+
+    // 沿用 startBookingFlow 的判斷：客人可能有一筆還停在「待報價」的舊單（session 過期但訂單還在），
+    // 接續它而不是再開一筆，否則同一位客人會累積出一堆重複的空訂單。
+    let resolvedNickname = nickname;
+    const { data: latestBooking } = await supabase
+      .from('bookings')
+      .select('id, status')
+      .eq('channel_id', activeChannelId)
+      .eq('line_user_id', userId)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    let bookingId: string;
+    if (latestBooking && latestBooking.status === 'inquiring') {
+      bookingId = latestBooking.id;
+      await supabase.from('bookings').update({ flow_id: flow.id, collected_answers: collected, updated_at: new Date().toISOString() }).eq('id', bookingId);
+    } else {
+      try {
+        const p = await lineClient.getProfile(userId);
+        resolvedNickname = p.displayName;
+      } catch {}
+      try {
+        const created = await insertNewBooking({
+          channel_id: activeChannelId,
+          line_user_id: userId,
+          nickname: resolvedNickname,
+          flow_id: flow.id,
+          status: 'inquiring',
+          collected_answers: collected,
+        });
+        bookingId = created.id;
+      } catch (e: any) {
+        console.error('[Booking] direct-info insert failed:', e.message);
+        return false; // 開不了單就當作沒處理過，讓呼叫端照原本的邏輯往下走
+      }
+    }
+
+    const sendReply = (text: string) => lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text }).then(() => {});
+    await finishBookingFlow(lineClient, sendReply, settings, userId, resolvedNickname, flow, collected, bookingId);
+    return true;
+  }
+
+  return false;
 }
 
 // 訂房流程進行到一半時，如果流程本身或當下步驟被後台異動掉（刪除流程／改步驟順序）導致對不上，
