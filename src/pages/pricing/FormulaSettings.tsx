@@ -261,6 +261,9 @@ export default function FormulaSettings() {
     setSavingDeposits(true);
     try {
       if (roomTypes.length) await supabase.from('room_types').upsert(roomTypes);
+      // 包棟押金跟各房型押金放在同一張卡片一起編輯，所以也要一起存——它存在 settings 表、
+      // 不在 room_types，兩個 update 打不同張表但屬於同一次「儲存押金設定」。
+      if (settingsId) await supabase.from('settings').update({ whole_house_security_deposit: wholeHouseSecurityDeposit }).eq('id', settingsId);
       await fetchAll({ silent: true });
       setEditingDeposits(false);
     } catch (e: any) {
@@ -288,7 +291,7 @@ export default function FormulaSettings() {
   const handleSaveDepositSettings = async () => {
     setSavingDepositSettings(true);
     try {
-      if (settingsId) await supabase.from('settings').update({ deposit_percent: depositPercent, whole_house_security_deposit: wholeHouseSecurityDeposit }).eq('id', settingsId);
+      if (settingsId) await supabase.from('settings').update({ deposit_percent: depositPercent }).eq('id', settingsId);
       await fetchAll({ silent: true });
       setEditingDepositSettings(false);
     } catch (e: any) {
@@ -440,37 +443,53 @@ export default function FormulaSettings() {
         onCancel={handleCancelDeposits}
         onSave={handleSaveDeposits}
         view={
-          roomTypes.length === 0 ? (
-            <Typography variant="body2" color="text.disabled">尚未設定任何「房間」類型的資料，請先到「房型與空間維護」新增</Typography>
-          ) : (
-            <Stack direction="row" flexWrap="wrap" gap={1}>
-              {roomTypes.map((r) => (
-                <Chip key={r.id} label={`${r.floor ? `${r.floor}-` : ''}${r.name}　NT$${Number(r.security_deposit || 0).toLocaleString()}`} size="small" variant="outlined" />
-              ))}
-            </Stack>
-          )
+          <Stack spacing={1.5}>
+            {roomTypes.length === 0 ? (
+              <Typography variant="body2" color="text.disabled">尚未設定任何「房間」類型的資料，請先到「房型與空間維護」新增</Typography>
+            ) : (
+              <Stack direction="row" flexWrap="wrap" gap={1}>
+                {roomTypes.map((r) => (
+                  <Chip key={r.id} label={`${r.floor ? `${r.floor}-` : ''}${r.name}　NT$${Number(r.security_deposit || 0).toLocaleString()}`} size="small" variant="outlined" />
+                ))}
+              </Stack>
+            )}
+            <Typography variant="body2" color="text.secondary">
+              包棟押金 <strong>NT$ {wholeHouseSecurityDeposit.toLocaleString()}</strong>
+            </Typography>
+          </Stack>
         }
         edit={
-          <TableContainer>
-            <Table size="small">
-              <TableHead>
-                <TableRow>
-                  <TableCell>房型</TableCell>
-                  <TableCell>押金</TableCell>
-                </TableRow>
-              </TableHead>
-              <TableBody>
-                {roomTypes.map((r) => (
-                  <TableRow key={r.id}>
-                    <TableCell>{r.floor ? `${r.floor}-` : ''}{r.name}（{r.capacity}人）</TableCell>
-                    <TableCell>
-                      <TextField type="number" size="small" variant="standard" value={r.security_deposit ?? 0} onChange={(e) => updateRoomType(r.id, 'security_deposit', Number(e.target.value))} sx={{ width: 110 }} />
-                    </TableCell>
+          <Stack spacing={2}>
+            <TableContainer>
+              <Table size="small">
+                <TableHead>
+                  <TableRow>
+                    <TableCell>房型</TableCell>
+                    <TableCell>押金</TableCell>
                   </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </TableContainer>
+                </TableHead>
+                <TableBody>
+                  {roomTypes.map((r) => (
+                    <TableRow key={r.id}>
+                      <TableCell>{r.floor ? `${r.floor}-` : ''}{r.name}（{r.capacity}人）</TableCell>
+                      <TableCell>
+                        <TextField type="number" size="small" variant="standard" value={r.security_deposit ?? 0} onChange={(e) => updateRoomType(r.id, 'security_deposit', Number(e.target.value))} sx={{ width: 110 }} />
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </TableContainer>
+            <TextField
+              label="包棟押金"
+              type="number"
+              size="small"
+              value={wholeHouseSecurityDeposit}
+              onChange={(e) => setWholeHouseSecurityDeposit(Number(e.target.value))}
+              sx={{ width: 220 }}
+              InputProps={{ endAdornment: <InfoHint text="「訂單管理」手動建單時勾選「是否包棟」，押金欄位就會直接帶入這個金額（仍可手動改）。LINE 自動報價不分包棟／個別租房，一律用上面各房型押金的加總，不會用到這個數字。" /> }}
+            />
+          </Stack>
         }
       />
 
@@ -543,14 +562,12 @@ export default function FormulaSettings() {
           onSave={handleSaveDepositSettings}
           view={
             <Typography variant="body2" color="text.secondary">
-              訂金比例 <strong>{depositPercent}%</strong>　包棟押金（人工建單用）<strong>NT$ {wholeHouseSecurityDeposit.toLocaleString()}</strong>
+              訂金比例 <strong>{depositPercent}%</strong>
             </Typography>
           }
           edit={
             <Stack direction="row" flexWrap="wrap" gap={2}>
               <TextField label="訂金比例（房價的 %）" type="number" size="small" value={depositPercent} onChange={(e) => setDepositPercent(Number(e.target.value))} sx={{ width: 180 }} />
-              <TextField label="包棟押金（人工建單用）" type="number" size="small" value={wholeHouseSecurityDeposit} onChange={(e) => setWholeHouseSecurityDeposit(Number(e.target.value))} sx={{ width: 200 }}
-                InputProps={{ endAdornment: <InfoHint text="LINE 自動報價已經不分個別租房/包棟，這個金額只有「訂單管理」手動建單時勾選「包棟」才會拿來當押金預設值，跟自動報價公式無關。" /> }} />
             </Stack>
           }
         />

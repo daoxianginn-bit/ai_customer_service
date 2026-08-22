@@ -264,10 +264,15 @@ export default function OrderManagement() {
     });
   };
 
-  // 押金預設值：包棟用「報價設定」的固定金額；個別租房用目前勾選房間的押金加總。
-  const defaultSecurityDeposit = form.whole_house
-    ? moneyDefaults.wholeHouseSecurity
-    : selectedRoomIds.reduce((sum, id) => sum + Number(rooms.find((r) => r.id === id)?.security_deposit ?? 0), 0);
+  // 押金預設值：包棟用「計價公式設定 → 房型押金」裡的包棟押金；個別租房用目前勾選房間的押金加總。
+  // 抽成函式是因為勾選「是否包棟」的當下也要用它把金額直接填進押金欄位，那時候 form/selectedRoomIds
+  // 都還是舊值（setState 還沒生效），不能沿用下面用 state 算出來的 defaultSecurityDeposit。
+  const computeDefaultSecurityDeposit = (wholeHouse: boolean, roomIds: string[]) =>
+    wholeHouse
+      ? moneyDefaults.wholeHouseSecurity
+      : roomIds.reduce((sum, id) => sum + Number(rooms.find((r) => r.id === id)?.security_deposit ?? 0), 0);
+
+  const defaultSecurityDeposit = computeDefaultSecurityDeposit(form.whole_house, selectedRoomIds);
 
   // 依房價重算其餘三個金額，用的是跟 LINE 自動報價同一個函式，人工建單才不會算出不同的數字；
   // 管理員仍可在「押金」欄位手動覆蓋這個預設值。
@@ -414,7 +419,9 @@ export default function OrderManagement() {
 
   const openNew = () => {
     setEditingId(null);
-    setForm(emptyForm());
+    // 新訂單一開始就是包棟（emptyForm 的 whole_house 是 true），押金欄位直接帶入包棟押金，
+    // 不要只放在 placeholder 裡當提示——欄位留空存檔會被存成 0，畫面上看到 3000、實際存 0。
+    setForm({ ...emptyForm(), security_deposit: String(moneyDefaults.wholeHouseSecurity) });
     // 新訂單預設「是否包棟」為勾選狀態，房間也跟著預設全選（跟打勾 checkbox 的行為一致）——
     // 這是全新訂單，沒有既有資料要保護，skipRecompute 設 false 讓下面的 effect 直接算出
     // 預設布巾組合，不用像編輯既有訂單那樣跳過第一次重算。
@@ -497,7 +504,9 @@ export default function OrderManagement() {
           : form.room_type_label || null,
         linen_change_count: normalizeChangeCount(Number(form.linen_change_count)),
         room_amount: form.room_amount === '' ? null : Number(form.room_amount),
-        security_deposit: form.security_deposit === '' ? 0 : Number(form.security_deposit),
+        // 留空時存的是畫面上 placeholder 顯示的那個預設金額，不是 0——欄位提示寫著 3000
+        // 卻默默存成 0，訂單總額與押金退款都會跟著錯，而且畫面上完全看不出來。
+        security_deposit: form.security_deposit === '' ? defaultSecurityDeposit : Number(form.security_deposit),
         total_amount: form.total_amount === '' ? null : Number(form.total_amount),
         deposit: form.deposit === '' ? null : Number(form.deposit),
         remit_last5: form.remit_last5 || null,
@@ -825,10 +834,18 @@ export default function OrderManagement() {
                 type="checkbox"
                 checked={form.whole_house}
                 onChange={(e) => {
-                  setForm({ ...form, whole_house: e.target.checked });
+                  const wholeHouse = e.target.checked;
                   // 包棟＝所有房間都開，勾選當下直接把全部房間帶進去，不用管理員自己一間一間點——
                   // 房間一變動，下面的布巾用量會透過既有的 useEffect 自動照每間房的預設組合重算。
-                  if (e.target.checked) setSelectedRoomIds(rooms.map((r) => r.id));
+                  const nextRoomIds = wholeHouse ? rooms.map((r) => r.id) : selectedRoomIds;
+                  // 押金跟著切換：勾起來就套用包棟押金，取消就回到已勾選房間的押金加總。
+                  // 直接寫進欄位而不是只當 placeholder，管理員看到多少就是實際會存進去的金額。
+                  setForm({
+                    ...form,
+                    whole_house: wholeHouse,
+                    security_deposit: String(computeDefaultSecurityDeposit(wholeHouse, nextRoomIds)),
+                  });
+                  if (wholeHouse) setSelectedRoomIds(nextRoomIds);
                 }}
                 className="w-4 h-4"
               />
