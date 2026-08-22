@@ -704,7 +704,8 @@ async function getGoogleAccessToken(serviceAccountJson: string): Promise<string>
     body: `grant_type=${encodeURIComponent('urn:ietf:params:oauth:grant-type:jwt-bearer')}&assertion=${encodeURIComponent(jwt)}`,
   });
   if (!res.ok) throw new Error(`HTTP ${res.status} ${await res.text()}`);
-  const data = await res.json();
+  const data = (await res.json()) as { access_token?: string };
+  if (!data.access_token) throw new Error('Google 回應裡沒有 access_token');
   return data.access_token;
 }
 

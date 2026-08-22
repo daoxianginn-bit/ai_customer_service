@@ -1,0 +1,20 @@
+{
+  "//": "netlify/functions/ 不在主 tsconfig 的 include（那邊只有 src），Netlify 部署時是用 esbuild 打包、不做型別檢查，所以這些檔案過去完全沒有被任何工具檢查過。`npm run typecheck` 會連這份一起跑，讓 functions 跟前端享有同一套把關。",
+  "compilerOptions": {
+    "target": "ES2020",
+    "lib": ["ES2020"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "allowSyntheticDefaultImports": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "//include": "只列 netlify/functions；它們 import 到的 src/lib 檔案會被自動一起檢查。不要整包含 src/lib——那裡面有 supabase.ts、useSettings.ts 這種瀏覽器專用檔（用到 import.meta.env、alert），在 Node 設定下檢查一定會報錯，那些由主 tsconfig 負責。",
+  "include": ["netlify/functions"]
+}
