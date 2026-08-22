@@ -370,6 +370,12 @@ ALTER TABLE public.user_states ADD COLUMN IF NOT EXISTS avatar_url TEXT; -- LINE
 -- 這個只影響「客製訊息發送」頁挑選名單時排不排得到這個人，個別客服對話不受影響。
 ALTER TABLE public.user_states ADD COLUMN IF NOT EXISTS marketing_opt_out BOOLEAN NOT NULL DEFAULT false;
 
+-- 同一位客人幾乎同時傳兩則訊息時，LINE 常常拆成兩次獨立的 webhook 呼叫送過來（不是同一次
+-- events[] 陣列裡那種會被序列化處理的批次），兩次呼叫各自跑在互不相干的 function 執行環境，
+-- 會同時讀寫同一份 booking_session，後寫的蓋掉先寫的。這個欄位是處理訂房流程期間搶的一個帶效期
+-- 鎖位，null／逾期＝目前沒有人在處理，見 line-webhook.ts 的 acquireFlowLock()。
+ALTER TABLE public.user_states ADD COLUMN IF NOT EXISTS flow_lock_at TIMESTAMP WITH TIME ZONE;
+
 -- ========================================================================
 -- 2.5 多 LINE 官方帳號（多 webhook）
 --

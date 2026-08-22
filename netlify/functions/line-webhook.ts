@@ -396,40 +396,61 @@ async function processLineEvent(
     // session，把已經收集好的資訊整個蓋掉——客人會看到報價卡片後面立刻接一句「還需要補充」，
     // 而且怎麼回「是」都卡在同一句，因為當下其實是在回答一個他根本不知道自己開啟的新流程。
     if (settings.is_ai_enabled) {
-      const existingSession = loadBookingSession(userState, settings);
-
-      if (existingSession) {
-        let handled = true;
-        try {
-          handled = await continueBookingFlow(lineClient, lineEvent, settings, userId, nickname, userMessage, existingSession, isImageMessage);
-        } catch (e: any) {
-          console.error('[Booking] continue flow failed:', e.message);
-        }
-        // handled=false 代表流程判斷這則訊息不歸它管，直接往下走一般 AI／知識庫問答照實回答。
-        // 這裡刻意不再比對觸發關鍵字、也不能掉進下面那段「逾時」判斷——session 明明還活著，
-        // 被那段清掉的話顧客之後真的要回答流程時就接不住了。
-        if (handled) return;
-      } else {
-        const activeFlows = await fetchActiveFlows();
-        const matchedFlow = activeFlows.find((f) => matchTriggerRules(userMessage, f.triggerRules));
-        if (matchedFlow) {
-          try {
-            await startBookingFlow(lineClient, lineEvent, settings, userId, nickname, matchedFlow);
-          } catch (e: any) {
-            console.error('[Booking] start flow failed:', e.message);
-          }
-          return;
-        }
-
-        // session 曾經存在、但已經逾時被 loadBookingSession() 判定過期（不是這位客人從沒問過）：
-        // 不能悄悄把這句回覆丟給下面的 AI/知識庫，客人會覺得系統在答非所問，要明確告知重新開始。
-        if (userState?.booking_session) {
-          await clearBookingSession(userId);
-          const replyText = '不好意思，這次詢問已逾時，請重新輸入一次，謝謝您 🙏';
-          await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
+      // 只有「這位客人本來就有 booking_session」才需要搶鎖——全新客人的第一句話不可能跟自己
+      // 的舊 session 競爭。搶到鎖時一併換成當下重新讀到的最新一份 user_states，不能沿用呼叫端
+      // 一開始那份：那份如果剛好是在等鎖期間，已經被前一個持鎖者（處理中的另一則訊息）改過了。
+      let effectiveUserState = userState;
+      let lockAcquired = false;
+      if (userState?.booking_session) {
+        const claimed = await acquireFlowLock(channel.id, userId);
+        if (!claimed) {
+          const replyText = '不好意思，您上一句話還在為您處理中，麻煩稍等幾秒後再重新傳一次，謝謝您 🙏';
+          await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText }).catch(() => {});
           await logConversation(userId, nickname, 'outbound', replyText, 'system');
           return;
         }
+        effectiveUserState = claimed;
+        lockAcquired = true;
+      }
+
+      try {
+        const existingSession = loadBookingSession(effectiveUserState, settings);
+
+        if (existingSession) {
+          let handled = true;
+          try {
+            handled = await continueBookingFlow(lineClient, lineEvent, settings, userId, nickname, userMessage, existingSession, isImageMessage);
+          } catch (e: any) {
+            console.error('[Booking] continue flow failed:', e.message);
+          }
+          // handled=false 代表流程判斷這則訊息不歸它管，直接往下走一般 AI／知識庫問答照實回答。
+          // 這裡刻意不再比對觸發關鍵字、也不能掉進下面那段「逾時」判斷——session 明明還活著，
+          // 被那段清掉的話顧客之後真的要回答流程時就接不住了。
+          if (handled) return;
+        } else {
+          const activeFlows = await fetchActiveFlows();
+          const matchedFlow = activeFlows.find((f) => matchTriggerRules(userMessage, f.triggerRules));
+          if (matchedFlow) {
+            try {
+              await startBookingFlow(lineClient, lineEvent, settings, userId, nickname, matchedFlow);
+            } catch (e: any) {
+              console.error('[Booking] start flow failed:', e.message);
+            }
+            return;
+          }
+
+          // session 曾經存在、但已經逾時被 loadBookingSession() 判定過期（不是這位客人從沒問過）：
+          // 不能悄悄把這句回覆丟給下面的 AI/知識庫，客人會覺得系統在答非所問，要明確告知重新開始。
+          if (effectiveUserState?.booking_session) {
+            await clearBookingSession(userId);
+            const replyText = '不好意思，這次詢問已逾時，請重新輸入一次，謝謝您 🙏';
+            await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
+            await logConversation(userId, nickname, 'outbound', replyText, 'system');
+            return;
+          }
+        }
+      } finally {
+        if (lockAcquired) await releaseFlowLock(channel.id, userId);
       }
     }
 
@@ -762,6 +783,42 @@ async function clearBookingSession(userId: string) {
       .eq('channel_id', activeChannelId).eq('line_user_id', userId);
   } catch (e: any) {
     console.error('[Booking] clear session failed:', e.message);
+  }
+}
+
+// 同一位客人幾乎同時傳兩則訊息時，LINE 常常拆成兩次獨立的 webhook 呼叫（不是同一次
+// events[] 陣列裡那種、下面已經用同一個 for 迴圈序列化處理的批次），兩次呼叫各自在互不相干的
+// function 執行環境平行跑，會同時讀出同一份 booking_session、各自改一改再寫回去，後寫的直接蓋掉
+// 先寫的——實測就是「報價收集到最後一步、客人立刻又問一句話」會讓算價算到一半的狀態被蓋掉，
+// 送出「試算報價時出了狀況」這句求救訊息。
+// 用 user_states.flow_lock_at 當一個帶效期的鎖位：UPDATE ... WHERE 沒鎖或鎖已經過期，
+// 靠資料庫本身處理「同時有兩邊在搶」的競態，搶到的那次連同一份最新的 row 一起讀回來
+// （不能沿用呼叫端一開始那份，那份在等鎖的期間可能已經被前一個持鎖者改過）。
+const FLOW_LOCK_STALE_MS = 20000; // 前一個持鎖者真的當掉、沒釋放鎖時，逾期多久後允許別人搶走
+const FLOW_LOCK_RETRY_DELAYS_MS = [0, 300, 600, 1000, 1500]; // 總共約等 3.4 秒；還搶不到就放棄，不要無限等卡住這次 function 執行
+
+async function acquireFlowLock(channelId: string, userId: string): Promise<any | null> {
+  const cutoffIso = new Date(Date.now() - FLOW_LOCK_STALE_MS).toISOString();
+  for (const delay of FLOW_LOCK_RETRY_DELAYS_MS) {
+    if (delay) await new Promise((r) => setTimeout(r, delay));
+    const { data, error } = await supabase
+      .from('user_states')
+      .update({ flow_lock_at: new Date().toISOString() })
+      .eq('channel_id', channelId)
+      .eq('line_user_id', userId)
+      .or(`flow_lock_at.is.null,flow_lock_at.lt.${cutoffIso}`)
+      .select('*')
+      .maybeSingle();
+    if (!error && data) return data;
+  }
+  return null;
+}
+
+async function releaseFlowLock(channelId: string, userId: string) {
+  try {
+    await supabase.from('user_states').update({ flow_lock_at: null }).eq('channel_id', channelId).eq('line_user_id', userId);
+  } catch (e: any) {
+    console.error('[Booking] release flow lock failed:', e.message);
   }
 }
 
