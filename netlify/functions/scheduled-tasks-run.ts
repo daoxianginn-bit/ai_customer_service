@@ -758,6 +758,17 @@ function formatAdultsKidsGCal(adults: number | null, kids: number | null, infant
   return `${a}大${k}小${i > 0 ? `${i}幼` : ''}`;
 }
 
+// 每個 Google API 呼叫都要等對方回應，訂單一多、依序打就很容易超過 Netlify 單次執行的時間上限
+// 而被中斷連線（呼叫端會收到空的回應內容）。改成一次併發打一批，同一批內互相獨立、失敗互不影響，
+// 大幅縮短總時間；併發數字沒有調太高，避免同時撞到 Google Calendar API 的速率限制。
+const GOOGLE_SYNC_CONCURRENCY = 6;
+
+async function runInBatches<T>(items: T[], concurrency: number, worker: (item: T) => Promise<void>): Promise<void> {
+  for (let i = 0; i < items.length; i += concurrency) {
+    await Promise.all(items.slice(i, i + concurrency).map(worker));
+  }
+}
+
 async function pushBookingsToGoogleCalendar(settings: any): Promise<string> {
   const calendarId = settings.google_calendar_id;
   const serviceAccountJson = settings.google_service_account_json;
@@ -796,7 +807,7 @@ async function pushBookingsToGoogleCalendar(settings: any): Promise<string> {
   let removed = 0;
   let failed = 0;
 
-  for (const b of toPush) {
+  await runInBatches(toPush, GOOGLE_SYNC_CONCURRENCY, async (b: any) => {
     const isExternal = b.booking_source !== 'direct';
     const platformLabel = otaPlatformLabel(b.booking_source);
     // 事件標題一律帶來源前綴，一眼看得出這個檔期是誰來的：
@@ -854,7 +865,7 @@ async function pushBookingsToGoogleCalendar(settings: any): Promise<string> {
       failed++;
       console.error(`[GoogleCalendar] push failed for booking ${b.id}:`, e.message);
     }
-  }
+  });
 
   // 先前同步過、但後來離開佔用狀態的訂單（取消/退款等）：把對應的 Google 事件刪掉。
   const { data: toRemove } = await supabase
@@ -862,7 +873,7 @@ async function pushBookingsToGoogleCalendar(settings: any): Promise<string> {
     .select('id, google_event_id')
     .not('google_event_id', 'is', null)
     .not('status', 'in', `(${OCCUPYING_STATUSES.join(',')})`);
-  for (const b of toRemove || []) {
+  await runInBatches(toRemove || [], GOOGLE_SYNC_CONCURRENCY, async (b: any) => {
     try {
       await deleteGoogleEvent(accessToken, calendarId, b.google_event_id);
       await supabase.from('bookings').update({ google_event_id: null, google_synced_at: null }).eq('id', b.id);
@@ -871,7 +882,7 @@ async function pushBookingsToGoogleCalendar(settings: any): Promise<string> {
       failed++;
       console.error(`[GoogleCalendar] delete failed for booking ${b.id}:`, e.message);
     }
-  }
+  });
 
   const parts = [`新增 ${created} 筆`, `更新 ${updated} 筆`];
   if (removed) parts.push(`移除 ${removed} 筆`);
