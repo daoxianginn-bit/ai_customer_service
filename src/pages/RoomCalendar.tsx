@@ -165,8 +165,16 @@ export default function RoomCalendar() {
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ taskId: syncTaskId }),
       });
-      const result = await res.json();
-      if (!res.ok) throw new Error(result.error || '執行失敗');
+      // 先讀純文字再自己 parse：伺服器逾時中斷連線時回應本文是空的，直接呼叫 res.json()
+      // 會丟出讓人看不懂的「Unexpected end of JSON input」，要先分辨出是不是這種情況。
+      const rawText = await res.text();
+      let result: any = null;
+      try { result = rawText ? JSON.parse(rawText) : null; } catch {}
+      if (!res.ok || !result) {
+        const detail = result?.error
+          || (!rawText ? '伺服器沒有回應內容，可能是這次要同步/推送的訂單量較大，執行時間超過伺服器單次執行上限而中斷' : `HTTP ${res.status}`);
+        throw new Error(detail);
+      }
       setSyncResult({ ok: true, text: result.summary || '整合完成' });
       fetchMonthData();
     } catch (e: any) {
