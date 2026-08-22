@@ -134,6 +134,38 @@ async function resolveChannel(channelId: string | undefined): Promise<LineChanne
   return channels.find((c) => c.role === 'customer') || null;
 }
 
+// 顧客求助真人時的通知。優先送到「系統設定」指定的通知名單——名單自己帶了「用哪個官方帳號發、
+// 發給哪些人」，所以可以直接發到團隊內部用帳號，換人只要在後台改名單。
+// 沒設定名單就退回舊行為（用客戶用帳號推播給 agent_user_ids），避免既有安裝升級後突然靜悄悄。
+// customerClient 是呼叫端已經建好的客戶用帳號 client，退回舊行為時直接沿用，不用重建。
+async function notifyHandover(settings: any, customerClient: Client, text: string): Promise<void> {
+  const groupId = settings.handover_notification_group_id;
+  if (groupId) {
+    const { data: group } = await supabase
+      .from('notification_recipient_groups')
+      .select('channel_id, line_user_ids')
+      .eq('id', groupId)
+      .maybeSingle();
+    const recipients: string[] = group?.line_user_ids || [];
+    if (group && recipients.length) {
+      const { data: groupChannel } = await supabase.from('line_channels').select('*').eq('id', group.channel_id).maybeSingle();
+      if (groupChannel?.channel_access_token) {
+        // 名單所屬帳號自己的 client：LINE 的 user ID 是跟著官方帳號綁的，跨帳號推播一定失敗。
+        const groupClient = new Client({ channelAccessToken: groupChannel.channel_access_token, channelSecret: groupChannel.channel_secret });
+        for (const id of recipients) {
+          try { await groupClient.pushMessage(id, { type: 'text', text }); } catch (e: any) { console.error('[Handover] group push failed:', e.message); }
+        }
+        return;
+      }
+    }
+    console.error('[Handover] 通知名單不存在／沒有聯絡人／帳號憑證未設定，退回 agent_user_ids');
+  }
+
+  for (const id of parseCsvKeywords(settings.agent_user_ids)) {
+    try { await customerClient.pushMessage(id, { type: 'text', text }); } catch (e: any) { console.error('[Handover] agent push failed:', e.message); }
+  }
+}
+
 export const handler: Handler = async (event) => {
   if (event.httpMethod !== 'POST') return { statusCode: 405, body: 'Method Not Allowed' };
 
@@ -234,8 +266,9 @@ async function processLineEvent(
     return;
   }
 
-  // 文字以外只處理圖片：預訂單會請顧客回傳「轉帳明細截圖」，那張圖必須進得來才判讀得到
-  // （見 handleRemittanceReport／analyzeRemittanceImage）。貼圖、影片、語音等仍然略過。
+  // 文字以外只處理圖片：預訂單會請顧客回傳「轉帳明細截圖」，那張圖不判讀內容，但至少要
+  // 進得來，才能通知客服「有人傳了憑證，請人工核對」，而不是整則訊息被丟掉、沒人知道。
+  // 貼圖、影片、語音等仍然略過。
   if (lineEvent.type !== 'message') return;
   const isImageMessage = lineEvent.message.type === 'image';
   if (lineEvent.message.type !== 'text' && !isImageMessage) return;
@@ -243,7 +276,6 @@ async function processLineEvent(
   const userId = lineEvent.source.userId!;
   // 圖片沒有文字內容，用一個固定字串代表，讓對話記錄看得出顧客傳過一張圖。
   const userMessage = isImageMessage ? '[圖片]' : ((lineEvent.message as any).text || '').trim();
-  const imageMessageId = isImageMessage ? (lineEvent.message as any).id : null;
   const eventId = (lineEvent as any).webhookEventId;
 
   if (!userMessage || !eventId) return;
@@ -306,35 +338,30 @@ async function processLineEvent(
       console.log(`[Handover] Triggered by keyword: ${matchedKeyword}`);
       try { const p = await lineClient.getProfile(userId); nickname = p.displayName; } catch (e) {}
 
-      const startedAt = new Date().toISOString();
-
+      // 刻意不設 is_human_mode：顧客喊真人客服只是「請人來看一下」，不代表要把 AI 關掉。
+      // 舊行為會讓 AI 整個靜音等真人接手，真人沒注意到的話顧客就完全沒人理；現在改成 AI 繼續
+      // 正常回答，真人隨時可以在 LINE 官方帳號直接插話。這裡只更新暱稱，狀態完全不動。
       await supabase.from('user_states').upsert({
         channel_id: channel.id,
         line_user_id: userId,
         nickname,
-        is_human_mode: true,
-        last_human_interaction: startedAt
       }, { onConflict: 'channel_id,line_user_id' });
 
+      // 紀錄仍然要留：「AI客服中心」跟「總覽」都會讀這張表統計顧客求助狀況。
       await supabase.from('handover_logs').insert({
         channel_id: channel.id,
         line_user_id: userId,
         nickname,
         triggered_keyword: matchedKeyword,
-        started_at: startedAt,
+        started_at: new Date().toISOString(),
         status: 'open',
       });
 
-      const replyText = '已為您轉接真人客服，請稍候。';
+      const replyText = '已收到您的需求，我們的服務人員會盡快與您聯繫，謝謝您 🙏';
       await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
       logConversation(userId, nickname, 'outbound', replyText, 'system', channel.id);
 
-      const agentIds = settings.agent_user_ids?.split(',').map((id: string) => id.trim()).filter(Boolean);
-      if (agentIds) {
-        for (const id of agentIds) {
-          try { await lineClient.pushMessage(id, { type: 'text', text: `🔔 真人通知：【${nickname}】正在呼叫專人。\n觸發字：${matchedKeyword}\n原文：${userMessage}` }); } catch (e) {}
-        }
-      }
+      await notifyHandover(settings, lineClient, `🔔 真人客服通知：【${nickname || '匿名用戶'}】正在呼叫專人。\n觸發字：${matchedKeyword}\n原文：${userMessage}`);
       return;
     }
 
@@ -372,30 +399,15 @@ async function processLineEvent(
       const existingSession = loadBookingSession(userState, settings);
 
       if (existingSession) {
-        // 顧客在等回報匯款的階段傳圖，多半就是轉帳明細截圖：先下載、交給視覺模型判讀，
-        // 判讀結果一起交給流程決定要不要當成匯款回報（見 handleRemittanceReport）。
-        // 其他階段的圖片不判讀——那跟訂房流程無關，白花一次視覺模型的錢。
-        let imageReport: RemittanceImageReport | null = null;
-        if (isImageMessage && existingSession.phase === 'awaiting_remittance' && imageMessageId) {
-          const image = await fetchLineImageBase64(lineClient, imageMessageId);
-          imageReport = image
-            ? await analyzeRemittanceImage(settings, image.data, image.mimeType).catch((e: any) => {
-                console.error('[Booking] remittance image analyze failed:', e.message);
-                return { isSuccessfulTransfer: false, last5: null, amount: null, summary: '' };
-              })
-            : { isSuccessfulTransfer: false, last5: null, amount: null, summary: '' };
-        }
-
         let handled = true;
         try {
-          handled = await continueBookingFlow(lineClient, lineEvent, settings, userId, nickname, userMessage, existingSession, imageReport);
+          handled = await continueBookingFlow(lineClient, lineEvent, settings, userId, nickname, userMessage, existingSession, isImageMessage);
         } catch (e: any) {
           console.error('[Booking] continue flow failed:', e.message);
         }
-        // handled=false 代表流程判斷這則訊息不歸它管（例如匯款階段收到的其實是一句提問），
-        // 直接往下走一般 AI／知識庫問答照實回答。這裡刻意不再比對觸發關鍵字、也不能掉進
-        // 下面那段「逾時」判斷——session 明明還活著（顧客等一下還要回報匯款），
-        // 被那段清掉的話他之後真的回報時就接不住了。
+        // handled=false 代表流程判斷這則訊息不歸它管，直接往下走一般 AI／知識庫問答照實回答。
+        // 這裡刻意不再比對觸發關鍵字、也不能掉進下面那段「逾時」判斷——session 明明還活著，
+        // 被那段清掉的話顧客之後真的要回答流程時就接不住了。
         if (handled) return;
       } else {
         const activeFlows = await fetchActiveFlows();
@@ -407,16 +419,6 @@ async function processLineEvent(
             console.error('[Booking] start flow failed:', e.message);
           }
           return;
-        }
-
-        // 沒對到任何觸發關鍵字，但「全流程系統自行比對」開著的話，訊息裡如果直接帶了入住資訊
-        // （例如「8/25入住、8/27退房、4人、2間雙人房」），也要能自動進報價流程，不用先講「我要訂房」。
-        if (settings.booking_system_only_mode && !isImageMessage) {
-          try {
-            if (await tryStartFlowFromDirectInfo(lineClient, lineEvent, settings, userId, nickname, userMessage, activeFlows)) return;
-          } catch (e: any) {
-            console.error('[Booking] direct-info trigger failed:', e.message);
-          }
         }
 
         // session 曾經存在、但已經逾時被 loadBookingSession() 判定過期（不是這位客人從沒問過）：
@@ -677,20 +679,13 @@ interface FlowDef {
   // query 型專用：查到／查無訂單時的回覆。null＝用內建預設文字。
   foundMessage: string | null;
   notFoundMessage: string | null;
-  // quote 型專用，報價之後才會用到的三則訊息。null＝用內建預設文字。
+  // quote 型專用，報價之後才會用到的兩則訊息。null＝用內建預設文字。
   // takenMessage：回「是」的當下發現房間已被別人訂走（報價階段不鎖房，所以會有這種情況）。
-  // remittanceReceivedMessage：確認顧客回報的內容真的是轉帳資訊後的回覆。
-  // remittanceUnclearMessage：顧客傳的圖看不出轉帳成功、或抓不到金額與末五碼時的回覆。
+  // remittanceReceivedMessage：預訂單送出後收到顧客訊息（末五碼或截圖）時的回覆。內容不做
+  //   自動判讀，一律轉客服人工核對，所以措辭不要寫死成「已確認收到匯款」。
   takenMessage: string | null;
   remittanceReceivedMessage: string | null;
-  remittanceUnclearMessage: string | null;
   steps: FlowStepDef[];
-}
-
-// settings.booking_system_only_mode 是全站開關，開啟後不管個別流程自己的 reply_mode 設定，
-// 一律強制用純程式解析、不呼叫 AI（省 token）。關閉時完全不影響既有行為，照各流程自己選的模式走。
-function usesSystemMode(flow: FlowDef, settings: any): boolean {
-  return settings?.booking_system_only_mode === true || flow.replyMode === 'system';
 }
 
 function mapFlowRow(row: any, stepRows: any[]): FlowDef {
@@ -709,7 +704,6 @@ function mapFlowRow(row: any, stepRows: any[]): FlowDef {
     notFoundMessage: row.not_found_message ?? null,
     takenMessage: row.taken_message ?? null,
     remittanceReceivedMessage: row.remittance_received_message ?? null,
-    remittanceUnclearMessage: row.remittance_unclear_message ?? null,
     steps: stepRows.map((s: any) => ({ step_order: s.step_order, message_template: s.message_template, fields: s.fields || [] })),
   };
 }
@@ -943,24 +937,6 @@ function scanDates(message: string): string[] {
     if (iso && !found.includes(iso)) found.push(iso);
   }
   return found;
-}
-
-// 「這句話裡有沒有看起來像日期的東西」——純字串比對，不呼叫 AI。
-// 用途是當一道便宜的閘門：顧客在等回「是」或等回報匯款的階段又丟訊息過來時，只有在真的
-// 像是「改了日期要重新報價」的時候，才值得花一次 AI 擷取去確認（見 tryRequoteWithNewBookingInfo）。
-// 認得 DATE_SCAN_RE 的所有寫法。另外多放行一種 DATE_SCAN_RE 會擋掉的情況：8 碼數字的年月
-// 合理、但「日」不存在（例如 20260230）。那種顯然是顧客想填日期只是填錯了，值得讓 AI 去看一眼
-// 順便糾正他，不該被當成「跟訂房無關的訊息」丟給知識庫問答。年份限 2000~2100，
-// 避免把帳號、金額之類的長數字誤認成日期。
-function looksLikeBookingDates(message: string): boolean {
-  if (scanDates(message).length > 0) return true;
-  for (const m of message.matchAll(/(?<!\d)(\d{4})(\d{2})(\d{2})(?!\d)/g)) {
-    const y = Number(m[1]);
-    const mo = Number(m[2]);
-    const d = Number(m[3]);
-    if (y >= 2000 && y <= 2100 && mo >= 1 && mo <= 12 && d >= 1 && d <= 31) return true;
-  }
-  return false;
 }
 
 function scanHeadcount(message: string): string | undefined {
@@ -1409,97 +1385,6 @@ async function startBookingFlow(
   await logConversation(userId, resolvedNickname, 'outbound', firstMessage, 'system');
 }
 
-// 「全流程系統自行比對」開啟時才會用到：客人沒講任何觸發關鍵字，但這句話裡直接帶了入住資訊
-// （例如「8/25入住、8/27退房、4人、2間雙人房」），一樣要能自動進報價流程。
-// 一律用純程式解析（extractStepFieldsWithoutAi），不呼叫 AI——這條路徑存在的目的就是省 token，
-// 呼叫端也只在開關打開時才會呼叫這裡，跟 usesSystemMode() 的判斷邏輯是一致的。
-//
-// 回傳 true 代表這則訊息已經被當成「直接提供訂房資訊」處理掉了（可能是問了缺少的欄位，
-// 也可能是資料齊全、已經直接算出報價），呼叫端不要再回覆。
-async function tryStartFlowFromDirectInfo(
-  lineClient: Client,
-  lineEvent: any,
-  settings: any,
-  userId: string,
-  nickname: string | null,
-  userMessage: string,
-  activeFlows: FlowDef[]
-): Promise<boolean> {
-  // 先用純字串比對擋掉絕大多數不相干的訊息，只有真的像日期才值得往下試。
-  if (!looksLikeBookingDates(userMessage)) return false;
-
-  for (const flow of activeFlows) {
-    if (flow.flowType !== 'quote') continue;
-    const allFields = flow.steps.flatMap((s) => s.fields);
-    if (!allFields.length) continue;
-
-    const extracted = extractStepFieldsWithoutAi(userMessage, allFields);
-    const collected: Record<string, string> = {};
-    for (const f of allFields) {
-      if (extracted[f.key] === undefined) continue;
-      const normalized = normalizeFieldValue(f.value_type, extracted[f.key]);
-      if (normalized !== null) collected[f.key] = normalized;
-    }
-
-    // 至少要真的解析出入住或退房日期，才算「這句話看起來是要訂房」，避免隨口一句剛好帶了
-    // 8 碼數字（例如電話號碼、金額）就被誤判成訂房請求、平白開了一筆訂單。
-    const gotDate = allFields.some(
-      (f) => (f.quote_field === 'checkin_date' || f.quote_field === 'checkout_date') && collected[f.key] !== undefined
-    );
-    if (!gotDate) continue;
-
-    // 沿用 startBookingFlow 同一套「有沒有舊的待報價訂單可以接續」判斷，不要每次都開一筆新單，
-    // 產生同一位客人一堆重複的空白訂單。
-    let resolvedNickname = nickname;
-    let bookingId: string;
-    const { data: latestBooking } = await supabase
-      .from('bookings')
-      .select('id, status')
-      .eq('channel_id', activeChannelId)
-      .eq('line_user_id', userId)
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    if (latestBooking && latestBooking.status === 'inquiring') {
-      bookingId = latestBooking.id;
-      await supabase.from('bookings').update({ flow_id: flow.id, status: 'inquiring', collected_answers: collected }).eq('id', bookingId);
-    } else {
-      try {
-        const p = await lineClient.getProfile(userId);
-        resolvedNickname = p.displayName;
-      } catch {}
-      const data = await insertNewBooking({
-        channel_id: activeChannelId,
-        line_user_id: userId,
-        nickname: resolvedNickname,
-        flow_id: flow.id,
-        status: 'inquiring',
-        collected_answers: collected,
-      });
-      bookingId = data.id;
-    }
-
-    const incompleteStep = flow.steps.find((step) => step.fields.some((f) => collected[f.key] === undefined));
-
-    if (!incompleteStep) {
-      // 必要欄位都已經帶齊了，跳過收集資訊，直接進系統試算。
-      const sendReply = (text: string) => lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text }).then(() => {});
-      await finishBookingFlow(lineClient, sendReply, settings, userId, resolvedNickname, flow, collected, bookingId);
-      return true;
-    }
-
-    // 還缺資料：只問缺的那幾個欄位，已經從這句話裡讀到的不用再問一次。
-    await saveBookingSession(userId, { flowId: flow.id, stepIndex: incompleteStep.step_order - 1, collected, bookingId, phase: 'in_flow', quote: null });
-    const missingLabels = incompleteStep.fields.filter((f) => collected[f.key] === undefined).map((f) => f.label);
-    const replyText = `感謝您提供的資訊！還需要麻煩您補充：${missingLabels.join('、')}`;
-    await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
-    await logConversation(userId, resolvedNickname, 'outbound', replyText, 'system');
-    return true;
-  }
-
-  return false;
-}
-
 // 訂房流程進行到一半時，如果流程本身或當下步驟被後台異動掉（刪除流程／改步驟順序）導致對不上，
 // 不能悄悄清空 session 就不回話——客人會覺得系統掛了。比照關鍵字轉真人的完整流程處理，
 // 讓真人接手，而不是讓客人已讀不回。
@@ -1539,14 +1424,14 @@ async function continueBookingFlow(
   nickname: string | null,
   userMessage: string,
   session: BookingSession,
-  imageReport: RemittanceImageReport | null = null
+  isImage = false
 ): Promise<boolean> {
   if (session.phase === 'awaiting_confirmation') {
     await handleBookingConfirmation(lineClient, lineEvent, settings, userId, nickname, userMessage, session);
     return true;
   }
   if (session.phase === 'awaiting_remittance') {
-    return handleRemittanceReport(lineClient, lineEvent, settings, userId, nickname, userMessage, session, imageReport);
+    return handleRemittanceReport(lineClient, lineEvent, settings, userId, nickname, userMessage, session, isImage);
   }
 
   const flow = await fetchFlowById(session.flowId);
@@ -1561,9 +1446,7 @@ async function continueBookingFlow(
   }
 
   // 系統模式不呼叫 AI，直接用純程式解析顧客回覆（省 token）；AI 模式維持原本的 LLM 擷取。
-  // 系統模式的判定：這個流程自己選了系統模式，或是後台開了「全流程系統自行比對」全站開關
-  // （見 usesSystemMode）——開關開著的話，即使這個流程本來設定是 AI 模式也一律強制不呼叫 AI。
-  const stepUsesSystemMode = usesSystemMode(flow, settings);
+  const stepUsesSystemMode = flow.replyMode === 'system';
   const extracted =
     stepUsesSystemMode
       ? extractStepFieldsWithoutAi(userMessage, currentStep.fields)
@@ -1662,8 +1545,11 @@ async function continueBookingFlow(
   }
   // quote 型流程走到這裡，session.bookingId 一定存在——startBookingFlow() 的 quote 分支
   // 一律先建立/接續一筆 bookings 才會進到收集步驟，不會有 quote 型流程沒有 bookingId 的情況。
+  // 這筆訂單如果是顧客明確要求「重新報價」重啟出來的（見 restartQuoteFlow），要排除掉它取代
+  // 的舊訂單，否則舊單如果還鎖著房，顧客會被自己上一筆訂單擋住，新報價永遠算不出來。
+  const { data: bookingRow } = await supabase.from('bookings').select('supersedes_booking_id').eq('id', session.bookingId).maybeSingle();
   const sendReply = (text: string) => lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text }).then(() => {});
-  await finishBookingFlow(lineClient, sendReply, settings, userId, nickname, flow, collected, session.bookingId!);
+  await finishBookingFlow(lineClient, sendReply, settings, userId, nickname, flow, collected, session.bookingId!, false, bookingRow?.supersedes_booking_id ?? null);
   return true;
 }
 
@@ -1759,7 +1645,7 @@ async function finishBookingFlow(
   // 轉真人」的訊息與通知，避免同一次重試對客人送出兩則互相矛盾的訊息（先講「已候補」
   // 又馬上講「放棄候補」）。
   isRetry = false,
-  // 這筆報價取代掉的舊訂單（顧客改了日期重新報價，見 tryRequoteWithNewBookingInfo）。
+  // 這筆報價取代掉的舊訂單（顧客明確要求「重新報價」重啟出來的，見 restartQuoteFlow）。
   // 舊那筆如果還鎖著房，算房間時要排除掉，否則顧客會被自己上一筆訂單擋住。
   supersedesBookingId: string | null = null
 ) {
@@ -2014,17 +1900,46 @@ async function finishBookingFlow(
   }
 }
 
-// 顧客在「等回是/否」或「等回報匯款」的階段，又丟了一組新的日期/人數過來：以最後一筆為準，
-// 直接用新資訊重新報價，不要卡著問「請回覆是或否」。
+// 顧客在等回「是/否」的階段明確回覆「重新報價」：清空目前收集到的資料，同一個流程從第一步
+// 重新問一次（不是猜他改了什麼，是整個重來）。
 //
-// 重新報價一律另外開一筆新訂單，而不是把舊那筆改掉——保留舊單才看得出顧客改過什麼、
-// 舊單如果已經收過款也才有帳可對。兩筆的關係記在新單的 supersedes_booking_id：
+// 另外開一筆新訂單，而不是把舊那筆改掉——保留舊單才看得出顧客改過什麼、舊單如果已經收過款
+// 也才有帳可對。兩筆的關係記在新單的 supersedes_booking_id：
 //   舊單還在「待預定」（報價送出、顧客還沒回是）：沒鎖房也沒收錢，當場就取消，留著沒意義。
-//   舊單已經是「待確認」（顧客回過是、可能已匯款）：先留著不動，等顧客確認新報價時才取消
-//     （見 handleBookingConfirmation），否則顧客最後回「否」的話兩筆就都沒了。
+//   舊單已經是「待確認」（顧客回過是、可能已匯款）：先留著不動，等新報價被接受時才取消
+//     （見 handleBookingConfirmation 的 isYes 分支），否則顧客這次重新報價又回「否」的話，
+//     兩筆就都沒了。
+// 顧客明確要求重填訂房資訊的指令。報價確認與等匯款兩個階段都認得同一組字，
+// 顧客不用記在哪個階段該打哪個字。整句話要以這些字開頭才算，避免「我不想修改」被誤判。
+function isRestartCommand(message: string): boolean {
+  return /^(修改|重新報價|重新試算|重新算|改訂單|改資料)/i.test(message.trim());
+}
+
+// 「是/否」的判定：整句話必須就是那個答案，只允許差在標點與語尾助詞。
 //
-// 回傳 true 代表這則訊息已經被當成「重新報價」處理掉了，呼叫端不要再回覆。
-async function tryRequoteWithNewBookingInfo(
+// 原本是用開頭比對（/^(是|對|好|要|...)/），只要句子開頭一個字命中就算數，結果
+// 「好啊但我想改成10/10」「好像有點貴」「要再想一下」全部會被判成同意，當場成立訂單、
+// 鎖房、送出匯款帳號。這種話真正的意思是「有其他要求」，該由真人接手處理，AI 不能自作主張——
+// 訂單一旦成立就牽涉到房間與金流，寧可多問一句，也不要猜錯方向。
+const YES_ANSWERS = new Set(['是', '對', '好', '要', '確定', '沒問題', 'ok', 'okay', 'yes', 'y']);
+const NO_ANSWERS = new Set(['否', '不', '不要', '不用', '不需要', '取消', 'no', 'n']);
+
+function normalizeShortAnswer(message: string): string {
+  return message
+    .trim()
+    .toLowerCase()
+    .replace(/[\s。，、；：！？!?~～．.…「」『』()（）]/g, '') // 標點與空白
+    .replace(/(的|了|啊|阿|喔|噢|唷|呀|吧|囉|嘍|喲|耶|哦|呦)+$/, ''); // 語尾助詞：「好的」「好啊」都還是「好」
+}
+
+// 顧客在等回「是/否」的階段，直接把整組新的訂房資訊丟回來（通常是把報價表單重填一次送出）。
+// 以新的為準：取消上一筆報價、開一筆新訂單帶著新資料，跳過收集步驟直接進系統試算。
+//
+// 刻意要求「流程定義的每一個欄位都解析得到」才算數，只有零星幾個欄位不算——那更可能是顧客在
+// 問別的事情（例如「2台車可以停嗎」剛好被抽出一個數字），貿然重算會把他原本那筆報價弄不見。
+//
+// 回傳 true 代表已經處理掉了（新報價已送出，或試算失敗但也已經回覆顧客），呼叫端不要再回。
+async function tryRequoteFromCompleteInfo(
   lineClient: Client,
   lineEvent: any,
   settings: any,
@@ -2033,48 +1948,43 @@ async function tryRequoteWithNewBookingInfo(
   userMessage: string,
   session: BookingSession
 ): Promise<boolean> {
-  // 先用純字串比對擋掉絕大多數不相干的訊息，只有真的像日期才值得花一次 AI 擷取。
-  if (!looksLikeBookingDates(userMessage) || !session.bookingId) return false;
-
+  if (!session.bookingId) return false;
   const flow = await fetchFlowById(session.flowId);
   if (!flow || flow.flowType !== 'quote') return false;
 
-  // 顧客通常是把整張表單重填一次送回來，所以拿整個流程的欄位去擷取，不是只有某一個步驟的。
   const allFields = flow.steps.flatMap((s) => s.fields);
+  if (!allFields.length) return false;
+
   const extracted =
-    usesSystemMode(flow, settings)
+    flow.replyMode === 'system'
       ? extractStepFieldsWithoutAi(userMessage, allFields)
       : await extractStepFields(settings, userMessage, allFields).catch((e: any) => {
           console.error('[Booking] requote extraction failed:', e.message);
           return {} as Record<string, string>;
         });
 
+  const collected: Record<string, string> = {};
   for (const f of allFields) {
     if (extracted[f.key] === undefined) continue;
     const normalized = normalizeFieldValue(f.value_type, extracted[f.key]);
-    if (normalized === null) delete extracted[f.key];
-    else extracted[f.key] = normalized;
+    if (normalized !== null) collected[f.key] = normalized;
   }
 
-  // 一定要真的擷取到日期才算「改期重新報價」。只有人數之類的零星數字就不算——
-  // 那更可能是顧客在回答別的問題，貿然開新單反而把他原本的訂單流程打斷。
-  const gotNewDate = allFields.some(
-    (f) => (f.quote_field === 'checkin_date' || f.quote_field === 'checkout_date') && extracted[f.key] !== undefined
-  );
-  if (!gotNewDate) return false;
-
-  const merged = { ...session.collected, ...extracted };
+  // 少一個欄位就不算「完整訂房資訊」，交回呼叫端照原本的四選一提示處理。
+  if (allFields.some((f) => collected[f.key] === undefined)) return false;
 
   const { data: oldBooking } = await supabase
     .from('bookings')
-    .select('id, status, order_number')
+    .select('id, status')
     .eq('id', session.bookingId)
     .maybeSingle();
 
-  // 舊單還沒鎖房也沒收錢：當場取消。已經是待確認的就先留著，等新報價被接受再說。
-  if (oldBooking && oldBooking.status === 'awaiting_deposit') {
-    await supabase.from('bookings').update({ status: 'cancelled', updated_at: new Date().toISOString() }).eq('id', oldBooking.id);
-    await saveBookingRooms(oldBooking.id, []);
+  // 上一筆報價直接作廢（顧客已經給了新內容，舊的沒有保留價值）。它還停在「待預定」，
+  // 沒鎖房也沒收錢，取消不會有帳務問題。
+  const cancelledNow = !!oldBooking && oldBooking.status === 'awaiting_deposit';
+  if (cancelledNow) {
+    await supabase.from('bookings').update({ status: 'cancelled', updated_at: new Date().toISOString() }).eq('id', oldBooking!.id);
+    await saveBookingRooms(oldBooking!.id, []);
   }
 
   let newBooking: any;
@@ -2085,8 +1995,9 @@ async function tryRequoteWithNewBookingInfo(
       nickname,
       flow_id: flow.id,
       status: 'inquiring',
-      collected_answers: merged,
-      supersedes_booking_id: oldBooking?.id ?? null,
+      collected_answers: collected,
+      // 只有「舊單還活著」才需要記這層取代關係（客服在顧客回覆前手動把訂單往前推過的情況）。
+      supersedes_booking_id: oldBooking && !cancelledNow && oldBooking.status !== 'cancelled' ? oldBooking.id : null,
     });
   } catch (e: any) {
     console.error('[Booking] requote insert failed:', e.message);
@@ -2101,13 +2012,67 @@ async function tryRequoteWithNewBookingInfo(
     userId,
     nickname,
     flow,
-    merged,
+    collected,
     newBooking.id,
     false,
-    // 舊單如果還鎖著房（待確認），算房間時要排除它，否則顧客會被自己上一筆訂單擋住。
-    oldBooking && oldBooking.status !== 'cancelled' ? oldBooking.id : null
+    oldBooking && !cancelledNow && oldBooking.status !== 'cancelled' ? oldBooking.id : null
   );
   return true;
+}
+
+async function restartQuoteFlow(
+  lineClient: Client,
+  lineEvent: any,
+  settings: any,
+  userId: string,
+  nickname: string | null,
+  session: BookingSession
+): Promise<void> {
+  const flow = await fetchFlowById(session.flowId);
+  const firstStep = flow?.steps.find((s) => s.step_order === 1);
+  if (!flow || !firstStep || !session.bookingId) {
+    await handoverBrokenFlowSession(lineClient, lineEvent, settings, userId, nickname);
+    return;
+  }
+
+  const { data: oldBooking } = await supabase
+    .from('bookings')
+    .select('id, status')
+    .eq('id', session.bookingId)
+    .maybeSingle();
+
+  // 舊單還沒鎖房也沒收錢：當場取消。已經是待確認的（客服在顧客還沒回覆的期間手動把訂單往前推
+  // 過，例如直接改成已預定）就先留著，等新報價被接受再說。
+  const cancelledNow = !!oldBooking && oldBooking.status === 'awaiting_deposit';
+  if (cancelledNow) {
+    await supabase.from('bookings').update({ status: 'cancelled', updated_at: new Date().toISOString() }).eq('id', oldBooking!.id);
+    await saveBookingRooms(oldBooking!.id, []);
+  }
+
+  let newBooking: any;
+  try {
+    newBooking = await insertNewBooking({
+      channel_id: activeChannelId,
+      line_user_id: userId,
+      nickname,
+      flow_id: flow.id,
+      status: 'inquiring',
+      collected_answers: {},
+      // 只有「舊單還活著」才需要記這層取代關係——它等一下要被排除在房況之外，新報價被接受時
+      // 也要一併取消。上面剛取消掉的那種不用記：oldBooking.status 是更新前讀到的舊值，
+      // 拿它直接比對 'cancelled' 會誤判成還活著，所以用 cancelledNow 判斷實際有沒有取消。
+      supersedes_booking_id: oldBooking && !cancelledNow && oldBooking.status !== 'cancelled' ? oldBooking.id : null,
+    });
+  } catch (e: any) {
+    console.error('[Booking] restart quote insert failed:', e.message);
+    await handoverBrokenFlowSession(lineClient, lineEvent, settings, userId, nickname);
+    return;
+  }
+
+  await saveBookingSession(userId, { flowId: flow.id, stepIndex: 0, collected: {}, bookingId: newBooking.id, phase: 'in_flow', quote: null });
+  const firstMessage = await renderFlowMessage(firstStep.message_template, settings, userId, nickname, newBooking.id);
+  await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: firstMessage });
+  await logConversation(userId, nickname, 'outbound', firstMessage, 'system');
 }
 
 async function handleBookingConfirmation(
@@ -2120,17 +2085,32 @@ async function handleBookingConfirmation(
   session: BookingSession
 ) {
   const trimmed = userMessage.trim();
-  const isNo = /^(否|不要|不需要|取消|no)/i.test(trimmed);
-  const isYes = !isNo && /^(是|對|確定|好|要|沒問題|ok|yes)/i.test(trimmed);
+  const answer = normalizeShortAnswer(trimmed);
+  const isNo = NO_ANSWERS.has(answer);
+  const isYes = !isNo && YES_ANSWERS.has(answer);
+
+  // 報價確認送出之後，顧客只能回「是」「否」「真人客服」或「修改／重新報價」——
+  // 「真人客服」在更上層（handoverKeywords）就攔截掉了，不會走到這裡。
+  if (isRestartCommand(trimmed)) {
+    await restartQuoteFlow(lineClient, lineEvent, settings, userId, nickname, session);
+    return;
+  }
 
   if (!isYes && !isNo) {
-    // 這句話不是在回答是/否，很可能是客人點了圖文選單之類的自動回覆按鈕，剛好在等報價回覆
-    // 的當下觸發了另一個流程的關鍵字——這時候該讓那個自動回覆正常顯示，而不是硬用「請回是/否」
-    // 卡住客人（客人根本不知道自己在被問是/否，只會覺得 AI 答非所問）。
+    // 顧客直接把整組新的訂房資訊丟回來（例如整張表單重填一次）：以新的為準，取消上一筆報價、
+    // 開一筆新訂單，跳過收集步驟直接進系統試算。刻意要求「解析得出完整資訊」才算——
+    // 只有零星幾個欄位的話更可能是他在問別的事，貿然重算會把他原本那筆報價弄不見。
+    if (await tryRequoteFromCompleteInfo(lineClient, lineEvent, settings, userId, nickname, userMessage, session)) return;
+
+    // 這句話不是在回答是/否/修改，很可能是客人點了圖文選單之類的自動回覆按鈕，剛好在等
+    // 報價回覆的當下觸發了另一個流程的關鍵字——這時候該讓那個自動回覆正常顯示，而不是硬用
+    // 「請回是/否」卡住客人（客人根本不知道自己在被問是/否，只會覺得 AI 答非所問）。
+    // 一定要排除流程自己：顧客打到自己流程的觸發字（例如「價格」）會拿到一張空白表單，
+    // 但 session 還停在等是/否，填完送出又被擋回來，繞不出去。
     // 刻意不呼叫 startBookingFlow()：那會建新訂單、覆蓋掉這筆待確認的 session，讓客人之後
     // 真的回「是」或「否」時已經接不回這筆報價了。這裡只送出對方流程的第一句話當作提示，
     // session 完全不動，原本待確認的報價繼續安靜留著。
-    const interruptingFlow = (await fetchActiveFlows()).find((f) => matchTriggerRules(trimmed, f.triggerRules));
+    const interruptingFlow = (await fetchActiveFlows()).find((f) => f.id !== session.flowId && matchTriggerRules(trimmed, f.triggerRules));
     const interruptingFirstStep = interruptingFlow?.steps.find((s) => s.step_order === 1);
     if (interruptingFirstStep) {
       const replyText = await renderFlowMessage(interruptingFirstStep.message_template, settings, userId, nickname, null);
@@ -2139,12 +2119,18 @@ async function handleBookingConfirmation(
       return; // 停留在 awaiting_confirmation，不清 session
     }
 
-    // 顧客沒回是/否，而是又丟了一組新的日期人數：以最後一筆為準，直接重新報價。
-    if (await tryRequoteWithNewBookingInfo(lineClient, lineEvent, settings, userId, nickname, userMessage, session)) return;
-
-    const replyText = '不好意思，麻煩回覆「是」確認訂房，或「否」取消，謝謝！';
+    // 走到這裡代表顧客回的既不是是/否/修改，也不是完整的新訂房資訊——最常見的就是
+    // 「好啊但我想改成10/10」這種「開頭像同意、實際上另有要求」的句子。AI 不猜他的意思，
+    // 只回一句可選項目，同時通知真人接手，由真人判斷他到底要什麼。
+    // session 完全不動：真人處理完之後，顧客回「是」還是接得回這筆報價。
+    const replyText = '不好意思，這部分我們請專人為您確認，稍後會與您聯繫 🙏\n如果您已經確定，也可以直接回覆「是」訂房、「否」取消，或回覆「修改」重新填寫訂房資訊。';
     await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
     await logConversation(userId, nickname, 'outbound', replyText, 'system');
+    await notifyHandover(
+      settings,
+      lineClient,
+      `🙋 報價確認階段需要人工判斷：【${nickname || '匿名用戶'}】\n顧客回覆：${userMessage}\n（不是單純的是/否/修改，系統沒有自行成立訂單，請人工接手回覆）`
+    );
     return; // 停留在 awaiting_confirmation，不清 session
   }
 
@@ -2293,17 +2279,17 @@ async function handleBookingConfirmation(
   await saveBookingSession(userId, { ...session, phase: 'awaiting_remittance' });
 }
 
-// 預訂單裡請顧客回傳的是「帳號後五碼」或「轉帳明細截圖」，所以只有這兩種內容才算數：
-//   文字：抓得到連續 5 位數字。
-//   圖片：交給視覺模型判讀，必須看得出是轉帳/交易成功、而且抓得到金額或末五碼（見 analyzeRemittanceImage）。
-// 其餘訊息一律「不算回報」——過去這裡不分青紅皂白，顧客只是問一句「請問幾點可以入住」也會收到
-// 「已收到您的匯款回報」，客服還會被通知一筆根本不存在的匯款；現在改成回傳 false 讓呼叫端
-// 往下走一般 AI 問答照實回答他的問題，session 保持不動，顧客之後真的要回報時仍然接得住。
+// 預訂單送出之後顧客傳來的第一則訊息。
 //
-// 確認是真的回報之後才推播通知客服＋清 session。不強制轉真人——真人會自己去「訂單管理」核對
-// 這筆訂單、核對後把狀態改成已預定即可，不需要透過即時對話接手，顧客也能繼續正常使用 AI 問答。
+// 這個階段「不做任何自動判定」——文字不再抓連續 5 位數字當末五碼、圖片也不再送視覺模型判讀，
+// 一律推播原文給客服人工核對。原本的自動判定誤判率太高：任何含 5 位數字的句子都會成立，
+// 「我的電話0912345678」會被抓成末五碼 09123、「總共25000元對嗎」會被抓成 25000，
+// 顧客收到「已收到您的匯款回報」、客服還被通知一筆根本不存在的匯款去查帳。
+// 匯款金額是真金白銀，寧可每一筆都讓人看一眼，也不要自動放行。
 //
-// 回傳 true＝已經回覆過顧客，呼叫端不要再回；false＝沒處理，請呼叫端往下走一般問答。
+// 唯一的例外是顧客回「修改」／「重新報價」：那是明確的指令，直接清空重走報價流程。
+//
+// 回傳值固定是 true（一定會回覆顧客），保留 boolean 是為了跟 continueBookingFlow 的其他分支一致。
 async function handleRemittanceReport(
   lineClient: Client,
   lineEvent: any,
@@ -2312,15 +2298,21 @@ async function handleRemittanceReport(
   nickname: string | null,
   userMessage: string,
   session: BookingSession,
-  // 圖片訊息：已經由視覺模型判讀完的結果。文字訊息時是 null。
-  imageReport: RemittanceImageReport | null = null
+  isImage = false
 ): Promise<boolean> {
-  // 跟 handleBookingConfirmation 同樣的考量：這個階段收到的訊息不一定真的是在回報匯款，
-  // 也可能是客人點了圖文選單之類的按鈕，剛好觸發了另一個流程的關鍵字。
-  // 先讓那個自動回覆正常顯示，session 保持不動，不當成回報處理。
-  const interruptingFlow = imageReport
+  // 顧客要改訂房內容：明確指令才算，不猜。清空重走，跟報價確認階段同一套。
+  if (!isImage && isRestartCommand(userMessage)) {
+    await restartQuoteFlow(lineClient, lineEvent, settings, userId, nickname, session);
+    return true;
+  }
+
+  // 客人點了圖文選單之類的按鈕，剛好觸發「別的」流程的關鍵字：讓那個自動回覆正常顯示。
+  // 一定要排除流程自己——不然顧客打到自己流程的觸發字（例如「價格」）會拿到一張空白表單，
+  // 但 session 還停在等匯款，填完送出又被當成新訊息，繞不出去。
+  const currentFlowId = session.flowId;
+  const interruptingFlow = isImage
     ? undefined
-    : (await fetchActiveFlows()).find((f) => matchTriggerRules(userMessage, f.triggerRules));
+    : (await fetchActiveFlows()).find((f) => f.id !== currentFlowId && matchTriggerRules(userMessage, f.triggerRules));
   const interruptingFirstStep = interruptingFlow?.steps.find((s) => s.step_order === 1);
   if (interruptingFirstStep) {
     const replyText = await renderFlowMessage(interruptingFirstStep.message_template, settings, userId, nickname, null);
@@ -2329,52 +2321,27 @@ async function handleRemittanceReport(
     return true; // 停留在 awaiting_remittance，不清 session
   }
 
-  // 顧客這時候改口要換日期，一樣以最後一筆為準，直接重新報價。
-  if (!imageReport && (await tryRequoteWithNewBookingInfo(lineClient, lineEvent, settings, userId, nickname, userMessage, session))) {
-    return true;
-  }
-
   const flow = await fetchFlowById(session.flowId);
-
-  // 圖片看得出是轉帳成功才算數；看不出來就請顧客再傳一次或直接給末五碼，不要當成已回報。
-  if (imageReport && !imageReport.isSuccessfulTransfer) {
-    const DEFAULT_UNCLEAR_MESSAGE = '不好意思，這張圖我們看不太出來是否為轉帳成功的畫面 🙏\n麻煩您再傳一次完整的轉帳成功明細（要看得到「交易成功」與金額），或直接回覆匯款帳號的後五碼，謝謝您！';
-    const replyText = await renderFlowMessage(flow?.remittanceUnclearMessage || DEFAULT_UNCLEAR_MESSAGE, settings, userId, nickname, session.bookingId);
-    await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
-    await logConversation(userId, nickname, 'outbound', replyText, 'system');
-    return true; // 停留在 awaiting_remittance，等顧客再傳一次
-  }
-
-  const textLast5 = userMessage.match(/\d{5}/)?.[0] || null; // 抓第一組連續 5 位數字當作匯款帳號後五碼
-  const remit_last5 = imageReport ? imageReport.last5 || textLast5 : textLast5;
-
-  // 不是圖片、文字裡也沒有五碼數字：這句話不是匯款回報，交給一般問答照實回答顧客的問題。
-  if (!imageReport && !remit_last5) return false;
-
-  // 2026-08 改版後，狀態早在客人回「是」的當下就已經轉成「待確認」（見 handleBookingConfirmation()），
-  // 這裡不用也不該再轉一次狀態——單純只是把客人這句回報裡抓到的末五碼記錄下來，供客服核對用。
   const { data: booking } = await supabase
     .from('bookings')
-    .update({ ...(remit_last5 ? { remit_last5 } : {}), updated_at: new Date().toISOString() })
+    .select('order_number')
     .eq('id', session.bookingId)
-    .select()
-    .single();
+    .maybeSingle();
 
-  const DEFAULT_RECEIVED_MESSAGE = '好的，已收到您的匯款回報，我們核對後會盡快為您確認訂房，謝謝您的耐心等候 🙏';
+  const DEFAULT_RECEIVED_MESSAGE = '好的，已收到您的訊息，我們核對後會盡快為您確認訂房，謝謝您的耐心等候 🙏';
   const replyText = await renderFlowMessage(flow?.remittanceReceivedMessage || DEFAULT_RECEIVED_MESSAGE, settings, userId, nickname, session.bookingId);
   await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
   await logConversation(userId, nickname, 'outbound', replyText, 'system');
 
+  // 客服要自己去 LINE 官方帳號看顧客傳了什麼（截圖只能在那邊看），核對到帳後在「訂單管理」
+  // 填末五碼、把狀態改成已預定。系統不再代為判讀，也不再自動寫入 remit_last5。
   const orderNumber = booking?.order_number || '';
-  const last5Text = remit_last5 ? `末五碼 ${remit_last5}` : '（沒有抓到 5 碼數字，請自行確認原文/截圖）';
-  const sourceText = imageReport
-    ? `轉帳截圖${imageReport.amount ? `，金額 ${imageReport.amount}` : ''}${imageReport.summary ? `\n判讀內容：${imageReport.summary}` : ''}`
-    : `原文：${userMessage}`;
+  const sourceText = isImage ? '內容：顧客傳了一張圖片（請到 LINE 官方帳號查看）' : `原文：${userMessage}`;
   for (const id of parseCsvKeywords(settings.agent_user_ids)) {
     try {
       await lineClient.pushMessage(id, {
         type: 'text',
-        text: `💰 匯款回報：【${nickname || '匿名用戶'}】訂單 ${orderNumber} 回報${last5Text}\n${sourceText}\n查帳無誤後請至「訂單管理」將狀態改為已預定。`,
+        text: `💰 待核對匯款：【${nickname || '匿名用戶'}】訂單 ${orderNumber}\n${sourceText}\n請人工核對是否到帳，無誤後至「訂單管理」填寫匯款末五碼並將狀態改為已預定。`,
       });
     } catch {}
   }
@@ -2383,88 +2350,6 @@ async function handleRemittanceReport(
   return true;
 }
 
-// ========================================================================
-// 轉帳截圖判讀
-//
-// 預訂單請顧客回傳「帳號後五碼」或「轉帳明細截圖」。截圖沒辦法用字串比對判斷，交給視覺模型
-// 看圖回答三件事：這是不是一張轉帳/交易成功的畫面、末五碼、金額。只有確定成功才算數——
-// 把「轉帳失敗」「餘額不足」的截圖也當成已匯款，客服會憑一筆不存在的入帳去確認訂房。
-// ========================================================================
-
-interface RemittanceImageReport {
-  isSuccessfulTransfer: boolean;
-  last5: string | null;
-  amount: string | null;
-  summary: string; // 給客服看的一句話摘要，人工核帳時可以快速比對
-}
-
-const REMITTANCE_IMAGE_PROMPT =
-  '你是負責核對匯款憑證的助手。請看這張圖片，判斷它是不是一張「轉帳成功／交易成功」的匯款明細畫面。\n' +
-  '只回傳一個 JSON 物件，不要加任何其他文字、不要用 markdown code block，格式如下：\n' +
-  '{"success": true/false, "last5": "轉入或轉出帳號的後五碼，看不到就填 null", "amount": "轉帳金額純數字，看不到就填 null", "summary": "20 字以內的中文摘要，說明畫面上看到什麼"}\n' +
-  '規則：\n' +
-  '1. 畫面必須明確顯示「轉帳成功」「交易成功」「完成」之類的成功字樣，success 才可以是 true。\n' +
-  '2. 顯示失敗、處理中、餘額不足、或根本不是匯款畫面（例如風景照、對話截圖），success 一律 false。\n' +
-  '3. 看不清楚、無法判斷時 success 填 false，不要猜測。';
-
-function parseRemittanceImageResult(raw: string): RemittanceImageReport {
-  try {
-    const cleaned = raw.trim().replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '');
-    const parsed = JSON.parse(cleaned);
-    const last5 = typeof parsed.last5 === 'string' ? parsed.last5.replace(/\D/g, '') : '';
-    const amount = parsed.amount == null ? '' : String(parsed.amount).replace(/[^\d.]/g, '');
-    return {
-      isSuccessfulTransfer: parsed.success === true,
-      last5: last5.length >= 5 ? last5.slice(-5) : null,
-      amount: amount || null,
-      summary: typeof parsed.summary === 'string' ? parsed.summary : '',
-    };
-  } catch {
-    // 解析不出來一律當作「看不出是成功轉帳」，寧可請顧客再傳一次，也不要誤放行。
-    return { isSuccessfulTransfer: false, last5: null, amount: null, summary: '' };
-  }
-}
-
-async function analyzeRemittanceImage(settings: any, imageBase64: string, mimeType: string): Promise<RemittanceImageReport> {
-  if (settings.active_ai === 'gpt') {
-    // Chat Completions 的圖片輸入吃 data: URI，不需要先把圖片傳到別的地方存放。
-    const openai = new OpenAI({ apiKey: settings.gpt_api_key });
-    const completion = await openai.chat.completions.create({
-      model: settings.gpt_model_name,
-      messages: [
-        {
-          role: 'user',
-          content: [
-            { type: 'text', text: REMITTANCE_IMAGE_PROMPT },
-            { type: 'image_url', image_url: { url: `data:${mimeType};base64,${imageBase64}` } },
-          ] as any,
-        },
-      ],
-    } as any);
-    return parseRemittanceImageResult(completion.choices[0]?.message?.content || '');
-  }
-
-  const raw = await callGeminiRaw(settings, [
-    { role: 'user', parts: [{ text: REMITTANCE_IMAGE_PROMPT }, { inline_data: { mime_type: mimeType, data: imageBase64 } }] },
-  ]);
-  return parseRemittanceImageResult(raw);
-}
-
-// LINE 的圖片內容要另外用 messageId 去下載，webhook 事件本身只帶 id 不帶圖。
-// 回傳 base64——視覺模型兩邊（GPT 的 data: URI、Gemini 的 inline_data）吃的都是這個格式。
-async function fetchLineImageBase64(lineClient: Client, messageId: string): Promise<{ data: string; mimeType: string } | null> {
-  try {
-    const stream = await lineClient.getMessageContent(messageId);
-    const chunks: Buffer[] = [];
-    for await (const chunk of stream as any) chunks.push(Buffer.from(chunk));
-    if (!chunks.length) return null;
-    // LINE 傳過來的照片一律是 JPEG（官方規格），所以不用再去猜格式。
-    return { data: Buffer.concat(chunks).toString('base64'), mimeType: 'image/jpeg' };
-  } catch (e: any) {
-    console.error('[LINE] fetch image content failed:', e.message);
-    return null;
-  }
-}
 
 // ========================================================================
 // 候補自動回報（排程管理的「候補自動配對」排程呼叫 processWaitlist()）

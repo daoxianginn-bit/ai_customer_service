@@ -352,12 +352,6 @@ ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS deposit_percent NUMERIC NOT
 -- 半夜的客服又看不到通知。現在改成後台可調整的「送出後 N 小時」，見 line-webhook.ts 的
 -- computePaymentDeadlineDate()。
 ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS payment_deadline_hours INTEGER NOT NULL DEFAULT 10;
--- 全流程系統自行比對：開啟後，訂房流程（不分各流程自己的 reply_mode 設定）一律強制走
--- 純程式規則解析、不呼叫 AI——包含用顧客訊息裡直接出現的日期/人數等資訊，在完全沒對到
--- 觸發關鍵字的情況下也能自動進入報價流程（見 line-webhook.ts 的 tryStartFlowFromDirectInfo）。
--- 唯一的例外是付款確認階段的轉帳截圖判讀，那個永遠需要視覺模型，不受這個開關影響。
--- 預設關閉，不影響任何既有安裝的行為；開啟前請確認目前用的 AI 型號支援圖片輸入。
-ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS booking_system_only_mode BOOLEAN NOT NULL DEFAULT false;
 -- 包棟押金：見上面 security_deposit_amount 的說明，這是給新的（個別房型押金加總 vs 包棟固定金額）
 -- 兩種算法用的正式欄位名稱；security_deposit_amount 保留給包棟繼續用，新程式碼一律讀這個。
 ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS whole_house_security_deposit NUMERIC NOT NULL DEFAULT 3000;
@@ -464,6 +458,12 @@ CREATE TABLE IF NOT EXISTS public.notification_recipient_groups (
     updated_at TIMESTAMPTZ DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_notification_groups_channel ON public.notification_recipient_groups(channel_id);
+
+-- 顧客喊「真人客服」時要通知誰。指到上面那張表的一筆名單，名單本身就帶了「用哪個官方帳號發、
+-- 發給哪些人」，所以要通知團隊內部用帳號的聯絡人，直接在後台勾選即可，換人不用改程式。
+-- 這個 ALTER 必須放在 notification_recipient_groups 建立之後，不然全新安裝時外鍵會找不到目標。
+-- 沒設定時退回舊行為：用客戶用官方帳號推播給 settings.agent_user_ids，既有安裝不會突然收不到通知。
+ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS handover_notification_group_id UUID REFERENCES public.notification_recipient_groups(id) ON DELETE SET NULL;
 
 -- LINE 群組（機器人被邀進去的群組聊天，例如內部用來接收推播通知的群組），
 -- 跟上面的 notification_recipient_groups（本系統自訂的收件人名單）是完全不同的兩件事——

@@ -118,7 +118,6 @@ type Flow = {
   // quote 型「報價之後」的三則訊息，空字串＝用內建預設文字
   taken_message: string; // 顧客回「是」時房間已被別人訂走
   remittance_received_message: string; // 確認顧客回報的確實是轉帳資訊之後的回覆
-  remittance_unclear_message: string; // 顧客傳的圖看不出轉帳成功
   is_active: boolean;
   display_order: number;
   steps: FlowStep[];
@@ -139,7 +138,6 @@ const emptyFlow = (displayOrder: number): Flow => ({
   not_found_message: '',
   taken_message: '',
   remittance_received_message: '',
-  remittance_unclear_message: '',
   is_active: true,
   display_order: displayOrder,
   steps: [{ step_order: 1, message_template: '', fields: [{ key: newId(), label: '', quote_field: '', value_type: '' }] }],
@@ -294,7 +292,6 @@ export default function StandardMessages() {
       not_found_message: f.not_found_message ?? '',
       taken_message: f.taken_message ?? '',
       remittance_received_message: f.remittance_received_message ?? '',
-      remittance_unclear_message: f.remittance_unclear_message ?? '',
       is_active: f.is_active,
       display_order: f.display_order,
       steps: (stepRes.data || [])
@@ -426,7 +423,6 @@ export default function StandardMessages() {
         not_found_message: draft.not_found_message || null,
         taken_message: draft.taken_message || null,
         remittance_received_message: draft.remittance_received_message || null,
-        remittance_unclear_message: draft.remittance_unclear_message || null,
         is_active: draft.is_active,
         display_order: draft.display_order,
         updated_at: new Date().toISOString(),
@@ -685,7 +681,7 @@ export default function StandardMessages() {
                         <div className="grid sm:grid-cols-2 gap-2">
                           {([
                             { value: 'ai', icon: <Sparkles className="w-4 h-4" />, title: 'AI 理解', desc: '讀得懂「下週五」「我們四大兩小」這類說法，每則回覆會呼叫一次 AI。' },
-                            { value: 'system', icon: <Cpu className="w-4 h-4" />, title: '系統自行比對', desc: '完全不呼叫 AI，省 token。只認得 7/30、2026-07-30、4 位、包棟這類標準寫法。' },
+                            { value: 'system', icon: <Cpu className="w-4 h-4" />, title: '系統自行比對', desc: '完全不呼叫 AI，省 token。日期認得 7/30、2026-07-30、20261003、115/10/03、1151003 等寫法，人數要用阿拉伯數字；「下週五」這類相對日期讀不出來。' },
                           ] as const).map((opt) => (
                             <button
                               key={opt.value}
@@ -937,41 +933,30 @@ export default function StandardMessages() {
                     <Stage index={6} title="匯款回報與例外" icon={<Wallet className="w-4 h-4" />} muted={!quoteCapable}>
                       <div className="space-y-4">
                         <p className="text-xs text-gray-400">
-                          付款確認送出後，顧客要回傳「帳號後五碼」或「轉帳明細截圖」。
-                          文字要抓得到 5 位數字、截圖要看得出「轉帳成功／交易成功」才算數；
-                          都不是的話系統不會當成匯款回報，會照顧客的問題正常回答。
+                          付款確認送出後，顧客回傳的內容（末五碼或轉帳截圖）
+                          <strong>系統不會自動判讀</strong>，一律推播給客服人工核對——自動判讀誤判率太高，
+                          任何含 5 位數字的句子都會被當成末五碼。客服核對到帳後，請到「訂單管理」
+                          填寫匯款末五碼並把狀態改成「已預定」。
+                          <span className="block mt-1">顧客在這個階段回「修改」可以重新填寫訂房資訊。</span>
                         </p>
                         <div>
-                          <label className="block text-xs text-gray-500 mb-1">確認收到匯款回報時的回覆</label>
+                          <label className="block text-xs text-gray-500 mb-1">收到顧客回傳內容時的回覆</label>
                           {editing ? (
                             <MessageTemplateEditor
                               value={draft!.remittance_received_message}
                               onChange={(v) => patchDraft({ remittance_received_message: v })}
                               placeholders={variables}
                               rows={3}
-                              placeholder="好的，已收到您的匯款回報，我們核對後會盡快為您確認訂房，謝謝您的耐心等候 🙏"
+                              placeholder="好的，已收到您的訊息，我們核對後會盡快為您確認訂房，謝謝您的耐心等候 🙏"
                             />
                           ) : (
                             <div className="bg-gray-50 rounded-lg p-3">
                               <VariableText value={current.remittance_received_message || '（未設定，會用內建預設文字）'} knownVariables={variables} />
                             </div>
                           )}
-                        </div>
-                        <div>
-                          <label className="block text-xs text-gray-500 mb-1">截圖看不出轉帳成功時的回覆</label>
-                          {editing ? (
-                            <MessageTemplateEditor
-                              value={draft!.remittance_unclear_message}
-                              onChange={(v) => patchDraft({ remittance_unclear_message: v })}
-                              placeholders={variables}
-                              rows={3}
-                              placeholder="不好意思，這張圖我們看不太出來是否為轉帳成功的畫面，麻煩您再傳一次完整的轉帳明細，或直接回覆匯款帳號的後五碼，謝謝您！"
-                            />
-                          ) : (
-                            <div className="bg-gray-50 rounded-lg p-3">
-                              <VariableText value={current.remittance_unclear_message || '（未設定，會用內建預設文字）'} knownVariables={variables} />
-                            </div>
-                          )}
+                          <p className="text-xs text-gray-400 mt-1">
+                            這則訊息代表「已收到、待人工核對」，不是「已確認收到款項」，措辭請避免寫成已完成確認。
+                          </p>
                         </div>
                         <div>
                           <label className="block text-xs text-gray-500 mb-1">
