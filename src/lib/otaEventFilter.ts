@@ -85,11 +85,6 @@ const PLATFORM_RULES: Record<string, PlatformRule> = {
   // 拿到樣本後在這裡補 detectReservation，才會升級成白名單判斷。
 };
 
-/** 這個平台目前是不是「已確認格式、採用白名單」的狀態，供後台顯示與同步摘要說明用。 */
-export function hasVerifiedReservationRule(platform: string): boolean {
-  return typeof PLATFORM_RULES[platform]?.detectReservation === 'function';
-}
-
 /**
  * @param extraBlockKeywords 管理員在「OTA 頻道管理」自行補的關房字樣（逗號分隔），平台改版時免改程式。
  */

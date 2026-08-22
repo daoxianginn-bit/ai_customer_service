@@ -61,11 +61,6 @@ export function selectRoomsByRequest(
   return { rooms: selected.sort((a, b) => a.display_order - b.display_order), shortfall };
 }
 
-/** 這批房間總共能住幾人，用來跟顧客填的人數對照。 */
-export function totalCapacity(rooms: SelectableRoom[]): number {
-  return rooms.reduce((sum, r) => sum + r.capacity, 0);
-}
-
 /** 把顧客回答的房數（key 是容量）整理成挑房用的請求清單，容量小的排前面比較好讀。 */
 export function toRoomCountRequests(countsByCapacity: Record<number, number>): RoomCountRequest[] {
   return Object.entries(countsByCapacity)
