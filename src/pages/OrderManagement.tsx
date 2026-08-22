@@ -13,7 +13,7 @@ import { RoomOption, roomLabel } from '../lib/rooms';
 
 const PAGE_SIZE = 15;
 
-const FILTER_STATUS_OPTIONS = [{ value: '', label: '全部狀態' }, ...BOOKING_STATUS_OPTIONS, ...SYSTEM_ONLY_STATUSES];
+const FILTER_STATUS_OPTIONS = [{ value: '', label: '全部狀態（不含已取消）' }, ...BOOKING_STATUS_OPTIONS, ...SYSTEM_ONLY_STATUSES];
 
 interface OrderForm {
   id?: string;
@@ -351,6 +351,11 @@ export default function OrderManagement() {
     if (eff.startDate) query = query.gte('checkin_date', eff.startDate);
     if (eff.endDate) query = query.lte('checkin_date', eff.endDate);
     if (eff.status) query = query.eq('status', eff.status);
+    // 「全部狀態」預設不含已取消——第三方平台同步偵測到客戶在 Airbnb/Booking 等平台取消訂單時，
+    // 對應的本地訂單只會被標記成 cancelled（保留紀錄供查核），不會整筆刪除；如果預設清單還是
+    // 照樣顯示，訂單管理看起來就會跟平台實際的訂房狀況對不起來。要看已取消的訂單，
+    // 從「訂單狀態」下拉選單或下面的「取消訂單」例外分支明確篩選即可。
+    else query = query.neq('status', 'cancelled');
     if (eff.roomType === '包棟') query = query.eq('whole_house', true);
     else if (eff.roomType) query = query.ilike('room_type_label', `%${eff.roomType}%`);
     if (eff.keyword.trim()) {
