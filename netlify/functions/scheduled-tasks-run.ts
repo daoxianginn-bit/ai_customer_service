@@ -616,21 +616,46 @@ async function syncOneOtaChannel(channel: any): Promise<{ summary: string; confl
     if (!before?.ota_conflict_detected_at) conflictLines.push(`・${channel.name}　${ev.startIso}~${ev.endIso}`);
   };
 
+  // 這次同步有對應到哪幾筆既有訂單。下面判斷「來源已消失」時要排除它們——用日期對上的那些，
+  // 資料庫裡存的還是舊 UID，只看 seenUids 會誤判成平台端已取消。
+  const matchedExistingIds = new Set<string>();
+
   for (const { ev, info } of reservations) {
-    const existing = existingByUid.get(ev.uid);
+    // 先用 UID 對，對不到再用「同一頻道、同一段日期」對。
+    //
+    // 有些平台（實測 Trip.com）每次匯出都給同一筆房況一組全新的隨機 UID。只認 UID 的話，
+    // 每 15 分鐘同步一次就會：找不到既有訂單 → 新增一筆 → 上一輪那筆的舊 UID 不在這次的
+    // seenUids 裡 → 被當成「平台端已取消」標記取消。於是同一晚房況會不斷產生新訂單、
+    // 舊的一直被取消，而且新訂單跟還沒被取消的上一筆日期完全重疊，還會被標成「疑似撞期」。
+    //
+    // 同一個頻道、同一段日期不可能同時存在兩筆不同的訂單（整棟頻道是整棟、綁房型的頻道是那一間），
+    // 所以日期對上就視為同一筆，接著把新的 UID 寫回去。
+    const existing =
+      existingByUid.get(ev.uid) ||
+      (existingRows || []).find(
+        (r: any) =>
+          r.status !== 'cancelled' &&
+          r.checkin_date === ev.startIso &&
+          r.checkout_date === ev.endIso &&
+          !matchedExistingIds.has(r.id)
+      );
+    if (existing) matchedExistingIds.add(existing.id);
 
     if (existing) {
       const changed = existing.checkin_date !== ev.startIso || existing.checkout_date !== ev.endIso;
-      if (changed) {
+      // UID 換了（平台每次匯出都重新產生）也要寫回去，下一輪才對得回來，不用每次都靠日期比對。
+      const uidChanged = existing.external_uid !== ev.uid;
+      if (changed || uidChanged) {
         await supabase.from('bookings').update({
           checkin_date: ev.startIso,
           checkout_date: ev.endIso,
           status: 'external_synced',
+          external_uid: ev.uid,
           external_confirmation_code: info.confirmationCode,
           external_raw_payload: ev.raw,
           updated_at: nowIso,
         }).eq('id', existing.id);
-        updated++;
+        if (changed) updated++;
       }
       // 日期沒變也要重驗衝突：擋住它的那筆本地訂單可能是這次同步之後才被取消或新增的。
       const conflictWith = await checkOtaConflict(channel, ev, existing.id);
@@ -681,7 +706,13 @@ async function syncOneOtaChannel(channel: any): Promise<{ summary: string; confl
 
   // 來源已消失的事件（平台那邊取消/刪除了）：標記為取消，不整批刪除。
   // 注意這裡比對的是 seenUids（含被過濾掉的關房事件），不是只有真訂單，理由見上面的說明。
-  const disappeared = (existingRows || []).filter((r: any) => r.external_uid && !seenUids.has(r.external_uid));
+  // 已經取消的不要再取消一次：沒有這道過濾，每 15 分鐘同步一次就會把同一批早就取消的訂單
+  // 重新 update 一遍、再寫一筆「cancelled → cancelled」的操作紀錄，操作紀錄很快就被洗版。
+  // matchedExistingIds 裡的也要排除：那些是這次用日期對上的，資料庫存的還是舊 UID，
+  // 只看 seenUids 會把它們誤判成平台端已取消。
+  const disappeared = (existingRows || []).filter(
+    (r: any) => r.external_uid && !seenUids.has(r.external_uid) && !matchedExistingIds.has(r.id) && r.status !== 'cancelled'
+  );
   if (disappeared.length) {
     await supabase.from('bookings').update({ status: 'cancelled', updated_at: nowIso }).in('id', disappeared.map((r: any) => r.id));
     for (const r of disappeared) {
