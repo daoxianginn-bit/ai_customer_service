@@ -24,6 +24,11 @@ export interface OperationLogEntry {
   actorName: string;
   before?: Record<string, unknown> | null;
   after?: Record<string, unknown> | null;
+  /** 'info'＝資料異動（預設），'error'＝系統錯誤。 */
+  level?: 'info' | 'error';
+  /** HTTP 狀態碼（4XX/5XX）。不是 HTTP 來源的錯誤留空。 */
+  statusCode?: number | null;
+  errorMessage?: string | null;
 }
 
 // 功能名稱集中在這裡，查詢畫面的「功能」下拉選單也是讀這一份，
@@ -41,6 +46,21 @@ export const LOG_FEATURES = {
 } as const;
 
 export const LOG_FEATURE_OPTIONS = Object.values(LOG_FEATURES);
+
+// 系統錯誤是以「哪一支 function 出錯」記錄的（見 withErrorLogging），名稱就是 function 檔名。
+// 查詢頁的「功能」下拉選單要把這些也列出來，否則錯誤紀錄查得到、卻沒辦法用功能篩選。
+export const LOG_FUNCTION_NAMES = [
+  'line-webhook',
+  'scheduled-tasks-run',
+  'custom-messages',
+  'calendar-feed',
+  'cleanup-conversations',
+  'line-profile',
+  'invite-admin',
+  'list-admins',
+  'delete-admin',
+  'delete-customer-data',
+];
 
 /** 系統自動異動時的固定異動者名稱。 */
 export const SYSTEM_ACTOR = 'system';
@@ -165,8 +185,76 @@ export async function writeOperationLog(client: any, entry: OperationLogEntry): 
       actor_name: entry.actorName,
       before: entry.before && Object.keys(entry.before).length ? entry.before : null,
       after: entry.after && Object.keys(entry.after).length ? entry.after : null,
+      level: entry.level ?? 'info',
+      status_code: entry.statusCode ?? null,
+      // 訊息可能很長（含堆疊），截斷避免單一筆把整張表撐大；前 2000 字足以判斷問題出在哪。
+      error_message: entry.errorMessage ? String(entry.errorMessage).slice(0, 2000) : null,
     });
   } catch (e: any) {
     console.error('[OperationLog] write failed:', e?.message || e);
   }
+}
+
+// ------------------------------------------------------------------------
+// 系統錯誤
+// ------------------------------------------------------------------------
+
+// 405 Method Not Allowed 不記：公開端點（calendar-feed、webhook）被掃描器用各種方法試探是
+// 網路上的常態，記下來只會把真正的錯誤淹掉，而且它代表的是「有人亂打」，不是系統壞掉。
+const IGNORED_STATUS_CODES = [405];
+
+/** 從 function 的回應本文抽出錯誤訊息：JSON 的 { error } 優先，否則就是純文字本文。 */
+function extractErrorMessage(body: unknown): string {
+  if (typeof body !== 'string') return '';
+  try {
+    const parsed = JSON.parse(body);
+    if (parsed && typeof parsed === 'object' && 'error' in parsed) return String((parsed as any).error);
+  } catch {
+    // 不是 JSON，直接當純文字用
+  }
+  return body.slice(0, 500);
+}
+
+/**
+ * 把 Netlify function 的 handler 包起來，統一記錄 4XX/5XX 與未攔截的例外。
+ *
+ * 包一層而不是在 58 個 return 點各寫一行的理由：漏掉任何一個就等於那條路徑靜靜失敗，
+ * 而且之後新增的錯誤回傳點會自動被涵蓋，不用記得補。
+ *
+ * 一定要原樣回傳/重新拋出原本的結果——這層只負責記錄，不能改變 function 對外的行為
+ * （例如 LINE 會依 webhook 的狀態碼決定要不要重送，擅自吞掉錯誤會讓訊息遺失）。
+ */
+export function withErrorLogging(client: any, functionName: string, handler: any) {
+  return async (event: any, context: any) => {
+    try {
+      const res = await handler(event, context);
+      const code = res?.statusCode;
+      if (typeof code === 'number' && code >= 400 && !IGNORED_STATUS_CODES.includes(code)) {
+        await writeOperationLog(client, {
+          feature: functionName,
+          action: `HTTP ${code}`,
+          target: event?.path || null,
+          actorType: 'system',
+          actorName: SYSTEM_ACTOR,
+          level: 'error',
+          statusCode: code,
+          errorMessage: extractErrorMessage(res?.body),
+        });
+      }
+      return res;
+    } catch (e: any) {
+      // 未攔截的例外原本只會變成一個沒有前後文的 Netlify 500，這裡先留下訊息與堆疊再往上拋。
+      await writeOperationLog(client, {
+        feature: functionName,
+        action: '未預期錯誤',
+        target: event?.path || null,
+        actorType: 'system',
+        actorName: SYSTEM_ACTOR,
+        level: 'error',
+        statusCode: 500,
+        errorMessage: `${e?.message || e}\n${(e?.stack || '').split('\n').slice(0, 5).join('\n')}`,
+      });
+      throw e;
+    }
+  };
 }

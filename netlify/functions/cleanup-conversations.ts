@@ -1,12 +1,13 @@
 import { Handler } from '@netlify/functions';
 import { createClient } from '@supabase/supabase-js';
+import { withErrorLogging } from '../../src/lib/operationLog';
 
 const supabase = createClient(
   process.env.SUPABASE_URL || '',
   process.env.SUPABASE_SERVICE_ROLE_KEY || ''
 );
 
-export const handler: Handler = async () => {
+const rawHandler: Handler = async () => {
   const { data: settings } = await supabase.from('settings').select('conversation_retention_days').single();
   const retentionDays = settings?.conversation_retention_days ?? 3;
 
@@ -25,3 +26,6 @@ export const handler: Handler = async () => {
   console.log(`[Cleanup] Deleted ${count ?? 0} conversations older than ${retentionDays} days`);
   return { statusCode: 200, body: `Deleted ${count ?? 0} rows` };
 };
+
+// 4XX/5XX 與未攔截的例外統一寫進「操作紀錄」，不然出錯時只剩 Netlify 的 function log 可查。
+export const handler: Handler = withErrorLogging(supabase, 'cleanup-conversations', rawHandler);

@@ -21,3 +21,29 @@ async function currentActor(): Promise<string> {
 export async function logOperation(entry: Omit<OperationLogEntry, 'actorType' | 'actorName'>): Promise<void> {
   await writeOperationLog(supabase, { ...entry, actorType: 'user', actorName: await currentActor() });
 }
+
+/**
+ * 後台操作失敗時記一筆。原本這些錯誤只會 alert 一次，關掉分頁就什麼都不剩，
+ * 使用者事後回報「昨天存不起來」時完全無從查起。
+ */
+export async function logUiError(params: {
+  feature: string;
+  action: string;
+  target?: string | null;
+  error: unknown;
+}): Promise<void> {
+  const err = params.error as any;
+  await writeOperationLog(supabase, {
+    feature: params.feature,
+    action: params.action,
+    target: params.target ?? null,
+    actorType: 'user',
+    actorName: await currentActor(),
+    level: 'error',
+    // Supabase 的錯誤帶 code（例如 23505 唯一鍵衝突），一併留下來比只有訊息好查很多。
+    statusCode: typeof err?.status === 'number' ? err.status : null,
+    errorMessage: [err?.message || String(err), err?.code ? `code: ${err.code}` : '', err?.details || '']
+      .filter(Boolean)
+      .join(' | '),
+  });
+}

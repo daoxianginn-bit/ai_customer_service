@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { supabase } from './supabase';
-import { logOperation } from './logOperation';
+import { logOperation, logUiError } from './logOperation';
 import { LOG_FEATURES, diffRecords } from './operationLog';
 
 export function useSettings() {
@@ -53,6 +53,7 @@ export function useSettings() {
       alert('設定已儲存！');
     } catch (error: any) {
       console.error('Error saving settings:', error);
+      await logUiError({ feature: LOG_FEATURES.systemSettings, action: '儲存失敗', error });
       alert(`儲存失敗：${error.message}`);
     } finally {
       setSaving(false);

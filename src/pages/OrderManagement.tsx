@@ -9,7 +9,7 @@ import {
 } from '../lib/bookingStatus';
 import { computeOrderAmounts } from '../lib/messageVariables';
 import { generateOrderNumber } from '../lib/orderNumber';
-import { logOperation } from '../lib/logOperation';
+import { logOperation, logUiError } from '../lib/logOperation';
 import { LOG_FEATURES, diffRecords, labelRecord } from '../lib/operationLog';
 import {
   LinenItem, RoomLinenDefault, LinenUsageRow,
@@ -571,6 +571,7 @@ export default function OrderManagement() {
       fetchStatusCounts();
     } catch (err: any) {
       alert(`批次刪除失敗：${err.message}`);
+      await logUiError({ feature: LOG_FEATURES.order, action: '批次刪除失敗', target: `共 ${selectedIds.length} 筆`, error: err });
     } finally {
       setBatchDeleting(false);
     }
@@ -745,6 +746,7 @@ export default function OrderManagement() {
       fetchSummaries();
     } catch (err: any) {
       setFormError(`儲存失敗：${err.message}`);
+      await logUiError({ feature: LOG_FEATURES.order, action: editingId ? '修改失敗' : '新增失敗', target: form.order_number || null, error: err });
     } finally {
       setSaving(false);
     }
@@ -787,6 +789,7 @@ export default function OrderManagement() {
       fetchStatusCounts();
     } catch (err: any) {
       alert(`刪除失敗：${err.message}`);
+      await logUiError({ feature: LOG_FEATURES.order, action: '刪除失敗', target: deleteTarget?.order_number || null, error: err });
     } finally {
       setDeleting(false);
     }

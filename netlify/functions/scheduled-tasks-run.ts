@@ -8,7 +8,7 @@ import { OCCUPYING_STATUSES, BALANCE_PAID_STATUSES } from '../../src/lib/booking
 import { parseIcsEvents } from '../../src/lib/icsParser';
 import { otaPlatformLabel } from '../../src/lib/otaChannels';
 import { classifyOtaEvent } from '../../src/lib/otaEventFilter';
-import { writeOperationLog, LOG_FEATURES, SYSTEM_ACTOR } from '../../src/lib/operationLog';
+import { writeOperationLog, withErrorLogging, LOG_FEATURES, SYSTEM_ACTOR } from '../../src/lib/operationLog';
 import { processWaitlist } from './line-webhook';
 
 // ========================================================================
@@ -1059,7 +1059,7 @@ async function runTaskNow(event: any, taskId: string) {
   return { statusCode: 200, body: JSON.stringify(result) };
 }
 
-export const handler: Handler = async (event) => {
+const rawHandler: Handler = async (event) => {
   if (event?.httpMethod === 'POST' && event.body) {
     let body: any = null;
     try { body = JSON.parse(event.body); } catch { body = null; }
@@ -1115,3 +1115,6 @@ export const handler: Handler = async (event) => {
 
   return { statusCode: 200, body: `processed ${dueTasks.length} task(s)` };
 };
+
+// 排程同樣是無人看管時執行，出錯只留在 Netlify function log 裡，隔天沒人會發現。
+export const handler: Handler = withErrorLogging(supabase, 'scheduled-tasks-run', rawHandler);

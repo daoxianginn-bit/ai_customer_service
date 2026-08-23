@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase';
-import { ScrollText, Search, RotateCcw, ListFilter, UserCog, CalendarDays, ArrowRight } from 'lucide-react';
+import { ScrollText, Search, RotateCcw, ListFilter, UserCog, CalendarDays, ArrowRight, AlertTriangle } from 'lucide-react';
 import { PageHeader, Button, EmptyState } from '../components/ui';
-import { LOG_FEATURE_OPTIONS, formatLogValue } from '../lib/operationLog';
+import { LOG_FEATURE_OPTIONS, LOG_FUNCTION_NAMES, formatLogValue } from '../lib/operationLog';
 
 const PAGE_SIZE = 30;
 
@@ -15,6 +15,9 @@ interface LogRow {
   actor_name: string;
   before: Record<string, unknown> | null;
   after: Record<string, unknown> | null;
+  level: 'info' | 'error';
+  status_code: number | null;
+  error_message: string | null;
   created_at: string;
 }
 
@@ -67,6 +70,7 @@ export default function OperationLogs() {
   const [keyword, setKeyword] = useState('');
   const [feature, setFeature] = useState('');
   const [actorType, setActorType] = useState('');
+  const [level, setLevel] = useState('');
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
 
@@ -76,12 +80,13 @@ export default function OperationLogs() {
 
   const runQuery = async (
     pageIndex: number,
-    overrides?: Partial<{ keyword: string; feature: string; actorType: string; startDate: string; endDate: string }>
+    overrides?: Partial<{ keyword: string; feature: string; actorType: string; level: string; startDate: string; endDate: string }>
   ) => {
     const eff = {
       keyword: overrides?.keyword ?? keyword,
       feature: overrides?.feature ?? feature,
       actorType: overrides?.actorType ?? actorType,
+      level: overrides?.level ?? level,
       startDate: overrides?.startDate ?? startDate,
       endDate: overrides?.endDate ?? endDate,
     };
@@ -95,12 +100,13 @@ export default function OperationLogs() {
 
     if (eff.feature) query = query.eq('feature', eff.feature);
     if (eff.actorType) query = query.eq('actor_type', eff.actorType);
+    if (eff.level) query = query.eq('level', eff.level);
     if (eff.startDate) query = query.gte('created_at', `${eff.startDate}T00:00:00`);
     // 迄日要含當天：日期欄位選 8/23 時，使用者要的是「8/23 整天」，不是 8/23 00:00 那一瞬間。
     if (eff.endDate) query = query.lt('created_at', `${eff.endDate}T23:59:59.999`);
     if (eff.keyword.trim()) {
       const kw = eff.keyword.trim().replace(/[%,()]/g, '');
-      query = query.or(`target.ilike.%${kw}%,actor_name.ilike.%${kw}%,action.ilike.%${kw}%`);
+      query = query.or(`target.ilike.%${kw}%,actor_name.ilike.%${kw}%,action.ilike.%${kw}%,error_message.ilike.%${kw}%`);
     }
 
     const { data, error } = await query;
@@ -116,9 +122,15 @@ export default function OperationLogs() {
     setKeyword('');
     setFeature('');
     setActorType('');
+    setLevel('');
     setStartDate('');
     setEndDate('');
-    runQuery(0, { keyword: '', feature: '', actorType: '', startDate: '', endDate: '' });
+    runQuery(0, { keyword: '', feature: '', actorType: '', level: '', startDate: '', endDate: '' });
+  };
+
+  const showErrorsOnly = () => {
+    setLevel('error');
+    runQuery(0, { level: 'error' });
   };
 
   return (
@@ -126,26 +138,44 @@ export default function OperationLogs() {
       <PageHeader
         icon={<ScrollText className="w-6 h-6 text-green-600" />}
         title="操作紀錄"
-        description="查詢系統裡的資料被誰、在什麼時候、從什麼改成什麼。人工操作與系統自動異動都會記錄。"
+        description="查詢資料被誰、在什麼時候、從什麼改成什麼，以及系統發生過哪些錯誤（含 4XX／5XX 與錯誤訊息）。"
+        action={
+          <Button variant={level === 'error' ? 'danger' : 'secondary'} onClick={showErrorsOnly} icon={<AlertTriangle className="w-4 h-4" />}>
+            只看系統錯誤
+          </Button>
+        }
       />
 
       <div className="bg-white p-4 rounded-xl shadow-sm border space-y-3">
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3">
           <div>
             <label className="flex items-center gap-1 text-xs text-gray-500 mb-1"><Search className="w-3.5 h-3.5" />關鍵字</label>
             <input
               value={keyword}
               onChange={(e) => setKeyword(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && runQuery(0)}
-              placeholder="訂單編號、帳號或動作"
+              placeholder="訂單編號、帳號或錯誤訊息"
               className="w-full px-3 py-2 border rounded-lg text-sm"
             />
+          </div>
+          <div>
+            <label className="flex items-center gap-1 text-xs text-gray-500 mb-1"><ListFilter className="w-3.5 h-3.5" />類型</label>
+            <select value={level} onChange={(e) => setLevel(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm bg-white">
+              <option value="">全部</option>
+              <option value="info">資料異動</option>
+              <option value="error">系統錯誤</option>
+            </select>
           </div>
           <div>
             <label className="flex items-center gap-1 text-xs text-gray-500 mb-1"><ListFilter className="w-3.5 h-3.5" />功能</label>
             <select value={feature} onChange={(e) => setFeature(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm bg-white">
               <option value="">全部功能</option>
-              {LOG_FEATURE_OPTIONS.map((f) => (<option key={f} value={f}>{f}</option>))}
+              <optgroup label="後台功能">
+                {LOG_FEATURE_OPTIONS.map((f) => (<option key={f} value={f}>{f}</option>))}
+              </optgroup>
+              <optgroup label="系統程式（錯誤紀錄）">
+                {LOG_FUNCTION_NAMES.map((f) => (<option key={f} value={f}>{f}</option>))}
+              </optgroup>
             </select>
           </div>
           <div>
@@ -190,26 +220,47 @@ export default function OperationLogs() {
               ) : rows.length === 0 ? (
                 <tr><td colSpan={6}><EmptyState icon={<ScrollText className="w-12 h-12 text-gray-200" />} message="查無操作紀錄" /></td></tr>
               ) : (
-                rows.map((row) => (
-                  <tr key={row.id} className="align-top hover:bg-gray-50">
-                    <td className="py-3 px-4 whitespace-nowrap text-gray-500 text-xs">{formatDateTime(row.created_at)}</td>
-                    <td className="py-3 px-4 whitespace-nowrap text-gray-700">{row.feature}</td>
-                    <td className="py-3 px-4 whitespace-nowrap">
-                      <span className={`text-xs px-2 py-0.5 rounded-full border ${ACTION_STYLE[row.action] || 'bg-gray-50 text-gray-600 border-gray-200'}`}>
-                        {row.action}
-                      </span>
-                    </td>
-                    <td className="py-3 px-4 whitespace-nowrap font-mono text-xs text-gray-600">{row.target || '—'}</td>
-                    <td className="py-3 px-4 whitespace-nowrap">
-                      {row.actor_type === 'system' ? (
-                        <span className="text-xs px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 border border-slate-200">系統</span>
-                      ) : (
-                        <span className="text-xs text-gray-700">{row.actor_name}</span>
-                      )}
-                    </td>
-                    <td className="py-3 px-4"><ChangeTable before={row.before} after={row.after} /></td>
-                  </tr>
-                ))
+                rows.map((row) => {
+                  const isError = row.level === 'error';
+                  return (
+                    <tr key={row.id} className={`align-top ${isError ? 'bg-red-50/40 hover:bg-red-50' : 'hover:bg-gray-50'}`}>
+                      <td className="py-3 px-4 whitespace-nowrap text-gray-500 text-xs">{formatDateTime(row.created_at)}</td>
+                      <td className="py-3 px-4 whitespace-nowrap text-gray-700">{row.feature}</td>
+                      <td className="py-3 px-4 whitespace-nowrap">
+                        <span
+                          className={`text-xs px-2 py-0.5 rounded-full border ${
+                            isError ? 'bg-red-100 text-red-700 border-red-200' : ACTION_STYLE[row.action] || 'bg-gray-50 text-gray-600 border-gray-200'
+                          }`}
+                        >
+                          {row.action}
+                        </span>
+                      </td>
+                      <td className="py-3 px-4 whitespace-nowrap font-mono text-xs text-gray-600">{row.target || '—'}</td>
+                      <td className="py-3 px-4 whitespace-nowrap">
+                        {row.actor_type === 'system' ? (
+                          <span className="text-xs px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 border border-slate-200">系統</span>
+                        ) : (
+                          <span className="text-xs text-gray-700">{row.actor_name}</span>
+                        )}
+                      </td>
+                      <td className="py-3 px-4">
+                        {isError ? (
+                          <div className="space-y-1">
+                            {row.status_code != null && (
+                              <span className="inline-flex items-center gap-1 text-xs font-mono px-2 py-0.5 rounded bg-red-100 text-red-800 border border-red-200">
+                                <AlertTriangle className="w-3 h-3" />HTTP {row.status_code}
+                              </span>
+                            )}
+                            {/* 錯誤訊息可能含堆疊，用 pre-wrap 保留換行才看得出是哪一層出錯 */}
+                            <p className="text-xs text-red-800 whitespace-pre-wrap break-all">{row.error_message || '（沒有錯誤訊息）'}</p>
+                          </div>
+                        ) : (
+                          <ChangeTable before={row.before} after={row.after} />
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })
               )}
             </tbody>
           </table>

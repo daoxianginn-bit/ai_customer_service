@@ -1,6 +1,7 @@
 import { Handler } from '@netlify/functions';
 import { createClient } from '@supabase/supabase-js';
 import fetch from 'node-fetch';
+import { withErrorLogging } from '../../src/lib/operationLog';
 
 // ========================================================================
 // 即時查詢單一顧客的 LINE 大頭貼與狀態消息（客戶資料頁「LINE 資訊查詢」用）。
@@ -10,7 +11,7 @@ import fetch from 'node-fetch';
 
 const supabase = createClient(process.env.SUPABASE_URL || '', process.env.SUPABASE_SERVICE_ROLE_KEY || '');
 
-export const handler: Handler = async (event) => {
+const rawHandler: Handler = async (event) => {
   if (event.httpMethod !== 'POST') return { statusCode: 405, body: 'Method Not Allowed' };
 
   const authHeader = event.headers['authorization'] || event.headers['Authorization'];
@@ -61,3 +62,6 @@ export const handler: Handler = async (event) => {
     return { statusCode: 500, body: JSON.stringify({ error: e.message || '查詢失敗' }) };
   }
 };
+
+// 4XX/5XX 與未攔截的例外統一寫進「操作紀錄」，不然出錯時只剩 Netlify 的 function log 可查。
+export const handler: Handler = withErrorLogging(supabase, 'line-profile', rawHandler);

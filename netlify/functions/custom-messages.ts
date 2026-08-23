@@ -4,6 +4,7 @@ import { createClient } from '@supabase/supabase-js';
 import fetch from 'node-fetch';
 import { buildMergeFields, MessageVariable, computeTodayTomorrowFields } from '../../src/lib/messageVariables';
 import { LineChannel } from '../../src/lib/lineChannels';
+import { withErrorLogging } from '../../src/lib/operationLog';
 
 // ========================================================================
 // 客製訊息發送（客製訊息發送頁）專用 function：
@@ -21,7 +22,7 @@ const supabase = createClient(process.env.SUPABASE_URL || '', process.env.SUPABA
 // 前端跟後端都用這個常數擋，超過就請對方分批送。
 const MAX_BATCH_SEND = 50;
 
-export const handler: Handler = async (event) => {
+const rawHandler: Handler = async (event) => {
   if (event.httpMethod !== 'POST') return { statusCode: 405, body: 'Method Not Allowed' };
 
   const authHeader = event.headers['authorization'] || event.headers['Authorization'];
@@ -356,3 +357,6 @@ async function getLineQuota(channelAccessToken: string): Promise<{ limit: number
   const remaining = limit == null ? null : Math.max(0, limit - used);
   return { limit, used, remaining };
 }
+
+// 4XX/5XX 與未攔截的例外統一寫進「操作紀錄」，不然出錯時只剩 Netlify 的 function log 可查。
+export const handler: Handler = withErrorLogging(supabase, 'custom-messages', rawHandler);

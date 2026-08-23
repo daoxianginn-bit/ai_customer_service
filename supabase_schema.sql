@@ -1068,6 +1068,23 @@ CREATE TABLE IF NOT EXISTS public.operation_logs (
     after JSONB,                  -- 異動後：{ 中文欄位名: 值 }，刪除時是 NULL
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- 系統錯誤也記在同一張表，用 level 區分。刻意不另開一張 error_logs：查問題時最需要的是
+-- 「這張訂單 14:03 存檔失敗、14:05 才存成功」這種混在同一條時間軸上的前後文，分兩張表就得
+-- 自己在兩個畫面之間對時間。查詢頁用「類型」篩選就能只看其中一種。
+ALTER TABLE public.operation_logs ADD COLUMN IF NOT EXISTS level TEXT NOT NULL DEFAULT 'info';
+ALTER TABLE public.operation_logs ADD COLUMN IF NOT EXISTS status_code INTEGER; -- HTTP 狀態碼（4XX/5XX）；不是 HTTP 來源的錯誤是 NULL
+ALTER TABLE public.operation_logs ADD COLUMN IF NOT EXISTS error_message TEXT;  -- 錯誤訊息原文（含堆疊摘要）
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'public.operation_logs'::regclass AND conname = 'operation_logs_level_check'
+  ) THEN
+    ALTER TABLE public.operation_logs ADD CONSTRAINT operation_logs_level_check CHECK (level IN ('info', 'error'));
+  END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS idx_operation_logs_level ON public.operation_logs(level, created_at DESC);
 -- 查詢畫面預設就是「最新的排前面」，再依功能/異動者篩選，這三個索引對應那三種用法。
 CREATE INDEX IF NOT EXISTS idx_operation_logs_created ON public.operation_logs(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_operation_logs_feature ON public.operation_logs(feature);

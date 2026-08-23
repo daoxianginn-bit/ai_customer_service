@@ -1,5 +1,6 @@
 import { Handler } from '@netlify/functions';
 import { createClient } from '@supabase/supabase-js';
+import { withErrorLogging } from '../../src/lib/operationLog';
 
 // ========================================================================
 // 清除單一客人在系統裡的所有個資（個資法「刪除請求」用）：訂單、對話紀錄、
@@ -12,7 +13,7 @@ const supabaseAdmin = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY || ''
 );
 
-export const handler: Handler = async (event) => {
+const rawHandler: Handler = async (event) => {
   if (event.httpMethod !== 'POST') return { statusCode: 405, body: 'Method Not Allowed' };
 
   const authHeader = event.headers['authorization'] || event.headers['Authorization'] || '';
@@ -51,3 +52,6 @@ export const handler: Handler = async (event) => {
     return { statusCode: 500, body: JSON.stringify({ error: e.message || '清除失敗' }) };
   }
 };
+
+// 4XX/5XX 與未攔截的例外統一寫進「操作紀錄」，不然出錯時只剩 Netlify 的 function log 可查。
+export const handler: Handler = withErrorLogging(supabaseAdmin, 'delete-customer-data', rawHandler);

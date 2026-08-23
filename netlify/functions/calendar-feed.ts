@@ -1,6 +1,7 @@
 import { Handler } from '@netlify/functions';
 import { createClient } from '@supabase/supabase-js';
 import { OCCUPYING_STATUSES } from '../../src/lib/bookingStatus';
+import { withErrorLogging } from '../../src/lib/operationLog';
 
 // ========================================================================
 // OTA 平台訂閱（?channel=ota_channels.export_token）：給 Airbnb／Booking.com／Agoda／Trip
@@ -95,7 +96,7 @@ function buildIcsResponse(calName: string, lines: string[]) {
   };
 }
 
-export const handler: Handler = async (event) => {
+const rawHandler: Handler = async (event) => {
   if (event.httpMethod !== 'GET') return { statusCode: 405, body: 'Method Not Allowed' };
 
   const channelToken = event.queryStringParameters?.channel;
@@ -158,3 +159,6 @@ async function handleOtaChannelFeed(token: string) {
 
   return buildIcsResponse(`房況同步 - ${channel.name}`, lines);
 }
+
+// 4XX/5XX 與未攔截的例外統一寫進「操作紀錄」，不然出錯時只剩 Netlify 的 function log 可查。
+export const handler: Handler = withErrorLogging(supabase, 'calendar-feed', rawHandler);

@@ -14,7 +14,7 @@ import {
   computeTodayTomorrowFields,
 } from '../../src/lib/messageVariables';
 import { bookingStatusLabel, OCCUPYING_STATUSES } from '../../src/lib/bookingStatus';
-import { writeOperationLog, LOG_FEATURES, SYSTEM_ACTOR } from '../../src/lib/operationLog';
+import { writeOperationLog, withErrorLogging, LOG_FEATURES, SYSTEM_ACTOR } from '../../src/lib/operationLog';
 import { roomLabel } from '../../src/lib/rooms';
 import { generateOrderNumber } from '../../src/lib/orderNumber';
 import {
@@ -168,7 +168,7 @@ async function notifyHandover(settings: any, customerClient: Client, text: strin
   }
 }
 
-export const handler: Handler = async (event) => {
+const rawHandler: Handler = async (event) => {
   if (event.httpMethod !== 'POST') return { statusCode: 405, body: 'Method Not Allowed' };
 
   const settings = await fetchSettings();
@@ -2851,3 +2851,9 @@ async function callGeminiRaw(settings: any, contents: any[]): Promise<string> {
   if (!res.ok || result.error) throw new Error(result.error?.message || 'Gemini API Error');
   return result.candidates?.[0]?.content?.parts?.find((p: any) => p.text)?.text || '';
 }
+
+// 4XX/5XX 與未攔截的例外統一寫進「操作紀錄」。這支特別重要：webhook 是在沒有人看著的時候被
+// LINE 呼叫的，簽章驗不過（401）或處理到一半炸掉（500）時，客人只會感覺到「機器人已讀不回」，
+// 沒有這層紀錄根本查不出那則訊息發生了什麼事。回應內容與狀態碼完全不變——LINE 會依狀態碼
+// 決定要不要重送，改動它會造成訊息遺失或重複處理。
+export const handler: Handler = withErrorLogging(supabase, 'line-webhook', rawHandler);
