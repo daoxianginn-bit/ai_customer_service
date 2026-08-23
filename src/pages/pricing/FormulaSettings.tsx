@@ -9,6 +9,8 @@ import { SlidersHorizontal, Pencil, Sparkles, Plus, Trash2, Info } from 'lucide-
 import PageHeaderMui from '../../components/ui-mui/PageHeaderMui';
 import SpecialDatesModal from '../../components/SpecialDatesModal';
 import { computeStandardRoomLayout, RoomCapacityCount, CapacityLayout } from '../../lib/bookingEngine';
+import { logOperation } from '../../lib/logOperation';
+import { LOG_FEATURES, diffRecords } from '../../lib/operationLog';
 
 function newId(): string {
   return crypto.randomUUID();
@@ -116,6 +118,10 @@ export default function FormulaSettings() {
   const [editingDeposits, setEditingDeposits] = useState(false);
   const [savingDeposits, setSavingDeposits] = useState(false);
 
+  // 操作紀錄用的「異動前」快照，由 fetchAll 在每次載入/重新載入時更新。
+  const [settingsSnapshot, setSettingsSnapshot] = useState<any>(null);
+  const [roomTypesSnapshot, setRoomTypesSnapshot] = useState<any[]>([]);
+
   // 連住折扣
   const [discountCleaning, setDiscountCleaning] = useState(0);
   const [discountNoCleaning, setDiscountNoCleaning] = useState(0);
@@ -165,6 +171,10 @@ export default function FormulaSettings() {
       supabase.from('promotions').select('*').order('created_at'),
       supabase.from('special_prices').select('*', { count: 'exact', head: true }),
     ]);
+    // 存一份「這次載入時資料庫裡長什麼樣」，儲存時才比對得出到底改了哪幾個欄位。
+    // 各欄位的 state 從按下「編輯」那一刻起就是使用者改過的值，拿它們互相比對永遠沒有差異。
+    setSettingsSnapshot(st.data || null);
+    setRoomTypesSnapshot(rt.data || []);
     setSettingsId(st.data?.id || null);
     setBedBaseRate(st.data?.bed_base_rate ?? 1000);
     setFullOccupancyBonus(st.data?.full_occupancy_bonus ?? 500);
@@ -215,10 +225,26 @@ export default function FormulaSettings() {
   });
 
   // ---------------- 各區塊儲存 ----------------
+  // 這一頁的每張卡片都是「更新 settings 的某幾個欄位」，寫紀錄的方式完全一樣，抽成一個函式。
+  // 一定要在 fetchAll 重新載入之前呼叫——重新載入會把快照換成新值，之後就比不出差異了。
+  const logSettingsPatch = async (patch: Record<string, unknown>) => {
+    const diff = diffRecords(settingsSnapshot, patch, Object.keys(patch));
+    if (!diff.changed) return;
+    await logOperation({
+      feature: LOG_FEATURES.pricingFormula,
+      action: '修改',
+      target: null,
+      before: diff.before,
+      after: diff.after,
+    });
+  };
+
   const handleSaveFormula = async () => {
     setSavingFormula(true);
     try {
-      if (settingsId) await supabase.from('settings').update({ bed_base_rate: bedBaseRate, full_occupancy_bonus: fullOccupancyBonus, min_group_headcount: minGroupHeadcount }).eq('id', settingsId);
+      const patch = { bed_base_rate: bedBaseRate, full_occupancy_bonus: fullOccupancyBonus, min_group_headcount: minGroupHeadcount };
+      if (settingsId) await supabase.from('settings').update(patch).eq('id', settingsId);
+      await logSettingsPatch(patch);
       await fetchAll({ silent: true });
       setEditingFormula(false);
     } catch (e: any) {
@@ -232,7 +258,9 @@ export default function FormulaSettings() {
   const handleSaveDateSurcharge = async () => {
     setSavingDateSurcharge(true);
     try {
-      if (settingsId) await supabase.from('settings').update({ date_surcharge_small_holiday: dateSurchargeSmall, date_surcharge_peak: dateSurchargePeak, date_surcharge_long_holiday: dateSurchargeHoliday, weekday_range: weekdayRange }).eq('id', settingsId);
+      const patch = { date_surcharge_small_holiday: dateSurchargeSmall, date_surcharge_peak: dateSurchargePeak, date_surcharge_long_holiday: dateSurchargeHoliday, weekday_range: weekdayRange };
+      if (settingsId) await supabase.from('settings').update(patch).eq('id', settingsId);
+      await logSettingsPatch(patch);
       await fetchAll({ silent: true });
       setEditingDateSurcharge(false);
     } catch (e: any) {
@@ -263,7 +291,30 @@ export default function FormulaSettings() {
       if (roomTypes.length) await supabase.from('room_types').upsert(roomTypes);
       // 包棟押金跟各房型押金放在同一張卡片一起編輯，所以也要一起存——它存在 settings 表、
       // 不在 room_types，兩個 update 打不同張表但屬於同一次「儲存押金設定」。
-      if (settingsId) await supabase.from('settings').update({ whole_house_security_deposit: wholeHouseSecurityDeposit }).eq('id', settingsId);
+      const patch = { whole_house_security_deposit: wholeHouseSecurityDeposit };
+      if (settingsId) await supabase.from('settings').update(patch).eq('id', settingsId);
+
+      // 押金是直接影響收款金額的設定，改了要留下軌跡。各房型押金逐間比對，只列出真的有改的那幾間，
+      // 用房型名稱當欄位名（不是 security_deposit），否則五間房改完會變成五個一模一樣的「押金」。
+      const roomDiffBefore: Record<string, unknown> = {};
+      const roomDiffAfter: Record<string, unknown> = {};
+      for (const r of roomTypes) {
+        const old = roomTypesSnapshot.find((x: any) => x.id === r.id);
+        if (!old || Number(old.security_deposit ?? 0) === Number(r.security_deposit ?? 0)) continue;
+        const label = `${r.floor ? `${r.floor}-` : ''}${r.name} 押金`;
+        roomDiffBefore[label] = old.security_deposit ?? 0;
+        roomDiffAfter[label] = r.security_deposit ?? 0;
+      }
+      const wholeHouseDiff = diffRecords(settingsSnapshot, patch, Object.keys(patch));
+      if (Object.keys(roomDiffAfter).length || wholeHouseDiff.changed) {
+        await logOperation({
+          feature: LOG_FEATURES.pricingFormula,
+          action: '修改',
+          target: '房型押金',
+          before: { ...roomDiffBefore, ...wholeHouseDiff.before },
+          after: { ...roomDiffAfter, ...wholeHouseDiff.after },
+        });
+      }
       await fetchAll({ silent: true });
       setEditingDeposits(false);
     } catch (e: any) {
@@ -277,7 +328,9 @@ export default function FormulaSettings() {
   const handleSaveConsecutive = async () => {
     setSavingConsecutive(true);
     try {
-      if (settingsId) await supabase.from('settings').update({ consecutive_stay_discount_cleaning: discountCleaning, consecutive_stay_discount_no_cleaning: discountNoCleaning, consecutive_stay_default_option: consecutiveStayDefaultOption }).eq('id', settingsId);
+      const patch = { consecutive_stay_discount_cleaning: discountCleaning, consecutive_stay_discount_no_cleaning: discountNoCleaning, consecutive_stay_default_option: consecutiveStayDefaultOption };
+      if (settingsId) await supabase.from('settings').update(patch).eq('id', settingsId);
+      await logSettingsPatch(patch);
       await fetchAll({ silent: true });
       setEditingConsecutive(false);
     } catch (e: any) {
@@ -291,7 +344,9 @@ export default function FormulaSettings() {
   const handleSaveDepositSettings = async () => {
     setSavingDepositSettings(true);
     try {
-      if (settingsId) await supabase.from('settings').update({ deposit_percent: depositPercent }).eq('id', settingsId);
+      const patch = { deposit_percent: depositPercent };
+      if (settingsId) await supabase.from('settings').update(patch).eq('id', settingsId);
+      await logSettingsPatch(patch);
       await fetchAll({ silent: true });
       setEditingDepositSettings(false);
     } catch (e: any) {

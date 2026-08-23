@@ -9,7 +9,7 @@ import { supabase } from '../lib/supabase';
 import {
   LayoutDashboard, LogOut, Settings, ClipboardList, Users, UserCog, ChevronDown, Calculator,
   Send, Headphones, MessageSquareText, CalendarDays, BookOpen, Variable, DoorOpen, Shirt,
-  Clock, SlidersHorizontal, PanelLeftClose, PanelLeftOpen,
+  Clock, SlidersHorizontal, PanelLeftClose, PanelLeftOpen, ScrollText,
 } from 'lucide-react';
 
 // 規範指定的外殼尺寸：左側導航 240px（摺疊 64px）、頂部狀態列 64px。
@@ -110,6 +110,7 @@ const navEntries: NavEntry[] = [
       { to: '/room-spaces', label: '房型與空間維護', icon: DoorOpen },
       { to: '/scheduled-tasks', label: '排程管理', icon: Clock },
       { to: '/accounts', label: '帳號管理', icon: UserCog },
+      { to: '/operation-logs', label: '操作紀錄', icon: ScrollText },
     ],
   },
 ];

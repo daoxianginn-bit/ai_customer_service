@@ -19,6 +19,7 @@ import StandardMessages from './pages/StandardMessages';
 import MessageVariables from './pages/MessageVariables';
 import CustomMessageSending from './pages/CustomMessageSending';
 import OrderManagement from './pages/OrderManagement';
+import OperationLogs from './pages/OperationLogs';
 import RoomCalendar from './pages/RoomCalendar';
 import RoomSpaceManagement from './pages/RoomSpaceManagement';
 import LinenManagement from './pages/LinenManagement';
@@ -116,6 +117,7 @@ function App() {
           <Route path="/message-variables" element={<MessageVariables />} />
           <Route path="/broadcast" element={<CustomMessageSending />} />
           <Route path="/orders" element={<OrderManagement />} />
+          <Route path="/operation-logs" element={<OperationLogs />} />
           <Route path="/room-calendar" element={<RoomCalendar />} />
           <Route path="/room-spaces" element={<RoomSpaceManagement />} />
           <Route path="/room-pricing" element={<PricingOverview />} />

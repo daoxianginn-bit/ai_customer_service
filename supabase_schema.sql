@@ -1045,6 +1045,34 @@ ALTER TABLE public.scheduled_tasks ADD CONSTRAINT scheduled_tasks_recurrence_che
 
 ALTER TABLE public.scheduled_tasks ADD COLUMN IF NOT EXISTS interval_minutes INTEGER; -- recurrence='every_n_minutes' 專用
 
+-- ========================================================================
+-- 8.9 操作紀錄（異動軌跡）
+--
+-- 「後台選單 → 操作紀錄」查詢用：誰在什麼時候、在哪個功能、把什麼資料從什麼改成什麼。
+-- 跟 handover_logs（顧客求助真人的紀錄）、conversations（LINE 對話）是不同的東西，
+-- 那兩張表記的是「跟顧客的互動」，這張記的是「系統裡的資料被改了什麼」。
+--
+-- before/after 只存「真的有變動的欄位」，不存整列快照——整列存下來的話，畫面上要比對
+-- 出哪裡不一樣得自己逐欄掃，而且一張訂單有 30 幾個欄位，每次改一個字都留兩份完整副本，
+-- 這張表會長得比 bookings 還快。欄位名稱在寫入時就換成中文（見 src/lib/operationLog.ts），
+-- 查詢畫面才不用再維護一份英文欄位→中文的對照表。
+-- ========================================================================
+CREATE TABLE IF NOT EXISTS public.operation_logs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    feature TEXT NOT NULL,        -- 功能名稱（中文），例如「訂單管理」「計價公式設定」
+    action TEXT NOT NULL,         -- 動作（中文），例如「新增」「修改」「刪除」「狀態變更」
+    target TEXT,                  -- 這次異動的對象，例如訂單編號、房型名稱；沒有明確對象時是 NULL
+    actor_type TEXT NOT NULL DEFAULT 'user' CHECK (actor_type IN ('user', 'system')),
+    actor_name TEXT NOT NULL,     -- 使用者的登入帳號（email）；系統自動異動時是 'system'
+    before JSONB,                 -- 異動前：{ 中文欄位名: 值 }，新增時是 NULL
+    after JSONB,                  -- 異動後：{ 中文欄位名: 值 }，刪除時是 NULL
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- 查詢畫面預設就是「最新的排前面」，再依功能/異動者篩選，這三個索引對應那三種用法。
+CREATE INDEX IF NOT EXISTS idx_operation_logs_created ON public.operation_logs(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_operation_logs_feature ON public.operation_logs(feature);
+CREATE INDEX IF NOT EXISTS idx_operation_logs_actor ON public.operation_logs(actor_name);
+
 -- 9. 啟用 RLS（僅限已登入使用者存取，用 DROP + CREATE 讓整份腳本可重複執行）
 ALTER TABLE public.settings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.line_channels ENABLE ROW LEVEL SECURITY;
@@ -1055,6 +1083,7 @@ ALTER TABLE public.user_states ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.processed_events ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.knowledge_base_items ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.handover_logs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.operation_logs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.conversations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.admin_profiles ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.room_types ENABLE ROW LEVEL SECURITY;
@@ -1107,6 +1136,10 @@ DROP POLICY IF EXISTS "Allow Auth Access KB" ON public.knowledge_base_items;
 CREATE POLICY "Allow Auth Access KB" ON public.knowledge_base_items FOR ALL USING (auth.role() = 'authenticated');
 DROP POLICY IF EXISTS "Allow Auth Access Handover Logs" ON public.handover_logs;
 CREATE POLICY "Allow Auth Access Handover Logs" ON public.handover_logs FOR ALL USING (auth.role() = 'authenticated');
+-- 操作紀錄是稽核用的軌跡：登入的管理員可以查、也需要能寫（前端各功能頁在存檔後自己寫一筆）。
+-- Netlify functions 用 service role key 寫入系統端的異動，會略過 RLS。
+DROP POLICY IF EXISTS "Allow Auth Access Operation Logs" ON public.operation_logs;
+CREATE POLICY "Allow Auth Access Operation Logs" ON public.operation_logs FOR ALL USING (auth.role() = 'authenticated');
 DROP POLICY IF EXISTS "Allow Auth Access Conversations" ON public.conversations;
 CREATE POLICY "Allow Auth Access Conversations" ON public.conversations FOR ALL USING (auth.role() = 'authenticated');
 DROP POLICY IF EXISTS "Allow Auth Access Profiles" ON public.admin_profiles;

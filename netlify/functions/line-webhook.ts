@@ -14,6 +14,7 @@ import {
   computeTodayTomorrowFields,
 } from '../../src/lib/messageVariables';
 import { bookingStatusLabel, OCCUPYING_STATUSES } from '../../src/lib/bookingStatus';
+import { writeOperationLog, LOG_FEATURES, SYSTEM_ACTOR } from '../../src/lib/operationLog';
 import { roomLabel } from '../../src/lib/rooms';
 import { generateOrderNumber } from '../../src/lib/orderNumber';
 import {
@@ -789,6 +790,18 @@ async function saveBookingSession(userId: string, session: Omit<BookingSession, 
   } catch (e: any) {
     console.error('[Booking] save session failed:', e.message);
   }
+}
+
+// 系統自動異動的操作紀錄（異動者固定是 'system'）。跟後台各頁面共用同一張 operation_logs，
+// 這樣「這張訂單為什麼變成取消」不論是人改的還是流程自己改的，都在同一個地方查得到。
+async function logSystemOperation(entry: {
+  feature: string;
+  action: string;
+  target?: string | null;
+  before?: Record<string, unknown> | null;
+  after?: Record<string, unknown> | null;
+}) {
+  await writeOperationLog(supabase, { ...entry, actorType: 'system', actorName: SYSTEM_ACTOR });
 }
 
 async function clearBookingSession(userId: string) {
@@ -2379,6 +2392,13 @@ async function handleBookingConfirmation(
       status: 'cancelled',
       updated_at: new Date().toISOString(),
     }).eq('id', booking.id);
+    await logSystemOperation({
+      feature: LOG_FEATURES.lineBooking,
+      action: '狀態變更',
+      target: booking.order_number || booking.id,
+      before: { 訂單狀態: booking.status },
+      after: { 訂單狀態: 'cancelled', 說明: '顧客確認訂房時房間已被其他訂單佔用，自動取消' },
+    });
 
     const takenRange = watchTarget
       ? formatOverlapRange(booking.checkin_date, booking.checkout_date, watchTarget.checkin_date, watchTarget.checkout_date)
@@ -2412,6 +2432,13 @@ async function handleBookingConfirmation(
     .from('bookings')
     .update({ status: 'awaiting_confirmation', reserved_at: nowIso, payment_deadline_at: computePaymentDeadlineDate(settings).toISOString(), updated_at: nowIso })
     .eq('id', booking.id);
+  await logSystemOperation({
+    feature: LOG_FEATURES.lineBooking,
+    action: '狀態變更',
+    target: booking.order_number || booking.id,
+    before: { 訂單狀態: booking.status },
+    after: { 訂單狀態: 'awaiting_confirmation', 說明: '顧客回覆「是」確認訂房' },
+  });
 
   // 這筆是「客人改了日期重新報價」產生的新訂單，而且客人現在確認要訂它了——被它取代的舊訂單
   // 到這一刻才真的可以取消。刻意等到現在才取消，而不是重新報價的當下：舊訂單如果已經是

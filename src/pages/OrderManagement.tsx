@@ -9,6 +9,8 @@ import {
 } from '../lib/bookingStatus';
 import { computeOrderAmounts } from '../lib/messageVariables';
 import { generateOrderNumber } from '../lib/orderNumber';
+import { logOperation } from '../lib/logOperation';
+import { LOG_FEATURES, diffRecords, labelRecord } from '../lib/operationLog';
 import {
   LinenItem, RoomLinenDefault, LinenUsageRow,
   linenItemLabel, currency, nightsBetween, computeUsage, mergeUsage, usageTotal, normalizeChangeCount,
@@ -282,6 +284,9 @@ export default function OrderManagement() {
 
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
+  // 打開編輯表單當下那一列的原始資料，存檔時用來比對出「這次到底改了什麼」寫進操作紀錄。
+  // 不能存檔後再回查一次資料庫——那時候查到的已經是改完的新值，比對出來永遠是沒有差異。
+  const [editingOriginal, setEditingOriginal] = useState<any | null>(null);
   const [form, setForm] = useState<OrderForm>(emptyForm());
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState('');
@@ -548,8 +553,18 @@ export default function OrderManagement() {
     if (!selectedIds.length) return;
     setBatchDeleting(true);
     try {
+      const deletedRows = rows.filter((r) => selectedIds.includes(r.id));
       const { error } = await supabase.from('bookings').delete().in('id', selectedIds);
       if (error) throw error;
+      // 批次刪除一次寫一筆紀錄、列出被刪掉的訂單編號。拆成每張單一筆的話，一次刪 20 張
+      // 就會在紀錄裡刷掉整頁，反而看不出「這是同一次批次操作」。
+      await logOperation({
+        feature: LOG_FEATURES.order,
+        action: '批次刪除',
+        target: `共 ${deletedRows.length} 筆`,
+        before: { 訂單編號: deletedRows.map((r) => r.order_number || r.id).join('、') },
+        after: null,
+      });
       setShowBatchConfirm(false);
       setSelectedIds([]);
       runQuery(page);
@@ -573,6 +588,7 @@ export default function OrderManagement() {
 
   const openNew = () => {
     setEditingId(null);
+    setEditingOriginal(null);
     // 新訂單一開始就是包棟（emptyForm 的 whole_house 是 true），押金欄位直接帶入包棟押金，
     // 不要只放在 placeholder 裡當提示——欄位留空存檔會被存成 0，畫面上看到 3000、實際存 0。
     setForm({ ...emptyForm(), security_deposit: String(moneyDefaults.wholeHouseSecurity) });
@@ -588,6 +604,7 @@ export default function OrderManagement() {
 
   const openEdit = (row: any) => {
     setEditingId(row.id);
+    setEditingOriginal(row);
     loadBookingLinen(row.id);
     setForm({
       id: row.id,
@@ -677,18 +694,20 @@ export default function OrderManagement() {
       };
 
       let bookingId = editingId;
+      let createdOrderNumber = '';
       if (editingId) {
         const { error } = await supabase.from('bookings').update(payload).eq('id', editingId);
         if (error) throw error;
       } else {
         let lastError: any = null;
         for (let attempt = 0; attempt < 3; attempt++) {
+          const orderNumber = generateOrderNumber();
           const { data, error } = await supabase
             .from('bookings')
-            .insert({ ...payload, order_number: generateOrderNumber() })
+            .insert({ ...payload, order_number: orderNumber })
             .select('id')
             .single();
-          if (!error) { lastError = null; bookingId = data.id; break; }
+          if (!error) { lastError = null; bookingId = data.id; createdOrderNumber = orderNumber; break; }
           lastError = error;
           if (!String(error.message || '').includes('order_number')) break;
         }
@@ -696,6 +715,29 @@ export default function OrderManagement() {
       }
 
       if (bookingId) await saveLinen(bookingId);
+
+      // 操作紀錄：只在訂單本身真的存成功之後才寫，寫失敗也不影響這次存檔（見 writeOperationLog）。
+      if (editingId) {
+        const diff = diffRecords(editingOriginal, payload, Object.keys(payload));
+        if (diff.changed) {
+          await logOperation({
+            feature: LOG_FEATURES.order,
+            // 狀態有變就標成「狀態變更」，查紀錄時最常找的就是「這張單什麼時候被推到下一關」。
+            action: diff.after['訂單狀態'] !== undefined ? '狀態變更' : '修改',
+            target: form.order_number || editingId,
+            before: diff.before,
+            after: diff.after,
+          });
+        }
+      } else {
+        await logOperation({
+          feature: LOG_FEATURES.order,
+          action: '新增',
+          target: createdOrderNumber,
+          before: null,
+          after: labelRecord(payload, ['name', 'phone', 'checkin_date', 'checkout_date', 'headcount', 'whole_house', 'room_amount', 'security_deposit', 'total_amount', 'deposit', 'status']),
+        });
+      }
 
       setShowForm(false);
       runQuery(page);
@@ -732,6 +774,14 @@ export default function OrderManagement() {
     try {
       const { error } = await supabase.from('bookings').delete().eq('id', deleteTarget.id);
       if (error) throw error;
+      // 刪除是唯一救不回來的操作，異動前的內容一定要留下來，之後才查得到「被刪掉的是什麼」。
+      await logOperation({
+        feature: LOG_FEATURES.order,
+        action: '刪除',
+        target: deleteTarget.order_number || deleteTarget.id,
+        before: labelRecord(deleteTarget, ['order_number', 'name', 'phone', 'checkin_date', 'checkout_date', 'headcount', 'room_type_label', 'total_amount', 'deposit', 'status']),
+        after: null,
+      });
       setDeleteTarget(null);
       runQuery(page);
       fetchStatusCounts();

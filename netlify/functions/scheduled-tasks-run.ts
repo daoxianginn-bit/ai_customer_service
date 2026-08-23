@@ -8,6 +8,7 @@ import { OCCUPYING_STATUSES, BALANCE_PAID_STATUSES } from '../../src/lib/booking
 import { parseIcsEvents } from '../../src/lib/icsParser';
 import { otaPlatformLabel } from '../../src/lib/otaChannels';
 import { classifyOtaEvent } from '../../src/lib/otaEventFilter';
+import { writeOperationLog, LOG_FEATURES, SYSTEM_ACTOR } from '../../src/lib/operationLog';
 import { processWaitlist } from './line-webhook';
 
 // ========================================================================
@@ -39,6 +40,31 @@ async function fetchCustomerChannel(): Promise<any | null> {
   return data || null;
 }
 
+// 排程自動改動訂單狀態時寫進操作紀錄（異動者是 'system'）。排程是在沒有人看著的時候跑的，
+// 少了這層軌跡，客服隔天只會看到「訂單怎麼自己變成取消了」而查不出原因。
+async function logSystemOperation(entry: {
+  feature: string;
+  action: string;
+  target?: string | null;
+  before?: Record<string, unknown> | null;
+  after?: Record<string, unknown> | null;
+}) {
+  await writeOperationLog(supabase, { ...entry, actorType: 'system', actorName: SYSTEM_ACTOR });
+}
+
+// 整批推進流程的排程共用：每張單各留一筆紀錄，之後在「操作紀錄」用訂單編號就查得到它的完整經歷。
+async function logStageAdvance(rows: { id: string; order_number?: string | null }[], from: string, to: string, reason: string) {
+  for (const b of rows) {
+    await logSystemOperation({
+      feature: LOG_FEATURES.scheduledTask,
+      action: '狀態變更',
+      target: b.order_number || b.id,
+      before: { 訂單狀態: from },
+      after: { 訂單狀態: to, 說明: reason },
+    });
+  }
+}
+
 // 取消逾期未匯款的訂單：status='awaiting_confirmation' 且 payment_deadline_at 已過的訂單改成 cancelled。
 // 2026-08 改版後，payment_deadline_at 是客人回「是」的當下才寫入（見 handleBookingConfirmation()），
 // 那個時間點狀態已經是「待確認」不是「待預定」——「待預定」現在代表「報價已送出、還在等客人回是否要訂」，
@@ -66,6 +92,13 @@ async function cancelUnpaidBookings(_config: Record<string, any>, settings: any)
     if (updateError) continue;
     cancelled++;
     cancelledList.push(`${booking.order_number || booking.id}（${booking.name || booking.nickname || '未知'}）`);
+    await logSystemOperation({
+      feature: LOG_FEATURES.scheduledTask,
+      action: '狀態變更',
+      target: booking.order_number || booking.id,
+      before: { 訂單狀態: 'awaiting_confirmation' },
+      after: { 訂單狀態: 'cancelled', 說明: '逾期未回報匯款，排程自動取消' },
+    });
   }
 
   if (cancelled > 0) {
@@ -187,33 +220,36 @@ function addDaysIso(iso: string, days: number): string {
 // 已預定(reserved) → 待收尾款(awaiting_balance)：今天 = 入住日 - 3 天。00:00 執行。
 async function advanceToAwaitingBalance(): Promise<{ ok: boolean; summary: string }> {
   const targetCheckin = addDaysIso(taiwanTodayIso(), 3);
-  const { data, error } = await supabase.from('bookings').select('id').eq('status', 'reserved').eq('checkin_date', targetCheckin);
+  const { data, error } = await supabase.from('bookings').select('id, order_number').eq('status', 'reserved').eq('checkin_date', targetCheckin);
   if (error) return { ok: false, summary: `查詢失敗：${error.message}` };
   if (!data?.length) return { ok: true, summary: '沒有需要轉為待收尾款的訂單' };
   const { error: updateError } = await supabase.from('bookings').update({ status: 'awaiting_balance', updated_at: new Date().toISOString() }).in('id', data.map((b) => b.id));
   if (updateError) return { ok: false, summary: `更新失敗：${updateError.message}` };
+  await logStageAdvance(data, 'reserved', 'awaiting_balance', '入住日前 3 天，排程自動轉為待收尾款');
   return { ok: true, summary: `${data.length} 筆訂單已轉為待收尾款` };
 }
 
 // 待入住(awaiting_checkin) → 入住中(checked_in)：今天 = 入住日。下午 1 點執行。
 async function advanceToCheckedIn(): Promise<{ ok: boolean; summary: string }> {
   const today = taiwanTodayIso();
-  const { data, error } = await supabase.from('bookings').select('id').eq('status', 'awaiting_checkin').eq('checkin_date', today);
+  const { data, error } = await supabase.from('bookings').select('id, order_number').eq('status', 'awaiting_checkin').eq('checkin_date', today);
   if (error) return { ok: false, summary: `查詢失敗：${error.message}` };
   if (!data?.length) return { ok: true, summary: '沒有今日入住、需要轉為入住中的訂單' };
   const { error: updateError } = await supabase.from('bookings').update({ status: 'checked_in', updated_at: new Date().toISOString() }).in('id', data.map((b) => b.id));
   if (updateError) return { ok: false, summary: `更新失敗：${updateError.message}` };
+  await logStageAdvance(data, 'awaiting_checkin', 'checked_in', '入住日到，排程自動轉為入住中');
   return { ok: true, summary: `${data.length} 筆訂單已轉為入住中` };
 }
 
 // 入住中(checked_in) → 押金處理(deposit_processing)：今天 = 退房日。中午 12 點執行。
 async function advanceToDepositProcessing(): Promise<{ ok: boolean; summary: string }> {
   const today = taiwanTodayIso();
-  const { data, error } = await supabase.from('bookings').select('id').eq('status', 'checked_in').eq('checkout_date', today);
+  const { data, error } = await supabase.from('bookings').select('id, order_number').eq('status', 'checked_in').eq('checkout_date', today);
   if (error) return { ok: false, summary: `查詢失敗：${error.message}` };
   if (!data?.length) return { ok: true, summary: '沒有今日退房、需要轉為押金處理的訂單' };
   const { error: updateError } = await supabase.from('bookings').update({ status: 'deposit_processing', updated_at: new Date().toISOString() }).in('id', data.map((b) => b.id));
   if (updateError) return { ok: false, summary: `更新失敗：${updateError.message}` };
+  await logStageAdvance(data, 'checked_in', 'deposit_processing', '退房日到，排程自動轉為押金處理');
   return { ok: true, summary: `${data.length} 筆訂單已轉為押金處理` };
 }
 
@@ -648,6 +684,15 @@ async function syncOneOtaChannel(channel: any): Promise<{ summary: string; confl
   const disappeared = (existingRows || []).filter((r: any) => r.external_uid && !seenUids.has(r.external_uid));
   if (disappeared.length) {
     await supabase.from('bookings').update({ status: 'cancelled', updated_at: nowIso }).in('id', disappeared.map((r: any) => r.id));
+    for (const r of disappeared) {
+      await logSystemOperation({
+        feature: LOG_FEATURES.calendarSync,
+        action: '狀態變更',
+        target: r.order_number || r.id,
+        before: { 訂單狀態: r.status },
+        after: { 訂單狀態: 'cancelled', 說明: `${channel.name}：該筆訂單已從平台行事曆消失（平台端取消），自動標記取消` },
+      });
+    }
   }
 
   const parts = [`新增 ${created} 筆`, `更新 ${updated} 筆`];
