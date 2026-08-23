@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import { Clock, Plus, Pencil, Trash2, AlertTriangle, CheckCircle2, XCircle, PlayCircle } from 'lucide-react';
 import { PageHeader, Button, Modal, ConfirmDialog, Switch, EmptyState } from '../components/ui';
@@ -39,8 +39,9 @@ const TASK_TYPE_OPTIONS: { value: string; label: string; description: string; ne
     label: '訂單狀態：待入住→入住中（含洗滌單）',
     description:
       '入住日就是今天的「待入住」訂單，自動轉為「入住中」。' +
-      '另外可以選填「洗滌單範本」與「LINE 群組」：填了就會把這批訂單今天要用的布巾品項數量加總，套進範本發到指定群組；' +
-      '不填就只做狀態轉換、不發任何訊息。範本可用 [日期]、[布巾明細]、[訂單數] 三個變數，' +
+      '另外可以選填「洗滌單內容」與「LINE 群組」：填了就會把這批訂單今天要用的布巾品項數量加總，發到指定群組；' +
+      '兩者都留空就只做狀態轉換、不發任何訊息。' +
+      '洗滌單內容直接寫在下面，可插入 [日期]、[訂單數]、[布巾明細]，以及每個布巾品項各自的數量；' +
       '品項名稱取「備品管理」裡的洗滌單簡稱（沒填就用完整名稱）。建議設定為每天 13:00。',
     needsLineGroups: true,
   },
@@ -223,6 +224,10 @@ export default function ScheduledTasks() {
   const [groups, setGroups] = useState<GroupOption[]>([]);
   const [lineGroups, setLineGroups] = useState<LineGroupOption[]>([]);
   const [linenItems, setLinenItems] = useState<LinenItemOption[]>([]);
+  // 洗滌單群組清單要先選官方帳號再挑群組：群組是掛在各自的官方帳號底下的（實務上通常只有
+  // 廠商用帳號才被邀進群組），全部混在一起列會分不清楚哪個群組屬於哪個帳號。
+  // 這只是畫面上的篩選，不寫進 config——發送時後端會照 line_groups 記的帳號去拿憑證。
+  const [groupChannelFilter, setGroupChannelFilter] = useState('');
   const [channelNameById, setChannelNameById] = useState<Record<string, string>>({});
 
   const [showForm, setShowForm] = useState(false);
@@ -302,6 +307,18 @@ export default function ScheduledTasks() {
   };
 
   const currentTaskType = taskTypeOption(form.task_type);
+
+  // 有群組的官方帳號才列進篩選選單——列出一個「底下沒有任何群組」的帳號只會讓人白點一次。
+  const groupChannelOptions = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const g of lineGroups) counts.set(g.channel_id, (counts.get(g.channel_id) || 0) + 1);
+    return [...counts.entries()].map(([id, count]) => ({ id, name: channelNameById[id] || '未知帳號', count }));
+  }, [lineGroups, channelNameById]);
+
+  const visibleLineGroups = useMemo(
+    () => (groupChannelFilter ? lineGroups.filter((g) => g.channel_id === groupChannelFilter) : lineGroups),
+    [lineGroups, groupChannelFilter]
+  );
 
   const handleSave = async () => {
     if (!form.name.trim()) return setFormError('請輸入排程名稱');
@@ -577,8 +594,24 @@ NG:0
                 目前沒有可用的群組。請把 LINE 官方帳號的機器人邀請進群組，並在群組裡隨便發一則訊息，這裡就會出現。
               </p>
             ) : (
+              <>
+              <select
+                value={groupChannelFilter}
+                onChange={(e) => setGroupChannelFilter(e.target.value)}
+                className="w-full px-3 py-2 border rounded-lg bg-white mb-2 text-sm"
+              >
+                <option value="">全部官方帳號（{lineGroups.length} 個群組）</option>
+                {groupChannelOptions.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name}（{c.count} 個群組）
+                  </option>
+                ))}
+              </select>
               <div className="border rounded-lg divide-y max-h-40 overflow-y-auto">
-                {lineGroups.map((g) => (
+                {visibleLineGroups.length === 0 && (
+                  <p className="px-3 py-3 text-xs text-gray-400">這個官方帳號底下沒有群組。</p>
+                )}
+                {visibleLineGroups.map((g) => (
                   <label key={g.group_id} className="flex items-center gap-2 px-3 py-2 text-sm cursor-pointer hover:bg-gray-50">
                     <input
                       type="checkbox"
@@ -598,8 +631,11 @@ NG:0
                   </label>
                 ))}
               </div>
+              </>
             )}
             <p className="text-xs text-gray-400 mt-1">
+              已勾選 {form.line_group_ids.length} 個群組
+              {form.line_group_ids.length > 0 && groupChannelFilter ? '（切換帳號不會取消其他帳號已勾選的群組）' : ''}。
               留空＝這支排程只做狀態轉換、不發洗滌單。要發送的話，上面的「洗滌單內容」也要一起填。
             </p>
           </div>
