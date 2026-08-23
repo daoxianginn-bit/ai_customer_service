@@ -134,3 +134,23 @@ export function flowStepIndex(status?: string | null): number | null {
   const idx = FLOW_STEP_STATUSES.indexOf(status || '');
   return idx === -1 ? null : idx + 1;
 }
+
+/** 正常流程裡的下一關；已經在最後一關（或根本不在流程序列上，例如已取消）回傳 null。 */
+export function nextFlowStatus(status?: string | null): string | null {
+  const idx = FLOW_STEP_STATUSES.indexOf(status || '');
+  if (idx === -1 || idx >= FLOW_STEP_STATUSES.length - 1) return null;
+  return FLOW_STEP_STATUSES[idx + 1];
+}
+
+// 「待我處理」：卡在這些狀態的訂單都在等人動手，系統自己不會把它們往前推。
+//
+// 正常流程 1~9 裡有三關是人工關卡：3 待確認（要核對匯款到帳）、5 待收尾款（要跟客人收尾款）、
+// 8 押金處理（要核對並退還押金）。其餘關卡不是在等客人回覆（1、2），就是排程會自動推進
+// （4→5、6→7）或本來就結案了（9），列進來只會讓「待我處理」變成一份看了也不知道要做什麼的清單。
+export const MANUAL_ACTION_FLOW_STATUSES = ['awaiting_confirmation', 'awaiting_balance', 'deposit_processing'];
+
+// 例外流程同樣要人工介入——這些狀態存在的目的就是叫人來看。跟上面分開列是因為它們不在
+// 1~9 的進度列上（flowStepIndex 回傳 null），畫面上要用不同的樣式呈現。
+export const MANUAL_ACTION_EXCEPTION_STATUSES = ['pending_manual_conflict', 'awaiting_refund'];
+
+export const MANUAL_ACTION_STATUSES = [...MANUAL_ACTION_FLOW_STATUSES, ...MANUAL_ACTION_EXCEPTION_STATUSES];

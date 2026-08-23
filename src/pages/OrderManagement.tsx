@@ -1,8 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import { supabase } from '../lib/supabase';
-import { ClipboardList, Search, RotateCcw, Save, Plus, Trash2, AlertCircle, AlertTriangle, Shirt, RefreshCw, CalendarDays, ListFilter, DoorOpen, ArrowRight } from 'lucide-react';
+import { ClipboardList, Search, RotateCcw, Save, Plus, Trash2, AlertCircle, AlertTriangle, Shirt, RefreshCw, CalendarDays, ListFilter, DoorOpen, UserCheck, CheckCircle2, LogIn, ChevronRight, X } from 'lucide-react';
 import { Button, Modal, StatusBadge, EmptyState, ConfirmDialog } from '../components/ui';
-import { BOOKING_STATUS_OPTIONS, SYSTEM_ONLY_STATUSES, REQUIRES_REMIT_LAST5_STATUS, REQUIRES_CHECKIN_PASSWORD_STATUS, FLOW_STEP_STATUSES, flowStepIndex, bookingStatusLabel } from '../lib/bookingStatus';
+import {
+  BOOKING_STATUS_OPTIONS, SYSTEM_ONLY_STATUSES, REQUIRES_REMIT_LAST5_STATUS, REQUIRES_CHECKIN_PASSWORD_STATUS,
+  FLOW_STEP_STATUSES, flowStepIndex, bookingStatusLabel, nextFlowStatus,
+  MANUAL_ACTION_STATUSES, MANUAL_ACTION_FLOW_STATUSES, OCCUPYING_STATUSES,
+} from '../lib/bookingStatus';
 import { computeOrderAmounts } from '../lib/messageVariables';
 import { generateOrderNumber } from '../lib/orderNumber';
 import {
@@ -78,8 +82,10 @@ const EXCEPTION_STATUS_STYLE: Record<string, string> = {
   external_synced: 'border-slate-200 bg-slate-50 text-slate-600',
 };
 
-// 訂單流程狀態進度列：上排是正常 6 步流程（點了篩選表格），下排是例外/其他流程。
-function FlowStatusBar({
+// 訂單流程進度列：1~9 關橫向排開，每一關顯示目前卡了幾張單，點了就篩選成那一關。
+// 關卡數量固定是 9，在小螢幕一定放不下，所以整條做成可橫向捲動，而不是換行擠在一起——
+// 換行會讓「流程是一條線」這件事在視覺上斷掉。
+function FlowPipeline({
   counts,
   activeStatus,
   onSelectStatus,
@@ -88,82 +94,168 @@ function FlowStatusBar({
   activeStatus: string;
   onSelectStatus: (status: string) => void;
 }) {
-  const exceptionPill = (statusValue: string, label: string) => {
-    const active = activeStatus === statusValue;
-    return (
-      <button
-        onClick={() => onSelectStatus(statusValue)}
-        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium transition-colors ${
-          active ? 'ring-2 ring-offset-1 ring-red-300' : ''
-        } ${EXCEPTION_STATUS_STYLE[statusValue] || 'border-gray-200 bg-gray-50 text-gray-600'}`}
-      >
-        {label}
-        <span className="font-bold">{counts[statusValue] || 0}</span>
-      </button>
-    );
-  };
+  // 「目前最多」只標在有訂單的關卡上，全部都是 0 的時候不要硬選一關出來標。
+  const maxCount = Math.max(0, ...FLOW_STEP_STATUSES.map((s) => counts[s] || 0));
 
   return (
-    <div className="bg-white rounded-xl shadow-sm border p-5 space-y-4">
-      <p className="text-xs font-medium text-gray-500 flex items-center gap-1">訂單流程狀態 <StatusHelpIcon /></p>
-      <div className="flex flex-wrap items-center gap-1">
+    <div className="overflow-x-auto pb-1">
+      <div className="flex items-stretch gap-0 min-w-max">
         {FLOW_STEP_STATUSES.map((s, i) => {
           const active = activeStatus === s;
+          const count = counts[s] || 0;
+          const isBusiest = maxCount > 0 && count === maxCount;
+          const needsPerson = MANUAL_ACTION_FLOW_STATUSES.includes(s);
           return (
             <div key={s} className="flex items-center">
               <button
                 onClick={() => onSelectStatus(s)}
-                className={`flex flex-col items-center gap-1 px-4 py-2 rounded-lg border transition-colors min-w-[84px] ${
-                  active ? 'border-green-500 bg-green-50' : 'border-gray-200 hover:bg-gray-50'
+                className={`text-left rounded-xl border-2 px-4 py-3 min-w-[150px] transition-colors ${
+                  active ? 'border-green-500 bg-green-50/60' : 'border-gray-200 bg-white hover:border-gray-300'
                 }`}
               >
-                <span className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold ${active ? 'bg-green-600 text-white' : 'bg-gray-100 text-gray-500'}`}>
+                <span
+                  className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold ${
+                    active ? 'bg-green-600 text-white' : count > 0 ? 'bg-gray-800 text-white' : 'bg-gray-100 text-gray-400'
+                  }`}
+                >
                   {i + 1}
                 </span>
-                <span className="text-xs text-gray-600 whitespace-nowrap">{bookingStatusLabel(s)}</span>
-                <span className="text-sm font-bold text-gray-800">{counts[s] || 0}</span>
+                <p className="mt-2 text-sm font-semibold text-gray-800 whitespace-nowrap">
+                  {bookingStatusLabel(s)}
+                  {needsPerson && <span className="ml-1.5 text-[10px] font-normal text-amber-600">人工</span>}
+                </p>
+                <p className="mt-1 text-xs text-gray-500 whitespace-nowrap">
+                  {count} 張訂單
+                  {isBusiest && <span className="text-gray-400"> · 目前最多</span>}
+                </p>
               </button>
-              {i < FLOW_STEP_STATUSES.length - 1 && <ArrowRight className="w-4 h-4 text-gray-300 mx-1 shrink-0" />}
+              {i < FLOW_STEP_STATUSES.length - 1 && <ChevronRight className="w-4 h-4 text-gray-300 mx-1.5 shrink-0" />}
             </div>
           );
         })}
-      </div>
-      <div className="pt-3 border-t">
-        <p className="text-xs text-gray-400 mb-2">例外／其他流程</p>
-        <div className="flex flex-wrap gap-3 items-center">
-          <div className="flex items-center gap-1.5">
-            {exceptionPill('awaiting_refund', bookingStatusLabel('awaiting_refund'))}
-            <ArrowRight className="w-3.5 h-3.5 text-gray-300" />
-            {exceptionPill('refunded', bookingStatusLabel('refunded'))}
-          </div>
-          {exceptionPill('cancelled', bookingStatusLabel('cancelled'))}
-          {SYSTEM_ONLY_STATUSES.map((s) => <span key={s.value}>{exceptionPill(s.value, s.label)}</span>)}
-        </div>
       </div>
     </div>
   );
 }
 
-// 每筆訂單在表格裡的「流程位置」小圖示：正常流程顯示 1~6 小圓圈鏈，例外狀態顯示標籤取代。
-function FlowPositionCell({ status }: { status: string }) {
-  const idx = flowStepIndex(status);
-  if (idx == null) {
-    return <span className="text-[11px] px-2 py-0.5 rounded-full border whitespace-nowrap bg-amber-50 text-amber-700 border-amber-200">例外流程</span>;
-  }
+// 例外／其他流程（取消、退款、待人工確認…）。這些不在 1~9 的線性進度上，所以跟上面的
+// 流程列分開呈現，不要混進去讓人以為取消是流程的第 10 關。
+function ExceptionStatusRow({
+  counts,
+  activeStatus,
+  onSelectStatus,
+}: {
+  counts: Record<string, number>;
+  activeStatus: string;
+  onSelectStatus: (status: string) => void;
+}) {
+  const pill = (statusValue: string, label: string) => (
+    <button
+      key={statusValue}
+      onClick={() => onSelectStatus(statusValue)}
+      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium transition-colors ${
+        activeStatus === statusValue ? 'ring-2 ring-offset-1 ring-gray-300' : ''
+      } ${EXCEPTION_STATUS_STYLE[statusValue] || 'border-gray-200 bg-gray-50 text-gray-600'}`}
+    >
+      {label}
+      <span className="font-bold">{counts[statusValue] || 0}</span>
+    </button>
+  );
+
   return (
-    <div className="flex items-center">
-      {FLOW_STEP_STATUSES.map((_, i) => (
-        <span key={i} className="flex items-center">
-          <span
-            className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0 ${
-              i + 1 === idx ? 'bg-green-600 text-white' : i + 1 < idx ? 'bg-green-100 text-green-600' : 'bg-gray-100 text-gray-400'
-            }`}
-          >
-            {i + 1}
+    <div className="flex flex-wrap gap-2 items-center pt-3 border-t">
+      <span className="text-xs text-gray-400 mr-1">例外／其他流程</span>
+      {pill('awaiting_refund', bookingStatusLabel('awaiting_refund'))}
+      {pill('refunded', bookingStatusLabel('refunded'))}
+      {pill('cancelled', bookingStatusLabel('cancelled'))}
+      {SYSTEM_ONLY_STATUSES.map((s) => pill(s.value, s.label))}
+    </div>
+  );
+}
+
+// 右側詳情：這張訂單目前卡在第幾關、關鍵金額與日期。純顯示，要改資料按「編輯訂單」。
+function OrderDetailPanel({
+  order,
+  onEdit,
+  onDelete,
+}: {
+  order: any | null;
+  onEdit: () => void;
+  onDelete: () => void;
+}) {
+  if (!order) {
+    return (
+      <div className="bg-white rounded-xl shadow-sm border p-10">
+        <EmptyState icon={<ClipboardList className="w-12 h-12 text-gray-200" />} message="從左邊挑一張訂單，這裡會顯示它目前的流程位置" />
+      </div>
+    );
+  }
+
+  const stepIndex = flowStepIndex(order.status);
+  const needsPerson = MANUAL_ACTION_STATUSES.includes(order.status);
+  const balance = order.total_amount != null ? Number(order.total_amount) - Number(order.deposit || 0) : null;
+  const money = (v: any) => (v != null ? `NT$ ${Number(v).toLocaleString()}` : '—');
+  const slash = (d: any) => (d ? String(d).replace(/-/g, '/') : '—');
+
+  const cell = (label: string, value: string) => (
+    <div className="border rounded-lg px-3 py-2.5">
+      <p className="text-xs text-gray-500">{label}</p>
+      <p className="text-sm font-semibold text-gray-800 mt-0.5">{value}</p>
+    </div>
+  );
+
+  return (
+    <div className="bg-white rounded-xl shadow-sm border p-5 space-y-4">
+      <div className="flex justify-between items-start gap-3">
+        <div className="min-w-0">
+          <p className="text-xs text-gray-500 font-mono">訂單 {order.order_number || '—'}</p>
+          <h3 className="text-2xl font-bold text-gray-900 mt-0.5 truncate">{order.name || order.nickname || '未取得'}</h3>
+          <p className="text-sm text-gray-500 mt-1">
+            {stepIndex ? `目前位於第 ${stepIndex} 關：${bookingStatusLabel(order.status)}` : `例外流程：${bookingStatusLabel(order.status)}`}
+          </p>
+        </div>
+        {needsPerson && (
+          <span className="shrink-0 text-xs bg-amber-100 text-amber-800 border border-amber-200 rounded-full px-3 py-1">
+            等待處理
           </span>
-          {i < FLOW_STEP_STATUSES.length - 1 && <span className={`w-2 h-px shrink-0 ${i + 1 < idx ? 'bg-green-300' : 'bg-gray-200'}`} />}
-        </span>
-      ))}
+        )}
+      </div>
+
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
+        {cell('入住日期', slash(order.checkin_date))}
+        {cell('退房日期', slash(order.checkout_date))}
+        {cell('人數', order.headcount != null ? `${order.headcount} 人` : '—')}
+        {cell('房價', money(order.room_amount ?? order.total_amount))}
+        {cell('訂金', money(order.deposit))}
+        {cell('尾款', balance != null ? money(balance) : '—')}
+      </div>
+
+      <div>
+        <p className="text-xs text-gray-500 mb-1.5">流程位置</p>
+        <div className="flex flex-wrap items-center gap-1">
+          {FLOW_STEP_STATUSES.map((s, i) => {
+            const n = i + 1;
+            const isCurrent = stepIndex === n;
+            const isDone = stepIndex != null && n < stepIndex;
+            return (
+              <span
+                key={s}
+                title={bookingStatusLabel(s)}
+                className={`w-8 h-8 rounded-lg flex items-center justify-center text-xs font-bold ${
+                  isCurrent ? 'bg-green-600 text-white' : isDone ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-400'
+                }`}
+              >
+                {n}
+              </span>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="flex gap-2 pt-1">
+        <Button onClick={onEdit} icon={<Save className="w-4 h-4" />}>編輯訂單</Button>
+        <Button variant="secondary" onClick={onDelete} icon={<Trash2 className="w-4 h-4" />}>刪除</Button>
+      </div>
     </div>
   );
 }
@@ -182,6 +274,12 @@ export default function OrderManagement() {
   const [hasMore, setHasMore] = useState(false);
   const [statusCounts, setStatusCounts] = useState<Record<string, number>>({});
 
+  // 清單左右分欄：左邊挑一張單，右邊顯示它目前卡在哪一關。存整個 row 而不是只存 id，
+  // 這樣切換選取不用再打一次資料庫（runQuery 本來就 select('*') 全撈回來了）。
+  const [selectedOrder, setSelectedOrder] = useState<any | null>(null);
+  const [todayCheckins, setTodayCheckins] = useState<any[]>([]);
+  const [monthCompleted, setMonthCompleted] = useState(0);
+
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<OrderForm>(emptyForm());
@@ -197,6 +295,9 @@ export default function OrderManagement() {
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [batchDeleting, setBatchDeleting] = useState(false);
   const [showBatchConfirm, setShowBatchConfirm] = useState(false);
+
+  // 「待我處理」檢視：跨多個狀態，所以不能用單一值的 status 篩選表示，另外開一個開關。
+  const [manualOnly, setManualOnly] = useState(false);
 
   // 押金與訂金比例的預設值來自「房型與報價」的設定，人工建單時按「重算」就會套用同一套算法，
   // 跟 LINE 自動報價算出來的金額一致。
@@ -216,6 +317,7 @@ export default function OrderManagement() {
     fetchLinenSetup();
     fetchMoneyDefaults();
     fetchStatusCounts();
+    fetchSummaries();
     runQuery(0);
   }, []);
 
@@ -225,6 +327,40 @@ export default function OrderManagement() {
     const counts: Record<string, number> = {};
     for (const row of data || []) counts[row.status] = (counts[row.status] || 0) + 1;
     setStatusCounts(counts);
+  };
+
+  // 頂部三張摘要卡需要的資料。「待我處理」的筆數直接從 statusCounts 算得出來，不用另外查。
+  const fetchSummaries = async () => {
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const todayIso = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+    const monthStart = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-01`;
+    const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+    const nextMonthStart = `${nextMonth.getFullYear()}-${pad(nextMonth.getMonth() + 1)}-01`;
+
+    const [checkinRes, completedRes] = await Promise.all([
+      // 今天要入住的訂單。只看還佔著房的狀態——已取消的訂單即使入住日是今天也不該出現在
+      // 「今天有誰要來」這張卡片上。
+      // 這裡一定要整列撈回來：卡片上的訂單點下去會直接開編輯表單（openEdit），
+      // 只撈卡片要顯示的那幾欄的話，表單裡沒撈到的欄位會被當成空值載入，一按儲存
+      // 就把電話、押金、備註這些沒顯示在卡片上的資料整批清掉。
+      supabase
+        .from('bookings')
+        .select('*')
+        .eq('checkin_date', todayIso)
+        .in('status', OCCUPYING_STATUSES)
+        .order('created_at'),
+      // 本月已完成：用退房日落在本月、且流程已經走到「已處理」的訂單。
+      supabase
+        .from('bookings')
+        .select('id', { count: 'exact', head: true })
+        .eq('status', 'completed')
+        .gte('checkout_date', monthStart)
+        .lt('checkout_date', nextMonthStart),
+    ]);
+
+    setTodayCheckins(checkinRes.data || []);
+    setMonthCompleted(completedRes.count ?? 0);
   };
 
   // 點流程列的某個步驟：切換篩選列的「訂單狀態」並重新查詢，再點一次同一個步驟會清掉篩選。
@@ -238,7 +374,10 @@ export default function OrderManagement() {
   const selectStatusFilter = (statusValue: string) => {
     const next = status === statusValue ? '' : statusValue;
     setStatus(next);
-    runQuery(0, { status: next });
+    // 挑了某一關就是要專看那一關，跟「待我處理」的跨狀態檢視互斥，不然畫面會同時高亮兩種篩選、
+    // 但實際只有一種生效。
+    setManualOnly(false);
+    runQuery(0, { status: next, manualOnly: false });
   };
 
   // 換房間或改換洗次數才重算；已手動調整過的品項由 mergeUsage 保留。
@@ -337,7 +476,7 @@ export default function OrderManagement() {
   // 道理跟 selectStatusFilter 上面的說明一樣——不要靠 setTimeout 賭 state 更新的時機。
   const runQuery = async (
     pageIndex: number,
-    overrides?: Partial<{ keyword: string; startDate: string; endDate: string; status: string; roomType: string }>
+    overrides?: Partial<{ keyword: string; startDate: string; endDate: string; status: string; roomType: string; manualOnly: boolean }>
   ) => {
     const eff = {
       keyword: overrides?.keyword ?? keyword,
@@ -345,6 +484,7 @@ export default function OrderManagement() {
       endDate: overrides?.endDate ?? endDate,
       status: overrides?.status ?? status,
       roomType: overrides?.roomType ?? roomType,
+      manualOnly: overrides?.manualOnly ?? manualOnly,
     };
     setLoading(true);
     let query = supabase
@@ -355,7 +495,9 @@ export default function OrderManagement() {
 
     if (eff.startDate) query = query.gte('checkin_date', eff.startDate);
     if (eff.endDate) query = query.lte('checkin_date', eff.endDate);
-    if (eff.status) query = query.eq('status', eff.status);
+    // 「待我處理」是跨多個狀態的檢視，優先於單一狀態篩選（點它就是想一次看完所有等人動手的單）。
+    if (eff.manualOnly) query = query.in('status', MANUAL_ACTION_STATUSES);
+    else if (eff.status) query = query.eq('status', eff.status);
     // 「全部狀態」預設不含已取消——第三方平台同步偵測到客戶在 Airbnb/Booking 等平台取消訂單時，
     // 對應的本地訂單只會被標記成 cancelled（保留紀錄供查核），不會整筆刪除；如果預設清單還是
     // 照樣顯示，訂單管理看起來就會跟平台實際的訂房狀況對不起來。要看已取消的訂單，
@@ -370,12 +512,23 @@ export default function OrderManagement() {
 
     const { data, error } = await query;
     if (!error) {
-      setRows(data || []);
-      setHasMore((data || []).length === PAGE_SIZE);
+      const nextRows = data || [];
+      setRows(nextRows);
+      setHasMore(nextRows.length === PAGE_SIZE);
+      // 右側詳情永遠對應一筆真的還在清單裡的訂單：換頁或改篩選後，原本選的那筆
+      // 可能已經不在這一頁了，留著會變成看著一筆清單上找不到的單在操作。
+      setSelectedOrder((prev: any) => nextRows.find((r: any) => r.id === prev?.id) || nextRows[0] || null);
     }
     setPage(pageIndex);
     setSelectedIds([]);
     setLoading(false);
+  };
+
+  // 「查看待我處理」：一次看完所有卡在人工關卡的訂單（流程 3/5/8 ＋ 例外流程）。
+  const showManualQueue = () => {
+    setManualOnly(true);
+    setStatus('');
+    runQuery(0, { manualOnly: true, status: '' });
   };
 
   const toggleBatchMode = () => {
@@ -414,7 +567,8 @@ export default function OrderManagement() {
     setEndDate('');
     setStatus('');
     setRoomType('');
-    runQuery(0, { keyword: '', startDate: '', endDate: '', status: '', roomType: '' });
+    setManualOnly(false);
+    runQuery(0, { keyword: '', startDate: '', endDate: '', status: '', roomType: '', manualOnly: false });
   };
 
   const openNew = () => {
@@ -468,8 +622,12 @@ export default function OrderManagement() {
 
   const closeForm = () => setShowForm(false);
 
-  const saveForm = async () => {
-    if (form.status === REQUIRES_REMIT_LAST5_STATUS && !form.remit_last5.trim()) {
+  // overrideStatus：「儲存並前往下一階段」「取消訂單」用的，帶入這次要寫進去的狀態。
+  // 不先 setForm 再存的原因跟 selectStatusFilter 一樣——setState 是非同步的，
+  // 這一輪讀到的還會是舊狀態，存進去的就不是使用者按下按鈕想要的那一關。
+  const saveForm = async (overrideStatus?: string) => {
+    const targetStatus = overrideStatus ?? form.status;
+    if (targetStatus === REQUIRES_REMIT_LAST5_STATUS && !form.remit_last5.trim()) {
       setFormError('狀態改成「已預定」時，請先填寫匯款末5碼再儲存。');
       return;
     }
@@ -512,8 +670,8 @@ export default function OrderManagement() {
         remit_last5: form.remit_last5 || null,
         // 只有狀態為「待入住」才允許有值——不是這個狀態時，即使欄位裡還留著文字（例如狀態被改回
         // 更早的步驟），存檔時一律清空，不要讓舊密碼在不該生效的狀態下還留著造成誤導。
-        check_in_password: form.status === REQUIRES_CHECKIN_PASSWORD_STATUS ? (form.check_in_password || null) : null,
-        status: form.status,
+        check_in_password: targetStatus === REQUIRES_CHECKIN_PASSWORD_STATUS ? (form.check_in_password || null) : null,
+        status: targetStatus,
         notes: form.notes || null,
         updated_at: new Date().toISOString(),
       };
@@ -542,6 +700,7 @@ export default function OrderManagement() {
       setShowForm(false);
       runQuery(page);
       fetchStatusCounts();
+      fetchSummaries();
     } catch (err: any) {
       setFormError(`儲存失敗：${err.message}`);
     } finally {
@@ -583,43 +742,116 @@ export default function OrderManagement() {
     }
   };
 
-  const balanceDue = (row: any) => (row.total_amount != null ? row.total_amount - (row.deposit ?? 0) : null);
-
   // 系統專用狀態不開放手動選，但如果這張訂單「現在剛好就是」系統專用狀態（例如系統偵測到檔期
   // 衝突、或是外部平台同步進來的），下拉選單還是要能顯示目前這個值，不然編輯畫面會顯示成空白選項。
   const currentSystemOnlyStatus = SYSTEM_ONLY_STATUSES.find((s) => s.value === form.status);
   const formStatusOptions = currentSystemOnlyStatus ? [currentSystemOnlyStatus, ...BOOKING_STATUS_OPTIONS] : BOOKING_STATUS_OPTIONS;
 
+  // 「待我處理」卡片的總數與明細。全部從已經抓好的 statusCounts 算，不用另外查資料庫。
+  const manualTotal = MANUAL_ACTION_STATUSES.reduce((sum, s) => sum + (statusCounts[s] || 0), 0);
+  const manualBreakdown = MANUAL_ACTION_STATUSES
+    .map((s) => ({ status: s, label: bookingStatusLabel(s), count: statusCounts[s] || 0 }))
+    .filter((x) => x.count > 0);
+
   return (
-    <div className="w-full space-y-6">
-      {/* 標題區塊與關鍵字搜尋合併成同一張卡片，中間用分隔線區分，不用再各自佔一張卡片。 */}
-      <div className="bg-white p-5 rounded-xl shadow-sm border space-y-4">
-        <div className="flex flex-wrap justify-between items-start gap-4">
-          <div>
-            <h2 className="text-2xl font-bold text-gray-800 flex items-center gap-2">
-              <ClipboardList className="w-6 h-6 text-green-600" />
-              訂單管理
-            </h2>
-            <p className="text-gray-500 mt-1">新增、查詢、檢視與編輯所有訂房紀錄。</p>
-          </div>
-          <div className="flex items-center gap-2">
-            <Button
-              variant={batchMode ? 'primary' : 'secondary'}
-              onClick={toggleBatchMode}
-              icon={<Trash2 className="w-4 h-4" />}
-            >
-              {batchMode ? '取消批次刪除' : '批次刪除'}
+    <div className="w-full space-y-5">
+      <div className="bg-white p-5 rounded-xl shadow-sm border flex flex-wrap justify-between items-center gap-3">
+        <h2 className="text-2xl font-bold text-gray-800 flex items-center gap-2">
+          <ClipboardList className="w-6 h-6 text-green-600" />
+          訂單流程中心
+        </h2>
+        <div className="flex items-center gap-2">
+          <Button variant={batchMode ? 'primary' : 'secondary'} onClick={toggleBatchMode} icon={<Trash2 className="w-4 h-4" />}>
+            {batchMode ? '結束批次操作' : '批次操作'}
+          </Button>
+          {batchMode && selectedIds.length > 0 && (
+            <Button variant="danger" onClick={() => setShowBatchConfirm(true)} icon={<Trash2 className="w-4 h-4" />}>
+              刪除選取（{selectedIds.length}）
             </Button>
-            {batchMode && selectedIds.length > 0 && (
-              <Button variant="danger" onClick={() => setShowBatchConfirm(true)} icon={<Trash2 className="w-4 h-4" />}>
-                刪除選取（{selectedIds.length}）
-              </Button>
-            )}
-            <Button onClick={openNew} icon={<Plus className="w-4 h-4" />}>新增訂單</Button>
-          </div>
+          )}
+          <Button onClick={openNew} icon={<Plus className="w-4 h-4" />}>新增訂單</Button>
         </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3 border-t pt-4">
-          <div className="lg:col-span-2">
+      </div>
+
+      <div className="bg-white p-5 rounded-xl shadow-sm border space-y-4">
+        <div className="flex flex-wrap justify-between items-start gap-3">
+          <div>
+            <h3 className="text-lg font-bold text-gray-800 flex items-center gap-1.5">目前訂單流程 <StatusHelpIcon /></h3>
+            <p className="text-sm text-gray-500 mt-0.5">先看每一關有多少訂單，再進入需要處理的單據。</p>
+          </div>
+          <Button variant={manualOnly ? 'primary' : 'secondary'} onClick={showManualQueue} icon={<UserCheck className="w-4 h-4" />}>
+            查看待我處理
+          </Button>
+        </div>
+        <FlowPipeline counts={statusCounts} activeStatus={manualOnly ? '' : status} onSelectStatus={selectStatusFilter} />
+        <ExceptionStatusRow counts={statusCounts} activeStatus={manualOnly ? '' : status} onSelectStatus={selectStatusFilter} />
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-start">
+        {/* 待我處理：流程 3/5/8 這三個人工關卡＋例外流程，全部加總。 */}
+        <button
+          onClick={showManualQueue}
+          className={`text-left bg-white p-5 rounded-xl shadow-sm border transition-colors hover:border-amber-300 ${manualOnly ? 'border-amber-400 ring-2 ring-amber-100' : ''}`}
+        >
+          <p className="text-sm font-semibold text-gray-700">待我處理</p>
+          <p className="mt-1 text-4xl font-bold text-gray-900">{manualTotal}</p>
+          <span className="inline-block mt-2 text-xs bg-amber-50 text-amber-700 border border-amber-200 rounded-full px-2 py-0.5">
+            全部人工工作
+          </span>
+          <p className="mt-2 text-xs text-gray-500 leading-relaxed">
+            {manualBreakdown.length
+              ? manualBreakdown.map((b) => `${b.label} ${b.count}`).join(' · ')
+              : '目前沒有等待人工處理的訂單'}
+          </p>
+        </button>
+
+        {/* 今日入住 */}
+        <div className="bg-white p-5 rounded-xl shadow-sm border">
+          <div className="flex justify-between items-start gap-2">
+            <div>
+              <p className="text-sm font-semibold text-gray-700 flex items-center gap-1.5"><LogIn className="w-4 h-4 text-sky-600" />入住訂單</p>
+              <p className="text-xs text-gray-400 mt-0.5">點擊即可開啟該筆訂單詳細</p>
+            </div>
+            <span className="text-xs bg-sky-50 text-sky-700 border border-sky-200 rounded-full px-2 py-0.5 whitespace-nowrap">
+              今日 {todayCheckins.length} 筆
+            </span>
+          </div>
+          {todayCheckins.length === 0 ? (
+            <p className="mt-4 text-xs text-gray-400">今天沒有訂單入住。</p>
+          ) : (
+            <div className="mt-3 flex gap-2 overflow-x-auto pb-1">
+              {todayCheckins.map((b) => (
+                <button
+                  key={b.id}
+                  onClick={() => openEdit(b)}
+                  className="text-left shrink-0 w-44 border rounded-lg p-3 hover:bg-sky-50 hover:border-sky-300 transition-colors"
+                >
+                  <p className="font-semibold text-sm text-gray-800 truncate">{b.name || b.nickname || '未取得'}</p>
+                  <p className="text-xs text-gray-500 mt-1 font-mono">{b.order_number || '-'}　{b.headcount ?? '-'} 人</p>
+                  <p className="text-xs text-gray-500 mt-0.5">
+                    今日入住 · NT$ {b.total_amount != null ? Number(b.total_amount).toLocaleString() : '-'}
+                  </p>
+                  <span className="text-xs text-sky-600 mt-1.5 inline-block">查看訂單 →</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* 本月已完成 */}
+        <div className="bg-white p-5 rounded-xl shadow-sm border">
+          <p className="text-sm font-semibold text-gray-700">本月已完成</p>
+          <p className="mt-1 text-4xl font-bold text-green-700">{monthCompleted}</p>
+          <span className="inline-block mt-2 text-xs bg-green-50 text-green-700 border border-green-200 rounded-full px-2 py-0.5">
+            <CheckCircle2 className="w-3 h-3 inline mr-1 -mt-0.5" />流程完成
+          </span>
+          <p className="mt-2 text-xs text-gray-500">退房日落在本月、且流程已走到「已處理」的訂單。</p>
+        </div>
+      </div>
+
+      <div className="bg-white p-4 rounded-xl shadow-sm border space-y-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+          <div>
             <label className="flex items-center gap-1 text-xs text-gray-500 mb-1"><Search className="w-3.5 h-3.5" />關鍵字搜尋</label>
             <input value={keyword} onChange={(e) => setKeyword(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && runQuery(0)} placeholder="搜尋姓名、電話或訂單編號" className="w-full px-3 py-2 border rounded-lg text-sm" />
           </div>
@@ -632,17 +864,26 @@ export default function OrderManagement() {
             <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm" />
           </div>
           <div>
-            <label className="flex items-center gap-1 text-xs text-gray-500 mb-1"><ListFilter className="w-3.5 h-3.5" />訂單狀態</label>
-            <select value={status} onChange={(e) => setStatus(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm bg-white">
-              {FILTER_STATUS_OPTIONS.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
-            </select>
-          </div>
-          <div>
             <label className="flex items-center gap-1 text-xs text-gray-500 mb-1"><DoorOpen className="w-3.5 h-3.5" />房型</label>
             <select value={roomType} onChange={(e) => setRoomType(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm bg-white">
               <option value="">全部房型</option>
               <option value="包棟">包棟</option>
               {roomTypeOptions.map((r) => (<option key={r} value={r}>{r}</option>))}
+            </select>
+          </div>
+          <div>
+            <label className="flex items-center gap-1 text-xs text-gray-500 mb-1"><ListFilter className="w-3.5 h-3.5" />流程</label>
+            <select
+              value={manualOnly ? '__manual__' : status}
+              onChange={(e) => {
+                if (e.target.value === '__manual__') { showManualQueue(); return; }
+                setManualOnly(false);
+                setStatus(e.target.value);
+              }}
+              className="w-full px-3 py-2 border rounded-lg text-sm bg-white"
+            >
+              {FILTER_STATUS_OPTIONS.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
+              <option value="__manual__">待我處理（人工關卡）</option>
             </select>
           </div>
         </div>
@@ -652,104 +893,111 @@ export default function OrderManagement() {
         </div>
       </div>
 
-      <FlowStatusBar counts={statusCounts} activeStatus={status} onSelectStatus={selectStatusFilter} />
-
-      <div className="bg-white rounded-xl shadow-sm border overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-sm">
-            <thead className="bg-gray-50 border-b">
-              <tr className="text-gray-600">
-                {batchMode && (
-                  <th className="py-3 px-4 w-10">
-                    <input
-                      type="checkbox"
-                      checked={rows.length > 0 && selectedIds.length === rows.length}
-                      onChange={toggleSelectAll}
-                      className="w-4 h-4"
-                    />
-                  </th>
-                )}
-                <th className="py-3 px-4">訂單編號</th>
-                <th className="py-3 px-4">姓名</th>
-                <th className="py-3 px-4">入住日期</th>
-                <th className="py-3 px-4">退房日期</th>
-                <th className="py-3 px-4">人數</th>
-                <th className="py-3 px-4">房型</th>
-                <th className="py-3 px-4">總報價</th>
-                <th className="py-3 px-4">尾款</th>
-                <th className="py-3 px-4">狀態</th>
-                <th className="py-3 px-4">流程位置</th>
-                <th className="py-3 px-4"></th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100">
-              {loading ? (
-                <tr><td colSpan={batchMode ? 12 : 11} className="py-10 text-center text-gray-400">載入中...</td></tr>
-              ) : rows.length === 0 ? (
-                <tr><td colSpan={batchMode ? 12 : 11}><EmptyState icon={<ClipboardList className="w-12 h-12 text-gray-200" />} message="查無符合條件的訂單" /></td></tr>
-              ) : (
-                rows.map((row) => (
-                  <tr key={row.id} onClick={() => (batchMode ? toggleSelectRow(row.id) : openEdit(row))} className="hover:bg-green-50 transition-colors cursor-pointer">
-                    {batchMode && (
-                      <td className="py-3 px-4" onClick={(e) => e.stopPropagation()}>
+      {/* 左邊挑單、右邊看它卡在哪一關。挑單不會直接跳進編輯畫面——大多數時候只是想確認
+          「這張現在到哪了」，要真的改資料再按「編輯訂單」進表單。 */}
+      <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,360px)_1fr] gap-4 items-start">
+        <div className="bg-white rounded-xl shadow-sm border overflow-hidden">
+          {batchMode && rows.length > 0 && (
+            <label className="flex items-center gap-2 px-4 py-2.5 border-b bg-gray-50 text-xs text-gray-600 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={selectedIds.length === rows.length}
+                onChange={toggleSelectAll}
+                className="w-4 h-4"
+              />
+              全選這一頁（{selectedIds.length}/{rows.length}）
+            </label>
+          )}
+          <div className="divide-y divide-gray-100 max-h-[560px] overflow-y-auto">
+            {loading ? (
+              <p className="py-10 text-center text-gray-400 text-sm">載入中...</p>
+            ) : rows.length === 0 ? (
+              <EmptyState icon={<ClipboardList className="w-12 h-12 text-gray-200" />} message="查無符合條件的訂單" />
+            ) : (
+              rows.map((row) => {
+                const isSelected = selectedOrder?.id === row.id;
+                return (
+                  <div
+                    key={row.id}
+                    onClick={() => (batchMode ? toggleSelectRow(row.id) : setSelectedOrder(row))}
+                    className={`px-4 py-3 cursor-pointer transition-colors border-l-4 ${
+                      isSelected && !batchMode ? 'bg-green-50/70 border-l-green-500' : 'border-l-transparent hover:bg-gray-50'
+                    }`}
+                  >
+                    <div className="flex items-start gap-2">
+                      {batchMode && (
                         <input
                           type="checkbox"
                           checked={selectedIds.includes(row.id)}
                           onChange={() => toggleSelectRow(row.id)}
-                          className="w-4 h-4"
+                          onClick={(e) => e.stopPropagation()}
+                          className="w-4 h-4 mt-1"
                         />
-                      </td>
-                    )}
-                    <td className="py-3 px-4 font-mono text-xs text-gray-500">{row.order_number || '-'}</td>
-                    <td className="py-3 px-4 font-medium text-gray-800">
-                      {row.name || row.nickname || '未取得'}
-                      {/* 第三方同步進來、日期跟其他訂單重疊的訂單。依規格兩筆都保留不自動合併，
-                          只在這裡標記出來讓人工核實是不是真的超賣（推播只會在偵測到的當下發一次，
-                          漏看就沒了，所以清單上也要看得到）。 */}
-                      {row.ota_conflict_detected_at && (
-                        <span className="ml-2 inline-flex items-center gap-1 text-xs bg-red-100 text-red-700 rounded-full px-2 py-0.5 align-middle" title="這筆第三方訂單跟其他訂單日期重疊，請人工核實是否超賣">
-                          <AlertTriangle className="w-3 h-3" />疑似撞期
-                        </span>
                       )}
-                    </td>
-                    <td className="py-3 px-4 whitespace-nowrap">{row.checkin_date ? String(row.checkin_date).replace(/-/g, '/') : '-'}</td>
-                    <td className="py-3 px-4 whitespace-nowrap">{row.checkout_date ? String(row.checkout_date).replace(/-/g, '/') : '-'}</td>
-                    <td className="py-3 px-4">{row.headcount ?? '-'}</td>
-                    <td className="py-3 px-4">{row.room_type_label || (row.whole_house ? '包棟' : '-')}</td>
-                    <td className="py-3 px-4 whitespace-nowrap">{row.total_amount != null ? `NT$ ${Number(row.total_amount).toLocaleString()}` : '-'}</td>
-                    <td className="py-3 px-4 whitespace-nowrap">{balanceDue(row) != null ? `NT$ ${Number(balanceDue(row)).toLocaleString()}` : '-'}</td>
-                    <td className="py-3 px-4"><StatusBadge status={row.status} /></td>
-                    <td className="py-3 px-4"><FlowPositionCell status={row.status} /></td>
-                    <td className="py-3 px-4 text-right">
-                      <button onClick={(e) => { e.stopPropagation(); setDeleteTarget(row); }} className="p-1.5 text-red-500 hover:bg-red-50 rounded" title="刪除">
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="text-sm font-semibold text-gray-800 truncate">
+                            <span className="font-mono text-xs text-gray-500">{row.order_number || '-'}</span>
+                            <span className="mx-1.5 text-gray-300">·</span>
+                            {row.name || row.nickname || '未取得'}
+                          </p>
+                          <StatusBadge status={row.status} />
+                        </div>
+                        <p className="text-xs text-gray-500 mt-1">
+                          {row.checkin_date ? String(row.checkin_date).replace(/-/g, '/') : '-'}
+                          {' → '}
+                          {row.checkout_date ? String(row.checkout_date).replace(/-/g, '/') : '-'}
+                          {' · '}
+                          {row.headcount ?? '-'} 人
+                        </p>
+                        <p className="text-xs text-gray-600 mt-0.5">
+                          {row.total_amount != null ? `NT$ ${Number(row.total_amount).toLocaleString()}` : '-'}
+                        </p>
+                        {/* 第三方同步進來、日期跟其他訂單重疊的訂單。依規格兩筆都保留不自動合併，
+                            只在這裡標記出來讓人工核實是不是真的超賣（推播只會在偵測到的當下發一次，
+                            漏看就沒了，所以清單上也要看得到）。 */}
+                        {row.ota_conflict_detected_at && (
+                          <span className="mt-1 inline-flex items-center gap-1 text-xs bg-red-100 text-red-700 rounded-full px-2 py-0.5" title="這筆第三方訂單跟其他訂單日期重疊，請人工核實是否超賣">
+                            <AlertTriangle className="w-3 h-3" />疑似撞期
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+          <div className="flex justify-between items-center px-4 py-3 border-t text-xs text-gray-500">
+            <button disabled={page === 0 || loading} onClick={() => runQuery(page - 1)} className="px-3 py-1 border rounded-lg disabled:opacity-40">上一頁</button>
+            <span>第 {page + 1} 頁</span>
+            <button disabled={!hasMore || loading} onClick={() => runQuery(page + 1)} className="px-3 py-1 border rounded-lg disabled:opacity-40">下一頁</button>
+          </div>
         </div>
-        <div className="flex justify-between items-center px-6 py-4 border-t text-sm text-gray-500">
-          <button disabled={page === 0 || loading} onClick={() => runQuery(page - 1)} className="px-3 py-1 border rounded-lg disabled:opacity-40">上一頁</button>
-          <span>第 {page + 1} 頁</span>
-          <button disabled={!hasMore || loading} onClick={() => runQuery(page + 1)} className="px-3 py-1 border rounded-lg disabled:opacity-40">下一頁</button>
-        </div>
+
+        <OrderDetailPanel
+          order={selectedOrder}
+          onEdit={() => selectedOrder && openEdit(selectedOrder)}
+          onDelete={() => selectedOrder && setDeleteTarget(selectedOrder)}
+        />
       </div>
 
       <Modal
         open={showForm}
-        title={editingId ? `編輯訂單${form.order_number ? `（${form.order_number}）` : ''}` : '新增訂單'}
+        title={editingId ? `編輯訂單 · ${form.order_number || ''}` : '新增訂單'}
         onClose={closeForm}
-        maxWidth="max-w-2xl"
+        maxWidth="max-w-5xl"
         footer={
           <>
-            <Button variant="secondary" onClick={closeForm}>取消</Button>
-            <Button onClick={saveForm} loading={saving} icon={<Save className="w-4 h-4" />}>{saving ? '儲存中...' : '儲存變更'}</Button>
+            <Button variant="secondary" onClick={closeForm}>關閉</Button>
+            <Button onClick={() => saveForm()} loading={saving} icon={<Save className="w-4 h-4" />}>{saving ? '儲存中...' : '儲存變更'}</Button>
           </>
         }
       >
+      <div className="grid grid-cols-1 lg:grid-cols-[1fr_minmax(0,300px)] gap-4 items-start">
+      <div className="space-y-4">
+        <div className="border rounded-xl p-4">
+          <h4 className="text-sm font-bold text-gray-800 mb-3">住宿與客人資料</h4>
         <div className="grid grid-cols-2 gap-3">
           <div>
             <label className="block text-xs text-gray-500 mb-1">訂單編號</label>
@@ -864,6 +1112,12 @@ export default function OrderManagement() {
             <label className="block text-xs text-gray-500 mb-1">嬰兒</label>
             <input type="number" value={form.infants} onChange={(e) => setForm({ ...form, infants: e.target.value })} className="w-full px-3 py-2 border rounded-lg" />
           </div>
+        </div>
+        </div>
+
+        <div className="border rounded-xl p-4">
+          <h4 className="text-sm font-bold text-gray-800 mb-3">費用資訊</h4>
+        <div className="grid grid-cols-2 gap-3">
           <div>
             <label className="block text-xs text-gray-500 mb-1">房價（不含押金）</label>
             <input type="number" value={form.room_amount} onChange={(e) => setForm({ ...form, room_amount: e.target.value })} className="w-full px-3 py-2 border rounded-lg" />
@@ -889,17 +1143,20 @@ export default function OrderManagement() {
               <RefreshCw className="w-3.5 h-3.5" /> 依房價重算：訂單總額 ＝ 房價＋押金 {defaultSecurityDeposit}，訂金 ＝ 房價 {moneyDefaults.percent}%
             </button>
           </div>
+        </div>
+          <p className="text-xs text-green-700 bg-green-50 border border-green-100 rounded-lg px-3 py-2 mt-3">
+            ✓ 系統自動計算：訂單總額 ＝ 房價 ＋ 押金；訂金 ＝ 房價 × {moneyDefaults.percent}%
+          </p>
+        </div>
+
+        <div className="border rounded-xl p-4">
+          <h4 className="text-sm font-bold text-gray-800 mb-3">款項核對與備註</h4>
+        <div className="grid grid-cols-2 gap-3">
           <div>
             <label className="block text-xs text-gray-500 mb-1">
               匯款末5碼{form.status === REQUIRES_REMIT_LAST5_STATUS && <span className="text-red-500"> *</span>}
             </label>
             <input value={form.remit_last5} onChange={(e) => setForm({ ...form, remit_last5: e.target.value })} className="w-full px-3 py-2 border rounded-lg" placeholder="狀態設為「已預定」時必填" />
-          </div>
-          <div>
-            <label className="flex items-center gap-1 text-xs text-gray-500 mb-1">訂單狀態 <StatusHelpIcon /></label>
-            <select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value })} className="w-full px-3 py-2 border rounded-lg bg-white">
-              {formStatusOptions.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
-            </select>
           </div>
           <div>
             <label className="block text-xs text-gray-500 mb-1">
@@ -918,6 +1175,7 @@ export default function OrderManagement() {
             <label className="block text-xs text-gray-500 mb-1">備註</label>
             <textarea value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} rows={3} className="w-full px-3 py-2 border rounded-lg" placeholder="內部備註，客戶不會看到" />
           </div>
+        </div>
         </div>
 
         {linenItems.length > 0 && (
@@ -1005,6 +1263,108 @@ export default function OrderManagement() {
         )}
 
         {formError && <p className="text-sm text-red-600">{formError}</p>}
+      </div>
+
+      {/* 右側：這張訂單目前在流程的哪一關，以及可以把它往前推的動作。 */}
+      <div className="border rounded-xl p-4 space-y-4 lg:sticky lg:top-2">
+        <div>
+          <p className="text-xs text-gray-500 mb-1.5">訂單狀態</p>
+          <div className="flex items-center justify-between gap-2">
+            <StatusBadge status={form.status} />
+            <span className="text-xs text-gray-400">
+              {flowStepIndex(form.status) ? `流程 ${flowStepIndex(form.status)}/${FLOW_STEP_STATUSES.length}` : '例外流程'}
+            </span>
+          </div>
+        </div>
+
+        <div>
+          <p className="text-xs text-gray-500">本次訂單總額</p>
+          <p className="text-3xl font-bold text-gray-900 mt-0.5">
+            NT$ {form.total_amount === '' ? '—' : Number(form.total_amount).toLocaleString()}
+          </p>
+        </div>
+
+        {/* 只顯示前一關／目前這關／下一關，不把 9 關全列出來——編輯畫面要回答的是
+            「現在在哪、下一步是什麼」，不是整條流程長什麼樣（那在主畫面看）。 */}
+        {flowStepIndex(form.status) && (
+          <div>
+            <p className="text-xs text-gray-500 mb-1.5">目前流程</p>
+            <div className="flex items-center gap-1.5">
+              {FLOW_STEP_STATUSES.map((s, i) => {
+                const n = i + 1;
+                const current = flowStepIndex(form.status)!;
+                if (n < current - 1 || n > current + 1) return null;
+                return (
+                  <div
+                    key={s}
+                    className={`flex-1 rounded-lg border-2 px-2 py-1.5 text-center ${
+                      n === current ? 'border-green-500 bg-green-50' : 'border-gray-200'
+                    }`}
+                  >
+                    <p className={`text-xs font-bold ${n === current ? 'text-green-700' : 'text-gray-400'}`}>{n}</p>
+                    <p className="text-[11px] text-gray-600 whitespace-nowrap">{bookingStatusLabel(s)}</p>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        <div className="space-y-2">
+          {nextFlowStatus(form.status) && (
+            <Button
+              fullWidth
+              onClick={() => saveForm(nextFlowStatus(form.status)!)}
+              loading={saving}
+              icon={<CheckCircle2 className="w-4 h-4" />}
+            >
+              儲存並前往「{bookingStatusLabel(nextFlowStatus(form.status)!)}」
+            </Button>
+          )}
+          <Button fullWidth variant="secondary" onClick={() => saveForm()} loading={saving}>僅儲存資料</Button>
+          {form.status !== 'cancelled' && (
+            <Button fullWidth variant="danger" onClick={() => saveForm('cancelled')} loading={saving} icon={<X className="w-4 h-4" />}>
+              取消訂單
+            </Button>
+          )}
+        </div>
+
+        <div>
+          <label className="flex items-center gap-1 text-xs text-gray-500 mb-1">直接指定狀態 <StatusHelpIcon /></label>
+          <select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value })} className="w-full px-3 py-2 border rounded-lg bg-white text-sm">
+            {formStatusOptions.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
+          </select>
+        </div>
+
+        {/* 操作紀錄：系統沒有訂單異動歷程表，所以這裡只列真的存得到的兩個時間點
+            （建立、最後一次異動），不去推測中間經過哪些關卡、也不假裝知道是誰改的。 */}
+        {editingId && (
+          <div className="border-t pt-3">
+            <p className="text-xs text-gray-500 mb-2">操作紀錄</p>
+            <div className="space-y-2.5">
+              <div className="flex gap-2">
+                <span className="w-5 h-5 rounded-full bg-green-100 text-green-700 flex items-center justify-center text-[10px] shrink-0">✓</span>
+                <div>
+                  <p className="text-xs font-medium text-gray-700">建立訂單</p>
+                  <p className="text-[11px] text-gray-400">{formatDateTime(form.created_at) || '—'}</p>
+                </div>
+              </div>
+              <div className="flex gap-2">
+                <span className="w-5 h-5 rounded-full bg-gray-800 text-white flex items-center justify-center text-[10px] shrink-0">
+                  {flowStepIndex(form.status) ?? '!'}
+                </span>
+                <div>
+                  <p className="text-xs font-medium text-gray-700">目前：{bookingStatusLabel(form.status)}</p>
+                  <p className="text-[11px] text-gray-400">
+                    {MANUAL_ACTION_STATUSES.includes(form.status) ? '等待人工處理' : '流程進行中'}
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+      </div>
       </Modal>
 
       <ConfirmDialog
