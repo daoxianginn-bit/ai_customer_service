@@ -2,7 +2,7 @@ import { Handler } from '@netlify/functions';
 import { Client } from '@line/bot-sdk';
 import { createClient } from '@supabase/supabase-js';
 import { randomUUID, createSign } from 'crypto';
-import { parseCsvKeywords, buildMergeFields, MessageVariable } from '../../src/lib/messageVariables';
+import { parseCsvKeywords, buildMergeFields, MessageVariable, computeTodayTomorrowFields } from '../../src/lib/messageVariables';
 import { computeNextRunAt, ScheduleConfig } from '../../src/lib/scheduleRecurrence';
 import { OCCUPYING_STATUSES, BALANCE_PAID_STATUSES } from '../../src/lib/bookingStatus';
 import { parseIcsEvents } from '../../src/lib/icsParser';
@@ -251,14 +251,13 @@ async function advanceToCheckedIn(config: Record<string, any>): Promise<{ ok: bo
 // 計算與後台辨識用的完整名稱，直接貼進洗滌單又長又難讀。沒填簡稱就退回完整名稱，不會漏掉品項。
 async function sendLaundryNotice(config: Record<string, any>, todayIso: string, bookingIds: string[]): Promise<string | null> {
   const groupIds: string[] = Array.isArray(config?.line_group_ids) ? config.line_group_ids.filter(Boolean) : [];
-  if (!config?.template_id || !groupIds.length) return null;
+  const template: string = String(config?.laundry_template || '').trim();
+  if (!template || !groupIds.length) return null;
 
-  const [{ data: usage }, { data: items }, { data: template }] = await Promise.all([
+  const [{ data: usage }, { data: items }] = await Promise.all([
     supabase.from('booking_linen_usage').select('linen_item_id, quantity').in('booking_id', bookingIds),
     supabase.from('linen_items').select('id, category, spec, short_name, display_order'),
-    supabase.from('custom_message_templates').select('body').eq('id', config.template_id).maybeSingle(),
   ]);
-  if (!template?.body) return '洗滌單範本不存在或已被刪除';
 
   const totals = new Map<string, number>();
   for (const u of usage || []) {
@@ -268,16 +267,24 @@ async function sendLaundryNotice(config: Record<string, any>, todayIso: string, 
   if (totals.size === 0) return '這批訂單沒有布巾用量，未發送洗滌單';
 
   // 依後台設定的顯示順序列出，洗滌廠每天收到的單子排列才一致。
-  const lines = (items || [])
+  const ordered = (items || []).slice().sort((a: any, b: any) => (a.display_order ?? 0) - (b.display_order ?? 0));
+  const lines = ordered
     .filter((it: any) => totals.get(it.id))
-    .sort((a: any, b: any) => (a.display_order ?? 0) - (b.display_order ?? 0))
-    .map((it: any) => `${(it.short_name || '').trim() || (it.spec ? `${it.category}－${it.spec}` : it.category)}：${totals.get(it.id)}`);
+    .map((it: any) => `${laundryItemName(it)}：${totals.get(it.id)}`);
 
-  const text = mergeTemplate(template.body, {
+  // 每個品項各自也是一個變數，讓管理員可以自己排版（例如只列某幾項、或跟別的文字混在同一行），
+  // 不一定要用整包展開的 [布巾明細]。沒用到的品項數量是 0，直接寫 0 比留空白更符合洗滌單的讀法。
+  const fields: Record<string, string> = {
     日期: toSlashDateShort(todayIso),
     布巾明細: lines.join('\n'),
     訂單數: String(bookingIds.length),
-  });
+    // [今日日期]／[明日日期] 在每個範本編輯器都是可插入的變數，這裡也要認得，
+    // 否則管理員插了它卻原樣出現在發給洗滌廠的訊息裡。
+    ...computeTodayTomorrowFields(),
+  };
+  for (const it of ordered) fields[laundryItemName(it)] = String(totals.get(it.id) ?? 0);
+
+  const text = mergeTemplate(template, fields);
 
   const pushed = await pushTextToLineGroups(groupIds, text);
   return pushed.skipped ? `洗滌單未發送：${pushed.skipped}` : `洗滌單已發送到 ${pushed.pushed} 個群組`;
@@ -306,6 +313,14 @@ async function pushTextToLineGroups(groupIds: string[], text: string): Promise<{
     }
   }
   return pushed ? { pushed, skipped: null } : { pushed: 0, skipped: '所有群組推播都失敗' };
+}
+
+// 洗滌單上顯示的品項名稱，同時也是它在範本裡的變數名稱。前端的快捷插入鈕用同一套規則產生
+// （見 ScheduledTasks.tsx 的 laundryPlaceholders），兩邊必須一致，否則插進去的變數會替換不到。
+function laundryItemName(item: { category: string; spec?: string | null; short_name?: string | null }): string {
+  const short = (item.short_name || '').trim();
+  if (short) return short;
+  return item.spec ? `${item.category}－${item.spec}` : item.category;
 }
 
 /** 8/23 這種短日期，洗滌單上不需要年份。 */

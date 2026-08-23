@@ -3,6 +3,7 @@ import { supabase } from '../lib/supabase';
 import { Clock, Plus, Pencil, Trash2, AlertTriangle, CheckCircle2, XCircle, PlayCircle } from 'lucide-react';
 import { PageHeader, Button, Modal, ConfirmDialog, Switch, EmptyState } from '../components/ui';
 import { Recurrence, ScheduleConfig, computeNextRunAt, describeSchedule, MIN_INTERVAL_MINUTES } from '../lib/scheduleRecurrence';
+import MessageTemplateEditor from '../components/MessageTemplateEditor';
 
 // 排程類型清單：之後新增排程類型（定時寄信、到期通知、LINE 分眾發送...）只需要在這裡多加一筆，
 // 不用改頁面其他邏輯或資料表結構。
@@ -41,7 +42,6 @@ const TASK_TYPE_OPTIONS: { value: string; label: string; description: string; ne
       '另外可以選填「洗滌單範本」與「LINE 群組」：填了就會把這批訂單今天要用的布巾品項數量加總，套進範本發到指定群組；' +
       '不填就只做狀態轉換、不發任何訊息。範本可用 [日期]、[布巾明細]、[訂單數] 三個變數，' +
       '品項名稱取「備品管理」裡的洗滌單簡稱（沒填就用完整名稱）。建議設定為每天 13:00。',
-    needsTemplate: true,
     needsLineGroups: true,
   },
   {
@@ -146,6 +146,9 @@ type TaskForm = {
   template_id: string;
   notification_group_id: string;
   line_group_ids: string[];
+  // 洗滌單範本直接寫在排程設定裡，不從「客製訊息範本」挑——它的變數（布巾品項數量）
+  // 只有這支排程算得出來，放進共用範本庫對其他排程沒有意義。
+  laundry_template: string;
 };
 
 const emptyForm = (): TaskForm => ({
@@ -160,6 +163,7 @@ const emptyForm = (): TaskForm => ({
   template_id: '',
   notification_group_id: '',
   line_group_ids: [],
+  laundry_template: '',
 });
 
 function formToConfig(form: TaskForm): ScheduleConfig {
@@ -181,7 +185,10 @@ function buildTaskConfig(form: TaskForm): Record<string, any> {
   const config: Record<string, any> = {};
   if (opt?.needsTemplate) config.template_id = form.template_id || null;
   if (opt?.needsGroup) config.notification_group_id = form.notification_group_id || null;
-  if (opt?.needsLineGroups) config.line_group_ids = form.line_group_ids;
+  if (opt?.needsLineGroups) {
+    config.line_group_ids = form.line_group_ids;
+    config.laundry_template = form.laundry_template;
+  }
   return config;
 }
 
@@ -196,6 +203,15 @@ function formatDateTime(iso: string | null): string {
 
 interface TemplateOption { id: string; title: string }
 interface LineGroupOption { group_id: string; name: string | null; channel_id: string }
+interface LinenItemOption { id: string; category: string; spec: string | null; short_name: string | null; display_order: number }
+
+// 品項在洗滌單範本裡的變數名稱。必須跟後端 scheduled-tasks-run.ts 的 laundryItemName() 一致，
+// 否則按鈕插進去的變數替換不到、會原樣出現在發出去的訊息裡。
+function laundryItemName(item: LinenItemOption): string {
+  const short = (item.short_name || '').trim();
+  if (short) return short;
+  return item.spec ? `${item.category}－${item.spec}` : item.category;
+}
 interface GroupOption { id: string; name: string; channel_id: string }
 
 export default function ScheduledTasks() {
@@ -206,6 +222,7 @@ export default function ScheduledTasks() {
   const [templates, setTemplates] = useState<TemplateOption[]>([]);
   const [groups, setGroups] = useState<GroupOption[]>([]);
   const [lineGroups, setLineGroups] = useState<LineGroupOption[]>([]);
+  const [linenItems, setLinenItems] = useState<LinenItemOption[]>([]);
   const [channelNameById, setChannelNameById] = useState<Record<string, string>>({});
 
   const [showForm, setShowForm] = useState(false);
@@ -240,16 +257,19 @@ export default function ScheduledTasks() {
   // 「客製訊息範本」跟「通知名單」的下拉選單資料，跟 scheduled_tasks 本身無關，
   // 獨立查一次即可，不用每次開表單都重查。
   const fetchTemplateAndGroupOptions = async () => {
-    const [templateRes, groupRes, channelRes, lineGroupRes] = await Promise.all([
+    const [templateRes, groupRes, channelRes, lineGroupRes, linenItemRes] = await Promise.all([
       supabase.from('custom_message_templates').select('id, title').order('created_at'),
       supabase.from('notification_recipient_groups').select('id, name, channel_id').order('created_at', { ascending: false }),
       supabase.from('line_channels').select('id, name'),
       // 機器人被邀進去的 LINE 群組聊天室（洗滌單發送對象）。只列還在使用中的。
       supabase.from('line_groups').select('group_id, name, channel_id').eq('is_active', true).order('last_message_at', { ascending: false, nullsFirst: false }),
+      // 洗滌單範本的快捷插入鈕：每個啟用中的布巾品項各一個變數。
+      supabase.from('linen_items').select('id, category, spec, short_name, display_order').eq('is_active', true).order('display_order'),
     ]);
     setTemplates(templateRes.data || []);
     setGroups(groupRes.data || []);
     setLineGroups(lineGroupRes.data || []);
+    setLinenItems(linenItemRes.data || []);
     setChannelNameById(Object.fromEntries((channelRes.data || []).map((c: any) => [c.id, c.name])));
   };
 
@@ -275,6 +295,7 @@ export default function ScheduledTasks() {
       template_id: row.config?.template_id || '',
       notification_group_id: row.config?.notification_group_id || '',
       line_group_ids: Array.isArray(row.config?.line_group_ids) ? row.config.line_group_ids : [],
+      laundry_template: row.config?.laundry_template || '',
     });
     setFormError('');
     setShowForm(true);
@@ -289,8 +310,9 @@ export default function ScheduledTasks() {
     if (currentTaskType?.needsTemplate && !currentTaskType?.needsLineGroups && !form.template_id)
       return setFormError('這個排程類型需要選擇一個客製訊息範本');
     if (currentTaskType?.needsLineGroups) {
-      if (form.template_id && !form.line_group_ids.length) return setFormError('已選洗滌單範本，請一併勾選要發送的 LINE 群組');
-      if (!form.template_id && form.line_group_ids.length) return setFormError('已勾選 LINE 群組，請一併選擇洗滌單範本');
+      const hasTemplate = !!form.laundry_template.trim();
+      if (hasTemplate && !form.line_group_ids.length) return setFormError('已填寫洗滌單內容，請一併勾選要發送的 LINE 群組');
+      if (!hasTemplate && form.line_group_ids.length) return setFormError('已勾選 LINE 群組，請一併填寫洗滌單內容');
     }
     if (currentTaskType?.needsGroup && !form.notification_group_id) return setFormError('這個排程類型需要選擇一個通知名單');
 
@@ -508,8 +530,7 @@ export default function ScheduledTasks() {
         {currentTaskType?.needsTemplate && (
           <div>
             <label className="block text-xs text-gray-500 mb-1">
-              {currentTaskType?.needsLineGroups ? '洗滌單訊息範本（選填）' : '客製訊息範本'}
-              {!currentTaskType?.needsLineGroups && <span className="text-red-500"> *</span>}
+              客製訊息範本<span className="text-red-500"> *</span>
             </label>
             {templates.length === 0 ? (
               <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
@@ -521,10 +542,29 @@ export default function ScheduledTasks() {
                 {templates.map((t) => (<option key={t.id} value={t.id}>{t.title}</option>))}
               </select>
             )}
+            <p className="text-xs text-gray-400 mt-1">這則訊息會直接發給訂單本人，範本裡可以用「訊息變數資料維護」設定的 [變數]。</p>
+          </div>
+        )}
+
+        {currentTaskType?.needsLineGroups && (
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">洗滌單內容（選填）</label>
+            <MessageTemplateEditor
+              value={form.laundry_template}
+              onChange={(v) => setForm({ ...form, laundry_template: v })}
+              placeholders={['日期', '訂單數', '布巾明細', ...linenItems.map(laundryItemName)]}
+              rows={10}
+              placeholder={`日期:[日期]
+[布巾明細]
+NG:0
+下午取
+謝謝`}
+            />
             <p className="text-xs text-gray-400 mt-1">
-              {currentTaskType?.needsLineGroups
-                ? '這則訊息會發到下方勾選的 LINE 群組（不是發給客人）。可用變數：[日期]、[布巾明細]、[訂單數]。'
-                : '這則訊息會直接發給訂單本人，範本裡可以用「訊息變數資料維護」設定的 [變數]。'}
+              這則訊息會發到下方勾選的 LINE 群組（不是發給客人）。
+              [布巾明細] 會自動展開成「品項：數量」多行；也可以改用下面每個品項各自的按鈕自己排版，
+              那些變數帶入的是<strong>當日入住訂單的加總數量</strong>（沒用到的品項是 0）。
+              品項名稱取自「備品管理」的洗滌單簡稱，改了簡稱記得回來重新插入。
             </p>
           </div>
         )}
@@ -560,7 +600,7 @@ export default function ScheduledTasks() {
               </div>
             )}
             <p className="text-xs text-gray-400 mt-1">
-              留空＝這支排程只做狀態轉換、不發洗滌單。要發送的話，上面的「客製訊息範本」也要一起選。
+              留空＝這支排程只做狀態轉換、不發洗滌單。要發送的話，上面的「洗滌單內容」也要一起填。
             </p>
           </div>
         )}
