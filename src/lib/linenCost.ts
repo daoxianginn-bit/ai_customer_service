@@ -16,6 +16,8 @@ export interface LinenItem {
   is_active: boolean;
   display_order: number;
   notes: string;
+  /** 洗滌單簡稱：發給洗滌廠的訊息用的短名稱。留空時退回 category＋spec 的完整名稱。 */
+  short_name?: string;
 }
 
 export interface RoomLinenDefault {

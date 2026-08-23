@@ -230,7 +230,7 @@ async function advanceToAwaitingBalance(): Promise<{ ok: boolean; summary: strin
 }
 
 // 待入住(awaiting_checkin) → 入住中(checked_in)：今天 = 入住日。下午 1 點執行。
-async function advanceToCheckedIn(): Promise<{ ok: boolean; summary: string }> {
+async function advanceToCheckedIn(config: Record<string, any>): Promise<{ ok: boolean; summary: string }> {
   const today = taiwanTodayIso();
   const { data, error } = await supabase.from('bookings').select('id, order_number').eq('status', 'awaiting_checkin').eq('checkin_date', today);
   if (error) return { ok: false, summary: `查詢失敗：${error.message}` };
@@ -238,7 +238,80 @@ async function advanceToCheckedIn(): Promise<{ ok: boolean; summary: string }> {
   const { error: updateError } = await supabase.from('bookings').update({ status: 'checked_in', updated_at: new Date().toISOString() }).in('id', data.map((b) => b.id));
   if (updateError) return { ok: false, summary: `更新失敗：${updateError.message}` };
   await logStageAdvance(data, 'awaiting_checkin', 'checked_in', '入住日到，排程自動轉為入住中');
-  return { ok: true, summary: `${data.length} 筆訂單已轉為入住中` };
+
+  // 順便把今天要用的布巾數量彙整成洗滌單發到 LINE 群組。沒設定範本或群組時就只做狀態轉換，
+  // 維持這支排程原本「純狀態轉換」的行為，既有安裝不會因為這次改版突然開始發訊息。
+  const laundry = await sendLaundryNotice(config, today, data.map((b) => b.id));
+  return { ok: true, summary: `${data.length} 筆訂單已轉為入住中${laundry ? `；${laundry}` : ''}` };
+}
+
+// 洗滌單：把這批訂單用到的布巾品項數量加總，套進管理員自己編的範本，發到指定的 LINE 群組。
+//
+// 品項名稱優先用「洗滌單簡稱」（例如「床包(中)紅線」）——linen_items 的 category＋spec 是給成本
+// 計算與後台辨識用的完整名稱，直接貼進洗滌單又長又難讀。沒填簡稱就退回完整名稱，不會漏掉品項。
+async function sendLaundryNotice(config: Record<string, any>, todayIso: string, bookingIds: string[]): Promise<string | null> {
+  const groupIds: string[] = Array.isArray(config?.line_group_ids) ? config.line_group_ids.filter(Boolean) : [];
+  if (!config?.template_id || !groupIds.length) return null;
+
+  const [{ data: usage }, { data: items }, { data: template }] = await Promise.all([
+    supabase.from('booking_linen_usage').select('linen_item_id, quantity').in('booking_id', bookingIds),
+    supabase.from('linen_items').select('id, category, spec, short_name, display_order'),
+    supabase.from('custom_message_templates').select('body').eq('id', config.template_id).maybeSingle(),
+  ]);
+  if (!template?.body) return '洗滌單範本不存在或已被刪除';
+
+  const totals = new Map<string, number>();
+  for (const u of usage || []) {
+    if (!u.quantity) continue;
+    totals.set(u.linen_item_id, (totals.get(u.linen_item_id) || 0) + Number(u.quantity));
+  }
+  if (totals.size === 0) return '這批訂單沒有布巾用量，未發送洗滌單';
+
+  // 依後台設定的顯示順序列出，洗滌廠每天收到的單子排列才一致。
+  const lines = (items || [])
+    .filter((it: any) => totals.get(it.id))
+    .sort((a: any, b: any) => (a.display_order ?? 0) - (b.display_order ?? 0))
+    .map((it: any) => `${(it.short_name || '').trim() || (it.spec ? `${it.category}－${it.spec}` : it.category)}：${totals.get(it.id)}`);
+
+  const text = mergeTemplate(template.body, {
+    日期: toSlashDateShort(todayIso),
+    布巾明細: lines.join('\n'),
+    訂單數: String(bookingIds.length),
+  });
+
+  const pushed = await pushTextToLineGroups(groupIds, text);
+  return pushed.skipped ? `洗滌單未發送：${pushed.skipped}` : `洗滌單已發送到 ${pushed.pushed} 個群組`;
+}
+
+// 發文字訊息到指定的 LINE 群組。群組屬於哪個官方帳號要照 line_groups 記的來查——
+// 群組 ID 跟聯絡人 ID 一樣是各帳號獨立的，用錯帳號的憑證推播一定失敗。
+async function pushTextToLineGroups(groupIds: string[], text: string): Promise<{ pushed: number; skipped: string | null }> {
+  const { data: groups } = await supabase.from('line_groups').select('group_id, channel_id, name').in('group_id', groupIds).eq('is_active', true);
+  if (!groups?.length) return { pushed: 0, skipped: '找不到指定的 LINE 群組（可能已停用或機器人已被移出）' };
+
+  const channelIds = Array.from(new Set(groups.map((g: any) => g.channel_id)));
+  const { data: channels } = await supabase.from('line_channels').select('id, channel_access_token, channel_secret').in('id', channelIds);
+  const channelById = new Map((channels || []).map((c: any) => [c.id, c]));
+
+  let pushed = 0;
+  for (const g of groups) {
+    const ch: any = channelById.get(g.channel_id);
+    if (!ch?.channel_access_token) continue;
+    try {
+      const client = new Client({ channelAccessToken: ch.channel_access_token, channelSecret: ch.channel_secret });
+      await client.pushMessage(g.group_id, { type: 'text', text });
+      pushed++;
+    } catch (e: any) {
+      console.error('[ScheduledTasks] line group push failed:', e.message);
+    }
+  }
+  return pushed ? { pushed, skipped: null } : { pushed: 0, skipped: '所有群組推播都失敗' };
+}
+
+/** 8/23 這種短日期，洗滌單上不需要年份。 */
+function toSlashDateShort(iso: string): string {
+  const [, m, d] = iso.split('-');
+  return `${Number(m)}/${Number(d)}`;
 }
 
 // 入住中(checked_in) → 押金處理(deposit_processing)：今天 = 退房日。中午 12 點執行。

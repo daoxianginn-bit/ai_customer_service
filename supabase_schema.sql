@@ -1283,3 +1283,9 @@ WHERE COALESCE(whole_house, false) = false
 
 -- 執行後查詢確認結果：
 -- SELECT order_number, whole_house, room_type_label FROM public.bookings ORDER BY created_at DESC LIMIT 20;
+
+-- 洗滌單簡稱：發給洗滌廠的訊息裡要顯示的短名稱（例如「床包(中)紅線」）。
+-- linen_items 原本的 category＋spec 是給成本計算與後台辨識用的完整名稱（例如
+-- 「床包－平紋貢緞床包-5x6.2尺-高28cm紅線」），直接貼進洗滌單會又長又難讀。
+-- 留空時洗滌訊息會退回顯示完整名稱，所以不填也不會出錯。
+ALTER TABLE public.linen_items ADD COLUMN IF NOT EXISTS short_name TEXT NOT NULL DEFAULT '';

@@ -14,7 +14,10 @@ import { Recurrence, ScheduleConfig, computeNextRunAt, describeSchedule, MIN_INT
 // needsGroup：這個類型是彙整多筆訂單、通知內部/廠商用的「通知名單」，格式固定（標題＋清單），
 //   不走範本系統——這類訊息本來就是狀態報告，不是要客製化的顧客訊息。
 // 兩者都要的（例如尾款排程）表示同時做兩件事：通知客人本人 + 彙整清單通知內部名單。
-const TASK_TYPE_OPTIONS: { value: string; label: string; description: string; needsTemplate?: boolean; needsGroup?: boolean }[] = [
+// needsLineGroups：這個類型會把訊息發到「機器人被邀進去的 LINE 群組」（line_groups），
+//   跟 needsGroup 的「通知名單」是兩回事——那個是一份 user ID 清單，這個是群組聊天室本身。
+//   目前只有洗滌單用得到，而且是選填：沒設定就只做狀態轉換、不發訊息。
+const TASK_TYPE_OPTIONS: { value: string; label: string; description: string; needsTemplate?: boolean; needsGroup?: boolean; needsLineGroups?: boolean }[] = [
   {
     value: 'cancel_unpaid_bookings',
     label: '訂單自動取消',
@@ -32,8 +35,14 @@ const TASK_TYPE_OPTIONS: { value: string; label: string; description: string; ne
   },
   {
     value: 'advance_to_checked_in',
-    label: '訂單狀態：待入住→入住中',
-    description: '入住日就是今天的「待入住」訂單，自動轉為「入住中」。純狀態轉換，不會發送任何訊息。建議設定為每天 13:00。',
+    label: '訂單狀態：待入住→入住中（含洗滌單）',
+    description:
+      '入住日就是今天的「待入住」訂單，自動轉為「入住中」。' +
+      '另外可以選填「洗滌單範本」與「LINE 群組」：填了就會把這批訂單今天要用的布巾品項數量加總，套進範本發到指定群組；' +
+      '不填就只做狀態轉換、不發任何訊息。範本可用 [日期]、[布巾明細]、[訂單數] 三個變數，' +
+      '品項名稱取「備品管理」裡的洗滌單簡稱（沒填就用完整名稱）。建議設定為每天 13:00。',
+    needsTemplate: true,
+    needsLineGroups: true,
   },
   {
     value: 'advance_to_deposit_processing',
@@ -136,6 +145,7 @@ type TaskForm = {
   // 排程類型專屬參數（見 TASK_TYPE_OPTIONS 的 needsTemplate / needsGroup），存進 scheduled_tasks.config。
   template_id: string;
   notification_group_id: string;
+  line_group_ids: string[];
 };
 
 const emptyForm = (): TaskForm => ({
@@ -149,6 +159,7 @@ const emptyForm = (): TaskForm => ({
   interval_minutes: MIN_INTERVAL_MINUTES,
   template_id: '',
   notification_group_id: '',
+  line_group_ids: [],
 });
 
 function formToConfig(form: TaskForm): ScheduleConfig {
@@ -170,6 +181,7 @@ function buildTaskConfig(form: TaskForm): Record<string, any> {
   const config: Record<string, any> = {};
   if (opt?.needsTemplate) config.template_id = form.template_id || null;
   if (opt?.needsGroup) config.notification_group_id = form.notification_group_id || null;
+  if (opt?.needsLineGroups) config.line_group_ids = form.line_group_ids;
   return config;
 }
 
@@ -183,6 +195,7 @@ function formatDateTime(iso: string | null): string {
 }
 
 interface TemplateOption { id: string; title: string }
+interface LineGroupOption { group_id: string; name: string | null; channel_id: string }
 interface GroupOption { id: string; name: string; channel_id: string }
 
 export default function ScheduledTasks() {
@@ -192,6 +205,7 @@ export default function ScheduledTasks() {
 
   const [templates, setTemplates] = useState<TemplateOption[]>([]);
   const [groups, setGroups] = useState<GroupOption[]>([]);
+  const [lineGroups, setLineGroups] = useState<LineGroupOption[]>([]);
   const [channelNameById, setChannelNameById] = useState<Record<string, string>>({});
 
   const [showForm, setShowForm] = useState(false);
@@ -226,13 +240,16 @@ export default function ScheduledTasks() {
   // 「客製訊息範本」跟「通知名單」的下拉選單資料，跟 scheduled_tasks 本身無關，
   // 獨立查一次即可，不用每次開表單都重查。
   const fetchTemplateAndGroupOptions = async () => {
-    const [templateRes, groupRes, channelRes] = await Promise.all([
+    const [templateRes, groupRes, channelRes, lineGroupRes] = await Promise.all([
       supabase.from('custom_message_templates').select('id, title').order('created_at'),
       supabase.from('notification_recipient_groups').select('id, name, channel_id').order('created_at', { ascending: false }),
       supabase.from('line_channels').select('id, name'),
+      // 機器人被邀進去的 LINE 群組聊天室（洗滌單發送對象）。只列還在使用中的。
+      supabase.from('line_groups').select('group_id, name, channel_id').eq('is_active', true).order('last_message_at', { ascending: false, nullsFirst: false }),
     ]);
     setTemplates(templateRes.data || []);
     setGroups(groupRes.data || []);
+    setLineGroups(lineGroupRes.data || []);
     setChannelNameById(Object.fromEntries((channelRes.data || []).map((c: any) => [c.id, c.name])));
   };
 
@@ -257,6 +274,7 @@ export default function ScheduledTasks() {
       interval_minutes: row.interval_minutes ?? MIN_INTERVAL_MINUTES,
       template_id: row.config?.template_id || '',
       notification_group_id: row.config?.notification_group_id || '',
+      line_group_ids: Array.isArray(row.config?.line_group_ids) ? row.config.line_group_ids : [],
     });
     setFormError('');
     setShowForm(true);
@@ -267,7 +285,13 @@ export default function ScheduledTasks() {
   const handleSave = async () => {
     if (!form.name.trim()) return setFormError('請輸入排程名稱');
     if (form.recurrence === 'once' && !form.run_at_date) return setFormError('請選擇執行日期');
-    if (currentTaskType?.needsTemplate && !form.template_id) return setFormError('這個排程類型需要選擇一個客製訊息範本');
+    // needsLineGroups 的類型（洗滌單）範本是選填，但「只填其中一個」一定是設定到一半，要擋下來。
+    if (currentTaskType?.needsTemplate && !currentTaskType?.needsLineGroups && !form.template_id)
+      return setFormError('這個排程類型需要選擇一個客製訊息範本');
+    if (currentTaskType?.needsLineGroups) {
+      if (form.template_id && !form.line_group_ids.length) return setFormError('已選洗滌單範本，請一併勾選要發送的 LINE 群組');
+      if (!form.template_id && form.line_group_ids.length) return setFormError('已勾選 LINE 群組，請一併選擇洗滌單範本');
+    }
     if (currentTaskType?.needsGroup && !form.notification_group_id) return setFormError('這個排程類型需要選擇一個通知名單');
 
     const nextRunAt = computeNextRunAt(formToConfig(form), Date.now());
@@ -484,7 +508,8 @@ export default function ScheduledTasks() {
         {currentTaskType?.needsTemplate && (
           <div>
             <label className="block text-xs text-gray-500 mb-1">
-              客製訊息範本<span className="text-red-500"> *</span>
+              {currentTaskType?.needsLineGroups ? '洗滌單訊息範本（選填）' : '客製訊息範本'}
+              {!currentTaskType?.needsLineGroups && <span className="text-red-500"> *</span>}
             </label>
             {templates.length === 0 ? (
               <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
@@ -496,7 +521,47 @@ export default function ScheduledTasks() {
                 {templates.map((t) => (<option key={t.id} value={t.id}>{t.title}</option>))}
               </select>
             )}
-            <p className="text-xs text-gray-400 mt-1">這則訊息會直接發給訂單本人，範本裡可以用「訊息變數資料維護」設定的 [變數]。</p>
+            <p className="text-xs text-gray-400 mt-1">
+              {currentTaskType?.needsLineGroups
+                ? '這則訊息會發到下方勾選的 LINE 群組（不是發給客人）。可用變數：[日期]、[布巾明細]、[訂單數]。'
+                : '這則訊息會直接發給訂單本人，範本裡可以用「訊息變數資料維護」設定的 [變數]。'}
+            </p>
+          </div>
+        )}
+
+        {currentTaskType?.needsLineGroups && (
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">發送到 LINE 群組（選填，可複選）</label>
+            {lineGroups.length === 0 ? (
+              <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                目前沒有可用的群組。請把 LINE 官方帳號的機器人邀請進群組，並在群組裡隨便發一則訊息，這裡就會出現。
+              </p>
+            ) : (
+              <div className="border rounded-lg divide-y max-h-40 overflow-y-auto">
+                {lineGroups.map((g) => (
+                  <label key={g.group_id} className="flex items-center gap-2 px-3 py-2 text-sm cursor-pointer hover:bg-gray-50">
+                    <input
+                      type="checkbox"
+                      checked={form.line_group_ids.includes(g.group_id)}
+                      onChange={() =>
+                        setForm((f) => ({
+                          ...f,
+                          line_group_ids: f.line_group_ids.includes(g.group_id)
+                            ? f.line_group_ids.filter((x) => x !== g.group_id)
+                            : [...f.line_group_ids, g.group_id],
+                        }))
+                      }
+                      className="w-4 h-4"
+                    />
+                    <span className="text-gray-700">{g.name || '（未取得群組名稱）'}</span>
+                    <span className="text-xs text-gray-400">{channelNameById[g.channel_id] || '未知帳號'}</span>
+                  </label>
+                ))}
+              </div>
+            )}
+            <p className="text-xs text-gray-400 mt-1">
+              留空＝這支排程只做狀態轉換、不發洗滌單。要發送的話，上面的「客製訊息範本」也要一起選。
+            </p>
           </div>
         )}
 

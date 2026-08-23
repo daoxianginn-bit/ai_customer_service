@@ -48,7 +48,7 @@ interface BookingRow {
   status: string;
 }
 
-const emptyItemForm = () => ({ category: '', spec: '', unit_price: '', notes: '', is_active: true });
+const emptyItemForm = () => ({ category: '', spec: '', short_name: '', unit_price: '', notes: '', is_active: true });
 const emptyConsumableForm = () => ({ name: '', unit: '', stock_quantity: 0, restock_threshold: 0, notes: '', spaceIds: [] as string[] });
 
 function monthKey(iso: string | null): string {
@@ -233,6 +233,7 @@ export default function LinenManagement() {
     setItemForm({
       category: item.category,
       spec: item.spec,
+      short_name: item.short_name || '',
       unit_price: item.unit_price == null ? '' : String(item.unit_price),
       notes: item.notes,
       is_active: item.is_active,
@@ -248,6 +249,7 @@ export default function LinenManagement() {
       const payload = {
         category: itemForm.category.trim(),
         spec: itemForm.spec.trim(),
+        short_name: itemForm.short_name.trim(),
         // 空白＝另行報價，存 NULL 而不是 0，統計時才分得出「免費」跟「還沒報價」
         unit_price: itemForm.unit_price.trim() === '' ? null : Number(itemForm.unit_price),
         notes: itemForm.notes,
@@ -517,7 +519,12 @@ export default function LinenManagement() {
                         {item.category}
                         {!item.is_active && <span className="ml-2 text-xs text-gray-400">已停用</span>}
                       </td>
-                      <td className="py-3 px-4 text-gray-600">{item.spec || <span className="text-gray-300">—</span>}</td>
+                      <td className="py-3 px-4 text-gray-600">
+                        {item.spec || <span className="text-gray-300">—</span>}
+                        {item.short_name ? (
+                          <span className="ml-2 text-xs px-1.5 py-0.5 rounded bg-gray-100 text-gray-500">洗滌單：{item.short_name}</span>
+                        ) : null}
+                      </td>
                       <td className="py-3 px-4 text-right whitespace-nowrap">
                         {item.unit_price == null
                           ? <span className="text-xs text-amber-700 bg-amber-50 rounded px-2 py-0.5">另行報價</span>
@@ -782,6 +789,13 @@ export default function LinenManagement() {
         <div>
           <label className="block text-xs text-gray-500 mb-1">品名－規格</label>
           <input value={itemForm.spec} onChange={(e) => setItemForm({ ...itemForm, spec: e.target.value })} className="w-full px-3 py-2 border rounded-lg" placeholder="例如：平紋貢緞床包-5x6.2 尺-高 28cm 紅線" />
+        </div>
+        <div>
+          <label className="block text-xs text-gray-500 mb-1">洗滌單簡稱</label>
+          <input value={itemForm.short_name} onChange={(e) => setItemForm({ ...itemForm, short_name: e.target.value })} className="w-full px-3 py-2 border rounded-lg" placeholder="例如：床包(中)紅線" />
+          <p className="text-xs text-gray-400 mt-1">
+            發到洗滌廠 LINE 群組的洗滌單上要顯示的短名稱。留空就用「品項－品名規格」的完整名稱。
+          </p>
         </div>
         <div>
           <label className="block text-xs text-gray-500 mb-1">洗滌單價 NT$</label>
