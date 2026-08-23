@@ -12,6 +12,12 @@ interface ChannelOption {
   role: string;
 }
 
+// 這一列能不能發訊息：第三方平台匯進來的訂單沒有 LINE 身分，勾了也送不出去。
+// 以「有沒有 line_user_id」為準而不是只看來源——後台人工建的單也可能沒有 LINE 帳號。
+function canSendToOrder(r: { line_user_id?: string }): boolean {
+  return !!(r.line_user_id && r.line_user_id.trim());
+}
+
 interface Contact {
   line_user_id: string; // LINE 群組時，這欄位存的是 group_id——push message 的 to 欄位不分兩者，可以共用同一套發送邏輯
   nickname: string | null;
@@ -55,7 +61,9 @@ interface CustomerRow {
   fields: Record<string, string>;
 }
 
-type ListMode = 'orders' | 'customers';
+// 'groups'＝發送給「機器人被邀進去的 LINE 群組」。群組跟個別聯絡人共用同一套 push 發送邏輯
+// （LINE 的 to 欄位不分 userId／groupId），所以只是換一份收件人來源，不需要另一套發送流程。
+type ListMode = 'orders' | 'customers' | 'groups';
 
 const MAX_BATCH_SEND = 50;
 const PAGE_SIZE = 10;
@@ -149,14 +157,16 @@ export default function CustomMessageSending() {
   useEffect(() => {
     if (!channelId) return;
     fetchQuota(channelId);
+    // 每個帳號都要載入自己的聯絡人與群組，客戶用帳號也不例外。
+    // 以前只有非客戶用帳號才載入，於是「機器人被邀進去的 LINE 群組」如果掛在客戶用帳號底下，
+    // 在這個畫面永遠看不到、也就永遠發不了訊息給那個群組。
+    fetchContacts(channelId);
+    setSelectedContactIds(new Set());
     if (channelId !== customerChannelId) {
-      fetchContacts(channelId);
       // 「客戶名單」模式的切換鈕只在客戶用帳號才顯示，離開客戶用帳號時如果還停在那個模式，
       // 使用者會被卡住（看得到客戶名單面板，卻沒有按鈕能切回訂單模式）。離開時強制切回訂單模式。
       setListMode('orders');
       setSelectedCustomerKeys(new Set());
-    } else {
-      setContacts([]); setContactGroups([]); setSelectedContactIds(new Set());
     }
   }, [channelId, customerChannelId]);
 
@@ -198,6 +208,7 @@ export default function CustomMessageSending() {
   };
 
   const visibleContacts = contacts.filter((c) => {
+    if (listMode === 'groups' && !c.is_group) return false;
     if (!contactFilter.trim()) return true;
     const kw = contactFilter.trim().toLowerCase();
     return (c.nickname || '').toLowerCase().includes(kw) || c.line_user_id.toLowerCase().includes(kw);
@@ -284,6 +295,8 @@ export default function CustomMessageSending() {
   const switchListMode = (mode: ListMode) => {
     if (mode === listMode) return;
     setListMode(mode);
+    // 群組模式的收件人來自 contacts（切換帳號時已經載入），不需要再查訂單或客戶名單。
+    if (mode === 'groups') return;
     if (mode === 'customers') runCustomerQuery(); else runOrderQuery();
   };
 
@@ -314,13 +327,23 @@ export default function CustomMessageSending() {
   const pagedRows = useMemo(() => rows.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE), [rows, page]);
   const totalPages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
 
+  // 這一頁裡「勾得動」的列。全選與表頭的勾選狀態都只看它，否則全選會把鎖住的
+  // 第三方訂單也一起勾起來，而且表頭永遠不會呈現全選（那些列勾不起來）。
+  const sendableKeysOnPage = useMemo(
+    () =>
+      pagedRows
+        .map((r, i) => ({ r, k: rowKey(r, page * PAGE_SIZE + i) }))
+        .filter(({ r }) => canSendToOrder(r))
+        .map(({ k }) => k),
+    [pagedRows, page]
+  );
+
   const toggleSelectAllOnPage = () => {
-    const pageKeys = pagedRows.map((r, i) => rowKey(r, page * PAGE_SIZE + i));
-    const allSelected = pageKeys.every((k) => selectedKeys.has(k));
+    const allSelected = sendableKeysOnPage.length > 0 && sendableKeysOnPage.every((k) => selectedKeys.has(k));
     setSelectedKeys((prev) => {
       const next = new Set(prev);
-      if (allSelected) pageKeys.forEach((k) => next.delete(k));
-      else pageKeys.forEach((k) => next.add(k));
+      if (allSelected) sendableKeysOnPage.forEach((k) => next.delete(k));
+      else sendableKeysOnPage.forEach((k) => next.add(k));
       return next;
     });
   };
@@ -369,9 +392,11 @@ export default function CustomMessageSending() {
       : `${displayName(referenceOrder as OrderRow)}${(referenceOrder as OrderRow).order_number ? `（訂單 ${(referenceOrder as OrderRow).order_number}）` : ''}`;
 
   // 實際收件人數量：客戶用帳號＝依目前模式（訂單清單或客戶名單）勾選人數；其他帳號＝聯絡人清單勾選人數。
-  const recipientCount = isCustomerChannel
-    ? (listMode === 'customers' ? selectedCustomerRows.length : selectedOrderRows.length)
-    : selectedContactIds.size;
+  const recipientCount = !isCustomerChannel || listMode === 'groups'
+    ? selectedContactIds.size
+    : listMode === 'customers'
+      ? selectedCustomerRows.length
+      : selectedOrderRows.length;
 
   const mergeTemplateLocal = (template: string, fields: Record<string, string>): string => {
     let result = template;
@@ -465,7 +490,7 @@ export default function CustomMessageSending() {
       // 客戶名單模式是每位客人各自的客戶欄位（一人一列，不會因為訂過好幾次房而重複發送）。
       // 其他帳號：收件人是該帳號的聯絡人，line_user_id 池子完全不同；合併欄位借用左側「有沒有
       // 選到參考訂單」——選了就整批通知都套用那張訂單的資訊（例如「請確認訂單 A001」），沒選就照原文發送。
-      const recipients = isCustomerChannel
+      const recipients = isCustomerChannel && listMode !== 'groups'
         ? listMode === 'customers'
           ? selectedCustomerRows.map((r) => ({ lineUserId: r.line_user_id, fields: r.fields }))
           : selectedOrderRows.filter((r) => r.line_user_id).map((r) => ({ lineUserId: r.line_user_id, fields: r.fields, bookingId: r.id }))
@@ -572,6 +597,12 @@ export default function CustomMessageSending() {
                     >
                       客戶名單（去重）
                     </button>
+                    <button
+                      onClick={() => switchListMode('groups')}
+                      className={`px-2.5 py-1 text-xs rounded-md transition-colors ${listMode === 'groups' ? 'bg-white shadow-sm text-gray-800 font-medium' : 'text-gray-500 hover:text-gray-700'}`}
+                    >
+                      LINE 群組
+                    </button>
                   </div>
                 )}
               </div>
@@ -639,7 +670,11 @@ export default function CustomMessageSending() {
               )}
             </div>
 
-            {listMode === 'customers' ? (
+            {listMode === 'groups' ? (
+              <p className="px-4 py-6 text-sm text-gray-400">
+                群組發送不需要查詢訂單。請到下方「發送對象」勾選要發送的 LINE 群組。
+              </p>
+            ) : listMode === 'customers' ? (
               <>
                 <div className="overflow-x-auto max-h-[420px] overflow-y-auto">
                   <table className="w-full text-left text-sm">
@@ -691,7 +726,12 @@ export default function CustomMessageSending() {
                     <thead className="bg-gray-50 border-b sticky top-0">
                       <tr className="text-gray-600">
                         <th className="py-2 px-3">
-                          <input type="checkbox" checked={pagedRows.length > 0 && pagedRows.every((r, i) => selectedKeys.has(rowKey(r, page * PAGE_SIZE + i)))} onChange={toggleSelectAllOnPage} disabled={!pagedRows.length} />
+                          <input
+                            type="checkbox"
+                            checked={sendableKeysOnPage.length > 0 && sendableKeysOnPage.every((k) => selectedKeys.has(k))}
+                            onChange={toggleSelectAllOnPage}
+                            disabled={sendableKeysOnPage.length === 0}
+                          />
                         </th>
                         <th className="py-2 px-3">姓名</th>
                         <th className="py-2 px-3">入住日期</th>
@@ -708,7 +748,13 @@ export default function CustomMessageSending() {
                         return (
                           <tr key={key} className={selectedKeys.has(key) ? 'bg-green-50' : ''}>
                             <td className="py-2 px-3">
-                              <input type="checkbox" checked={selectedKeys.has(key)} onChange={() => toggleSelected(key)} />
+                              <input
+                                type="checkbox"
+                                checked={selectedKeys.has(key)}
+                                onChange={() => toggleSelected(key)}
+                                disabled={!canSendToOrder(r)}
+                                title={canSendToOrder(r) ? '' : '這筆訂單沒有 LINE 帳號（第三方平台訂單或人工建單），無法發送訊息'}
+                              />
                             </td>
                             <td className="py-2 px-3">
                               <span className="inline-flex items-center gap-1">
@@ -761,10 +807,12 @@ export default function CustomMessageSending() {
 
           {/* 發送對象：客戶用帳號以外的頻道，收件人從這裡的聯絡人清單勾選（不是上面的訂單清單，
               那些 line_user_id 屬於客戶用帳號，在別的帳號底下是無效 ID）。 */}
-          {!isCustomerChannel && (
+          {(!isCustomerChannel || listMode === 'groups') && (
             <div className="bg-white rounded-xl shadow-sm border overflow-hidden">
               <div className="p-4 border-b space-y-3">
-                <h3 className="font-bold text-gray-800 text-sm">發送對象（{channels.find((c) => c.id === channelId)?.name} 聯絡人）</h3>
+                <h3 className="font-bold text-gray-800 text-sm">
+                  發送對象（{channels.find((c) => c.id === channelId)?.name}{listMode === 'groups' ? ' 群組' : ' 聯絡人'}）
+                </h3>
                 {contactGroups.length > 0 && (
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="text-xs text-gray-400">套用通知名單：</span>

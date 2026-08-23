@@ -633,24 +633,34 @@ async function syncOneOtaChannel(channel: any): Promise<{ summary: string; confl
   // 日期重疊——checkOtaConflict 就在這個空窗期執行，於是新訂單會被標成「疑似撞期」，
   // 但它撞到的其實是自己的前一版。先取消就沒有這個空窗期。
   //
-  // 已經取消的不再取消一次：沒有這道過濾，每 15 分鐘同步一次就會把同一批早就取消的訂單
-  // 重新 update 一遍、再寫一筆「cancelled → cancelled」的操作紀錄，操作紀錄很快就被洗版。
+  // 平台端已經拿掉的房況：整筆刪除，不留取消紀錄。
+  //
+  // 第三方訂單在這裡只是「平台說這幾天不能賣」的鏡像，平台不再說了就沒有保留價值；留成一堆
+  // 已取消的訂單反而會把訂單清單塞滿。子資料表（booking_rooms／booking_room_nights／
+  // booking_linen_usage）都是 ON DELETE CASCADE，指向它的欄位（撞期對象、候補監看、取代關係）
+  // 都是 ON DELETE SET NULL，所以直接刪不會留下孤兒資料。
+  //
+  // 刪除救不回來，所以刪之前把內容寫進操作紀錄——那是事後唯一查得到「這幾天曾經被平台訂走」的地方。
   const disappeared = (existingRows || []).filter(
-    (r: any) => r.status !== 'cancelled' && !seenKeys.has(dateKey(r.checkin_date, r.checkout_date))
+    (r: any) => !seenKeys.has(dateKey(r.checkin_date, r.checkout_date))
   );
   if (disappeared.length) {
-    await supabase.from('bookings').update({ status: 'cancelled', updated_at: nowIso }).in('id', disappeared.map((r: any) => r.id));
     for (const r of disappeared) {
       await logSystemOperation({
         feature: LOG_FEATURES.calendarSync,
-        action: '狀態變更',
+        action: '刪除',
         target: r.order_number || r.id,
-        before: { 訂單狀態: r.status },
-        after: { 訂單狀態: 'cancelled', 說明: `${channel.name}：該筆訂單已從平台行事曆消失（平台端取消），自動標記取消` },
+        before: {
+          訂單狀態: r.status,
+          入住日期: String(r.checkin_date ?? '').slice(0, 10),
+          退房日期: String(r.checkout_date ?? '').slice(0, 10),
+        },
+        after: { 說明: `${channel.name}：該筆房況已從平台行事曆消失，訂單自動刪除` },
       });
     }
+    await supabase.from('bookings').delete().in('id', disappeared.map((r: any) => r.id));
   }
-  const cancelledIds = new Set(disappeared.map((r: any) => r.id));
+  const removedIds = new Set(disappeared.map((r: any) => r.id));
 
   // 這次同步已經被哪幾筆事件認領。同一份匯出裡不會有兩筆日期完全相同的事件，這個集合只是防呆，
   // 避免平台真的送了重複事件時兩筆都對到同一張訂單。
@@ -661,7 +671,7 @@ async function syncOneOtaChannel(channel: any): Promise<{ summary: string; confl
     const existing = (existingRows || []).find(
       (r: any) =>
         r.status !== 'cancelled' &&
-        !cancelledIds.has(r.id) &&
+        !removedIds.has(r.id) &&
         !matchedExistingIds.has(r.id) &&
         dateKey(r.checkin_date, r.checkout_date) === key
     );
@@ -729,7 +739,7 @@ async function syncOneOtaChannel(channel: any): Promise<{ summary: string; confl
 
   const parts = [`新增 ${created} 筆`, `更新 ${updated} 筆`];
   if (blockedKeys.size) parts.push(`略過關房 ${blockedKeys.size} 筆`);
-  if (disappeared.length) parts.push(`來源移除 ${disappeared.length} 筆（已標記取消）`);
+  if (disappeared.length) parts.push(`來源移除 ${disappeared.length} 筆（已刪除）`);
   if (conflictLines.length) parts.push(`⚠️ ${conflictLines.length} 筆疑似撞期`);
   if (staleBlocks.length) {
     parts.push(`⚠️ ${staleBlocks.length} 筆既有訂單依現行規則應為關房，請人工確認後取消（${staleBlocks.slice(0, 5).map((r: any) => `${r.order_number || r.id} ${r.checkin_date}~${r.checkout_date}`).join('、')}${staleBlocks.length > 5 ? ' 等' : ''}）`);

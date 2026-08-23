@@ -217,7 +217,10 @@ async function listOrders(settings: any, filters: OrderFilters): Promise<{ varia
 
   if (filters.startDate) query = query.gte('checkin_date', filters.startDate);
   if (filters.endDate) query = query.lte('checkin_date', filters.endDate);
+  // 沒有指定狀態時排除已取消，跟「訂單管理」的預設清單同一條規則——同一批訂單在兩個畫面
+  // 應該長得一樣，不然這裡會一直看到訂單管理已經不顯示的舊資料。
   if (filters.status) query = query.eq('status', filters.status);
+  else query = query.neq('status', 'cancelled');
   if (filters.roomType === '包棟') {
     query = query.eq('whole_house', true);
   } else if (filters.roomId) {
@@ -278,6 +281,8 @@ async function listOrders(settings: any, filters: OrderFilters): Promise<{ varia
       // 有連結房間就顯示實際房間名稱；還沒連結的舊訂單才退回手打的文字
       room_type_label: linkedRooms[b.id]?.join('、') || b.room_type_label || (b.whole_house ? '包棟' : ''),
       status: b.status,
+      // 前端用它判斷這列能不能勾選：第三方平台匯進來的訂單沒有 LINE 身分，發不出訊息。
+      booking_source: b.booking_source || 'direct',
       total_amount: b.total_amount != null ? String(b.total_amount) : '',
       deposit: b.deposit != null ? String(b.deposit) : '',
       balance_due: balanceDue != null ? String(balanceDue) : '',
