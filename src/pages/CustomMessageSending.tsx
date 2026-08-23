@@ -110,6 +110,9 @@ export default function CustomMessageSending() {
   const [contactsLoading, setContactsLoading] = useState(false);
   const [selectedContactIds, setSelectedContactIds] = useState<Set<string>>(new Set());
   const [contactFilter, setContactFilter] = useState('');
+  // 收件人種類篩選。群組跟個別聯絡人混在同一份清單裡時，帳號底下聯絡人一多就翻不到群組——
+  // 「我要發給某個群組」是很常見的意圖，需要一個一眼就能切到的入口。
+  const [contactKind, setContactKind] = useState<'all' | 'group' | 'user'>('all');
 
   const [keyword, setKeyword] = useState('');
   const [startDate, setStartDate] = useState('');
@@ -209,6 +212,8 @@ export default function CustomMessageSending() {
 
   const visibleContacts = contacts.filter((c) => {
     if (listMode === 'groups' && !c.is_group) return false;
+    if (contactKind === 'group' && !c.is_group) return false;
+    if (contactKind === 'user' && c.is_group) return false;
     if (!contactFilter.trim()) return true;
     const kw = contactFilter.trim().toLowerCase();
     return (c.nickname || '').toLowerCase().includes(kw) || c.line_user_id.toLowerCase().includes(kw);
@@ -810,9 +815,28 @@ export default function CustomMessageSending() {
           {(!isCustomerChannel || listMode === 'groups') && (
             <div className="bg-white rounded-xl shadow-sm border overflow-hidden">
               <div className="p-4 border-b space-y-3">
-                <h3 className="font-bold text-gray-800 text-sm">
-                  發送對象（{channels.find((c) => c.id === channelId)?.name}{listMode === 'groups' ? ' 群組' : ' 聯絡人'}）
-                </h3>
+                <div className="flex flex-wrap justify-between items-center gap-2">
+                  <h3 className="font-bold text-gray-800 text-sm">
+                    發送對象（{channels.find((c) => c.id === channelId)?.name}）
+                  </h3>
+                  {listMode !== 'groups' && (
+                    <div className="flex gap-0.5 p-0.5 bg-gray-100 rounded-lg">
+                      {([
+                        ['all', `全部（${contacts.length}）`],
+                        ['group', `群組（${contacts.filter((c) => c.is_group).length}）`],
+                        ['user', `個人（${contacts.filter((c) => !c.is_group).length}）`],
+                      ] as const).map(([k, label]) => (
+                        <button
+                          key={k}
+                          onClick={() => setContactKind(k)}
+                          className={`px-2.5 py-1 text-xs rounded-md transition-colors ${contactKind === k ? 'bg-white shadow-sm text-gray-800 font-medium' : 'text-gray-500 hover:text-gray-700'}`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
                 {contactGroups.length > 0 && (
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="text-xs text-gray-400">套用通知名單：</span>

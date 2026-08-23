@@ -250,9 +250,15 @@ async function advanceToCheckedIn(config: Record<string, any>): Promise<{ ok: bo
 // 品項名稱優先用「洗滌單簡稱」（例如「床包(中)紅線」）——linen_items 的 category＋spec 是給成本
 // 計算與後台辨識用的完整名稱，直接貼進洗滌單又長又難讀。沒填簡稱就退回完整名稱，不會漏掉品項。
 async function sendLaundryNotice(config: Record<string, any>, todayIso: string, bookingIds: string[]): Promise<string | null> {
-  const groupIds: string[] = Array.isArray(config?.line_group_ids) ? config.line_group_ids.filter(Boolean) : [];
+  // 收件人可以是 LINE 群組或個別聯絡人，兩者混在同一份清單裡：LINE 的 push 目標欄位不分
+  // userId／groupId，差別只在要用哪個官方帳號的憑證推播，所以每一筆都記著自己的 channel_id。
+  // line_group_ids 是這個功能最初版本的欄位，保留讀取，既有設定不會因為改版失效。
+  const recipients: { id: string; channel_id: string }[] = Array.isArray(config?.line_recipients)
+    ? config.line_recipients.filter((r: any) => r?.id && r?.channel_id)
+    : [];
+  const legacyGroupIds: string[] = Array.isArray(config?.line_group_ids) ? config.line_group_ids.filter(Boolean) : [];
   const template: string = String(config?.laundry_template || '').trim();
-  if (!template || !groupIds.length) return null;
+  if (!template || (!recipients.length && !legacyGroupIds.length)) return null;
 
   const [{ data: usage }, { data: items }] = await Promise.all([
     supabase.from('booking_linen_usage').select('linen_item_id, quantity').in('booking_id', bookingIds),
@@ -286,33 +292,44 @@ async function sendLaundryNotice(config: Record<string, any>, todayIso: string, 
 
   const text = mergeTemplate(template, fields);
 
-  const pushed = await pushTextToLineGroups(groupIds, text);
-  return pushed.skipped ? `洗滌單未發送：${pushed.skipped}` : `洗滌單已發送到 ${pushed.pushed} 個群組`;
+  // 舊設定只存了群組 ID，沒存所屬帳號，得回頭查 line_groups 才知道要用哪個帳號的憑證。
+  const resolved = recipients.length ? recipients : await resolveLegacyGroupRecipients(legacyGroupIds);
+  if (!resolved.length) return '洗滌單未發送：找不到指定的收件人（群組可能已停用或機器人已被移出）';
+
+  const pushed = await pushTextToLineTargets(resolved, text);
+  return pushed.pushed ? `洗滌單已發送給 ${pushed.pushed} 個對象` : '洗滌單未發送：所有推播都失敗';
 }
 
-// 發文字訊息到指定的 LINE 群組。群組屬於哪個官方帳號要照 line_groups 記的來查——
-// 群組 ID 跟聯絡人 ID 一樣是各帳號獨立的，用錯帳號的憑證推播一定失敗。
-async function pushTextToLineGroups(groupIds: string[], text: string): Promise<{ pushed: number; skipped: string | null }> {
-  const { data: groups } = await supabase.from('line_groups').select('group_id, channel_id, name').in('group_id', groupIds).eq('is_active', true);
-  if (!groups?.length) return { pushed: 0, skipped: '找不到指定的 LINE 群組（可能已停用或機器人已被移出）' };
+async function resolveLegacyGroupRecipients(groupIds: string[]): Promise<{ id: string; channel_id: string }[]> {
+  if (!groupIds.length) return [];
+  const { data } = await supabase.from('line_groups').select('group_id, channel_id').in('group_id', groupIds).eq('is_active', true);
+  return (data || []).map((g: any) => ({ id: g.group_id, channel_id: g.channel_id }));
+}
 
-  const channelIds = Array.from(new Set(groups.map((g: any) => g.channel_id)));
+// 發文字訊息給指定對象（群組或個別聯絡人皆可）。收件人屬於哪個官方帳號一定要照著記錄走——
+// 群組 ID 跟聯絡人 ID 都是各帳號獨立的，用錯帳號的憑證推播一定失敗。
+// 同一個帳號的收件人共用一個 client，不用每筆都重建。
+async function pushTextToLineTargets(targets: { id: string; channel_id: string }[], text: string): Promise<{ pushed: number }> {
+  const channelIds = Array.from(new Set(targets.map((t) => t.channel_id)));
   const { data: channels } = await supabase.from('line_channels').select('id, channel_access_token, channel_secret').in('id', channelIds);
-  const channelById = new Map((channels || []).map((c: any) => [c.id, c]));
+  const clientById = new Map<string, any>();
+  for (const c of channels || []) {
+    if (!c.channel_access_token) continue;
+    clientById.set(c.id, new Client({ channelAccessToken: c.channel_access_token, channelSecret: c.channel_secret }));
+  }
 
   let pushed = 0;
-  for (const g of groups) {
-    const ch: any = channelById.get(g.channel_id);
-    if (!ch?.channel_access_token) continue;
+  for (const t of targets) {
+    const client = clientById.get(t.channel_id);
+    if (!client) continue;
     try {
-      const client = new Client({ channelAccessToken: ch.channel_access_token, channelSecret: ch.channel_secret });
-      await client.pushMessage(g.group_id, { type: 'text', text });
+      await client.pushMessage(t.id, { type: 'text', text });
       pushed++;
     } catch (e: any) {
-      console.error('[ScheduledTasks] line group push failed:', e.message);
+      console.error('[ScheduledTasks] laundry push failed:', e.message);
     }
   }
-  return pushed ? { pushed, skipped: null } : { pushed: 0, skipped: '所有群組推播都失敗' };
+  return { pushed };
 }
 
 // 洗滌單上顯示的品項名稱，同時也是它在範本裡的變數名稱。前端的快捷插入鈕用同一套規則產生

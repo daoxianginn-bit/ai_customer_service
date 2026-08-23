@@ -39,7 +39,7 @@ const TASK_TYPE_OPTIONS: { value: string; label: string; description: string; ne
     label: '訂單狀態：待入住→入住中（含洗滌單）',
     description:
       '入住日就是今天的「待入住」訂單，自動轉為「入住中」。' +
-      '另外可以選填「洗滌單內容」與「LINE 群組」：填了就會把這批訂單今天要用的布巾品項數量加總，發到指定群組；' +
+      '另外可以選填「洗滌單內容」與「發送對象」：填了就會把這批訂單今天要用的布巾品項數量加總，發給指定的 LINE 群組或聯絡人；' +
       '兩者都留空就只做狀態轉換、不發任何訊息。' +
       '洗滌單內容直接寫在下面，可插入 [日期]、[訂單數]、[布巾明細]，以及每個布巾品項各自的數量；' +
       '品項名稱取「備品管理」裡的洗滌單簡稱（沒填就用完整名稱）。建議設定為每天 13:00。',
@@ -146,7 +146,7 @@ type TaskForm = {
   // 排程類型專屬參數（見 TASK_TYPE_OPTIONS 的 needsTemplate / needsGroup），存進 scheduled_tasks.config。
   template_id: string;
   notification_group_id: string;
-  line_group_ids: string[];
+  line_recipients: LaundryRecipient[];
   // 洗滌單範本直接寫在排程設定裡，不從「客製訊息範本」挑——它的變數（布巾品項數量）
   // 只有這支排程算得出來，放進共用範本庫對其他排程沒有意義。
   laundry_template: string;
@@ -163,7 +163,7 @@ const emptyForm = (): TaskForm => ({
   interval_minutes: MIN_INTERVAL_MINUTES,
   template_id: '',
   notification_group_id: '',
-  line_group_ids: [],
+  line_recipients: [],
   laundry_template: '',
 });
 
@@ -187,7 +187,7 @@ function buildTaskConfig(form: TaskForm): Record<string, any> {
   if (opt?.needsTemplate) config.template_id = form.template_id || null;
   if (opt?.needsGroup) config.notification_group_id = form.notification_group_id || null;
   if (opt?.needsLineGroups) {
-    config.line_group_ids = form.line_group_ids;
+    config.line_recipients = form.line_recipients;
     config.laundry_template = form.laundry_template;
   }
   return config;
@@ -204,6 +204,10 @@ function formatDateTime(iso: string | null): string {
 
 interface TemplateOption { id: string; title: string }
 interface LineGroupOption { group_id: string; name: string | null; channel_id: string }
+interface LineContactOption { line_user_id: string; nickname: string | null; channel_id: string }
+// 洗滌單收件人：群組或個別聯絡人都可以。一定要連 channel_id 一起存——LINE 的 push 目標
+// 不分 userId／groupId，但憑證要用該對象所屬官方帳號的，用錯帳號一定推不出去。
+interface LaundryRecipient { id: string; channel_id: string }
 interface LinenItemOption { id: string; category: string; spec: string | null; short_name: string | null; display_order: number }
 
 // 品項在洗滌單範本裡的變數名稱。必須跟後端 scheduled-tasks-run.ts 的 laundryItemName() 一致，
@@ -228,6 +232,8 @@ export default function ScheduledTasks() {
   // 廠商用帳號才被邀進群組），全部混在一起列會分不清楚哪個群組屬於哪個帳號。
   // 這只是畫面上的篩選，不寫進 config——發送時後端會照 line_groups 記的帳號去拿憑證。
   const [groupChannelFilter, setGroupChannelFilter] = useState('');
+  const [channelContacts, setChannelContacts] = useState<LineContactOption[]>([]);
+  const [contactsLoading, setContactsLoading] = useState(false);
   const [channelNameById, setChannelNameById] = useState<Record<string, string>>({});
 
   const [showForm, setShowForm] = useState(false);
@@ -299,21 +305,57 @@ export default function ScheduledTasks() {
       interval_minutes: row.interval_minutes ?? MIN_INTERVAL_MINUTES,
       template_id: row.config?.template_id || '',
       notification_group_id: row.config?.notification_group_id || '',
-      line_group_ids: Array.isArray(row.config?.line_group_ids) ? row.config.line_group_ids : [],
+      // 舊設定只存群組 ID 陣列，沒有帳號；載入時對照 line_groups 補上，存檔就會轉成新格式。
+      line_recipients: Array.isArray(row.config?.line_recipients)
+        ? row.config.line_recipients
+        : (Array.isArray(row.config?.line_group_ids) ? row.config.line_group_ids : [])
+            .map((gid: string) => {
+              const g = lineGroups.find((x) => x.group_id === gid);
+              return g ? { id: gid, channel_id: g.channel_id } : null;
+            })
+            .filter(Boolean) as LaundryRecipient[],
       laundry_template: row.config?.laundry_template || '',
     });
     setFormError('');
     setShowForm(true);
   };
 
+  // 選定官方帳號後才查它的個別聯絡人：聯絡人可能成千上百，沒必要在打開頁面時全部撈進來。
+  useEffect(() => {
+    if (!groupChannelFilter) { setChannelContacts([]); return; }
+    let cancelled = false;
+    setContactsLoading(true);
+    supabase
+      .from('user_states')
+      .select('line_user_id, nickname, channel_id')
+      .eq('channel_id', groupChannelFilter)
+      .order('last_message_at', { ascending: false, nullsFirst: false })
+      .limit(200)
+      .then(({ data }) => {
+        if (cancelled) return;
+        setChannelContacts(data || []);
+        setContactsLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [groupChannelFilter]);
+
+  const toggleRecipient = (id: string, channelId: string) => {
+    setForm((f) => ({
+      ...f,
+      line_recipients: f.line_recipients.some((r) => r.id === id)
+        ? f.line_recipients.filter((r) => r.id !== id)
+        : [...f.line_recipients, { id, channel_id: channelId }],
+    }));
+  };
+
   const currentTaskType = taskTypeOption(form.task_type);
 
-  // 有群組的官方帳號才列進篩選選單——列出一個「底下沒有任何群組」的帳號只會讓人白點一次。
-  const groupChannelOptions = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const g of lineGroups) counts.set(g.channel_id, (counts.get(g.channel_id) || 0) + 1);
-    return [...counts.entries()].map(([id, count]) => ({ id, name: channelNameById[id] || '未知帳號', count }));
-  }, [lineGroups, channelNameById]);
+  // 收件人可以是群組也可以是個別聯絡人，所以帳號清單要列出所有官方帳號，不能只列「有群組的」——
+  // 某個帳號可能沒有群組但有聯絡人，那也是合法的發送對象。
+  const channelOptions = useMemo(
+    () => Object.entries(channelNameById).map(([id, name]) => ({ id, name })),
+    [channelNameById]
+  );
 
   const visibleLineGroups = useMemo(
     () => (groupChannelFilter ? lineGroups.filter((g) => g.channel_id === groupChannelFilter) : lineGroups),
@@ -328,8 +370,8 @@ export default function ScheduledTasks() {
       return setFormError('這個排程類型需要選擇一個客製訊息範本');
     if (currentTaskType?.needsLineGroups) {
       const hasTemplate = !!form.laundry_template.trim();
-      if (hasTemplate && !form.line_group_ids.length) return setFormError('已填寫洗滌單內容，請一併勾選要發送的 LINE 群組');
-      if (!hasTemplate && form.line_group_ids.length) return setFormError('已勾選 LINE 群組，請一併填寫洗滌單內容');
+      if (hasTemplate && !form.line_recipients.length) return setFormError('已填寫洗滌單內容，請一併勾選要發送的對象');
+      if (!hasTemplate && form.line_recipients.length) return setFormError('已勾選發送對象，請一併填寫洗滌單內容');
     }
     if (currentTaskType?.needsGroup && !form.notification_group_id) return setFormError('這個排程類型需要選擇一個通知名單');
 
@@ -588,10 +630,12 @@ NG:0
 
         {currentTaskType?.needsLineGroups && (
           <div>
-            <label className="block text-xs text-gray-500 mb-1">發送到 LINE 群組（選填，可複選）</label>
-            {lineGroups.length === 0 ? (
+            <label className="block text-xs text-gray-500 mb-1">洗滌單發送對象（選填，可複選：群組與個別聯絡人）</label>
+            {/* 判斷依據是「有沒有官方帳號」而不是「有沒有群組」——收件人也可以是個別聯絡人，
+                某個帳號沒有群組但有聯絡人時，整個選擇區不該被藏起來。 */}
+            {channelOptions.length === 0 ? (
               <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
-                目前沒有可用的群組。請把 LINE 官方帳號的機器人邀請進群組，並在群組裡隨便發一則訊息，這裡就會出現。
+                還沒有設定任何 LINE 官方帳號，請先到「系統設定 → LINE 串接設定」新增。
               </p>
             ) : (
               <>
@@ -600,42 +644,60 @@ NG:0
                 onChange={(e) => setGroupChannelFilter(e.target.value)}
                 className="w-full px-3 py-2 border rounded-lg bg-white mb-2 text-sm"
               >
-                <option value="">全部官方帳號（{lineGroups.length} 個群組）</option>
-                {groupChannelOptions.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.name}（{c.count} 個群組）
-                  </option>
+                <option value="">請先選擇官方帳號</option>
+                {channelOptions.map((c) => (
+                  <option key={c.id} value={c.id}>{c.name}</option>
                 ))}
               </select>
-              <div className="border rounded-lg divide-y max-h-40 overflow-y-auto">
-                {visibleLineGroups.length === 0 && (
-                  <p className="px-3 py-3 text-xs text-gray-400">這個官方帳號底下沒有群組。</p>
-                )}
-                {visibleLineGroups.map((g) => (
-                  <label key={g.group_id} className="flex items-center gap-2 px-3 py-2 text-sm cursor-pointer hover:bg-gray-50">
-                    <input
-                      type="checkbox"
-                      checked={form.line_group_ids.includes(g.group_id)}
-                      onChange={() =>
-                        setForm((f) => ({
-                          ...f,
-                          line_group_ids: f.line_group_ids.includes(g.group_id)
-                            ? f.line_group_ids.filter((x) => x !== g.group_id)
-                            : [...f.line_group_ids, g.group_id],
-                        }))
-                      }
-                      className="w-4 h-4"
-                    />
-                    <span className="text-gray-700">{g.name || '（未取得群組名稱）'}</span>
-                    <span className="text-xs text-gray-400">{channelNameById[g.channel_id] || '未知帳號'}</span>
-                  </label>
-                ))}
-              </div>
+
+              {!groupChannelFilter ? (
+                <p className="text-xs text-gray-400 px-1">
+                  收件人分屬各個官方帳號（群組通常掛在廠商用帳號底下），先選帳號才列得出它的群組與聯絡人。
+                </p>
+              ) : (
+                <div className="border rounded-lg divide-y max-h-56 overflow-y-auto">
+                  <p className="px-3 py-1.5 text-xs text-gray-400 bg-gray-50 sticky top-0">LINE 群組</p>
+                  {visibleLineGroups.length === 0 && (
+                    <p className="px-3 py-2 text-xs text-gray-400">這個帳號底下沒有群組。</p>
+                  )}
+                  {visibleLineGroups.map((g) => (
+                    <label key={g.group_id} className="flex items-center gap-2 px-3 py-2 text-sm cursor-pointer hover:bg-gray-50">
+                      <input
+                        type="checkbox"
+                        checked={form.line_recipients.some((r) => r.id === g.group_id)}
+                        onChange={() => toggleRecipient(g.group_id, g.channel_id)}
+                        className="w-4 h-4"
+                      />
+                      <span className="text-gray-700">{g.name || '（未取得群組名稱）'}</span>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-blue-50 text-blue-600 border border-blue-200">群組</span>
+                    </label>
+                  ))}
+
+                  <p className="px-3 py-1.5 text-xs text-gray-400 bg-gray-50 sticky top-0">個別聯絡人</p>
+                  {contactsLoading ? (
+                    <p className="px-3 py-2 text-xs text-gray-400">載入中...</p>
+                  ) : channelContacts.length === 0 ? (
+                    <p className="px-3 py-2 text-xs text-gray-400">這個帳號底下還沒有聯絡人。</p>
+                  ) : (
+                    channelContacts.map((c) => (
+                      <label key={c.line_user_id} className="flex items-center gap-2 px-3 py-2 text-sm cursor-pointer hover:bg-gray-50">
+                        <input
+                          type="checkbox"
+                          checked={form.line_recipients.some((r) => r.id === c.line_user_id)}
+                          onChange={() => toggleRecipient(c.line_user_id, c.channel_id)}
+                          className="w-4 h-4"
+                        />
+                        <span className="text-gray-700">{c.nickname || '（未取得暱稱）'}</span>
+                      </label>
+                    ))
+                  )}
+                </div>
+              )}
               </>
             )}
             <p className="text-xs text-gray-400 mt-1">
-              已勾選 {form.line_group_ids.length} 個群組
-              {form.line_group_ids.length > 0 && groupChannelFilter ? '（切換帳號不會取消其他帳號已勾選的群組）' : ''}。
+              已勾選 {form.line_recipients.length} 個對象
+              {form.line_recipients.length > 0 && groupChannelFilter ? '（切換帳號不會取消其他帳號已勾選的對象）' : ''}。
               留空＝這支排程只做狀態轉換、不發洗滌單。要發送的話，上面的「洗滌單內容」也要一起填。
             </p>
           </div>
