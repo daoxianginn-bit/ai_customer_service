@@ -2541,13 +2541,31 @@ async function handleRemittanceReport(
     return true;
   }
 
-  // 客人點了圖文選單之類的按鈕，剛好觸發「別的」流程的關鍵字：讓那個自動回覆正常顯示。
-  // 一定要排除流程自己——不然顧客打到自己流程的觸發字（例如「價格」）會拿到一張空白表單，
-  // 但 session 還停在等匯款，填完送出又被當成新訊息，繞不出去。
   const currentFlowId = session.flowId;
+  const activeFlows = isImage ? [] : await fetchActiveFlows();
+
+  // 顧客在等匯款的階段打了「這個流程自己」的觸發字（例如「我要訂房」）：那是在開新的一筆，
+  // 不是在回報匯款。以前這裡把流程自己排除掉，於是這句話一路掉到下面的「已收到您的訊息」，
+  // 系統回了一句像是收到匯款的話、通知客服有一筆待核對（其實沒有），還順手把 session 清掉——
+  // 顧客接著送出的訂房資訊就再也沒有 session 可以接住，只能掉到一般 AI 讓它自由發揮。
+  //
+  // 排除自己原本是為了避免死循環：只把第一步的問句再顯示一次、session 卻沒有前進，
+  // 顧客怎麼打都停在原地。正解不是忽略這個意圖，而是真的替他重開一筆——session 會前進到
+  // 新訂單的第一步，循環自然不存在。
+  //
+  // 這樣做不會弄丟他正在付款的那一筆：restartQuoteFlow 只有在舊單還停在「待預定」
+  // （沒鎖房也沒收錢）時才當場取消；這個階段的舊單是「待確認」，只會被記成 supersedes，
+  // 要等新報價真的被接受才取消。
+  const ownFlowTriggered = !isImage && activeFlows.some((f) => f.id === currentFlowId && matchTriggerRules(userMessage, f.triggerRules));
+  if (ownFlowTriggered) {
+    await restartQuoteFlow(lineClient, lineEvent, settings, userId, nickname, session);
+    return true;
+  }
+
+  // 客人點了圖文選單之類的按鈕，剛好觸發「別的」流程的關鍵字：讓那個自動回覆正常顯示。
   const interruptingFlow = isImage
     ? undefined
-    : (await fetchActiveFlows()).find((f) => f.id !== currentFlowId && matchTriggerRules(userMessage, f.triggerRules));
+    : activeFlows.find((f) => f.id !== currentFlowId && matchTriggerRules(userMessage, f.triggerRules));
   const interruptingFirstStep = interruptingFlow?.steps.find((s) => s.step_order === 1);
   if (interruptingFirstStep) {
     const replyText = await renderFlowMessage(interruptingFirstStep.message_template, settings, userId, nickname, null);
