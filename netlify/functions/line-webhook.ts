@@ -1295,20 +1295,33 @@ async function checkBookingConflict(
 
   if (!overlapping || !overlapping.length) return false;
 
-  if (target.whole_house) return true; // 新訂單是包棟：跟任何一筆日期重疊的已確認訂單都算衝突
-  if (overlapping.some((b: any) => b.whole_house)) return true; // 已有包棟訂單佔用同一時段
-
-  const individualIds = overlapping.filter((b: any) => !b.whole_house).map((b: any) => b.id);
-  if (!individualIds.length) return false;
+  const overlappingIds = overlapping.map((b: any) => b.id);
 
   // booking_room_nights（LINE 訂房流程逐晚寫入）跟 booking_rooms（後台人工建單、OTA 匯入寫入）
   // 記錄的來源不同，兩張都要看——只看 booking_room_nights 的話，後台手動建的單跟 Airbnb 之類
   // 匯進來的個別房型訂單在這裡完全是隱形的，客人回「是」就會直接訂到已經有人住的房間。
   // 這裡跟 fetchOccupiedRoomIds() 是同一個判斷，兩邊看的表必須一致。
   const [nightsRes, roomsRes] = await Promise.all([
-    supabase.from('booking_room_nights').select('night_date, room_type_id').in('booking_id', individualIds),
-    supabase.from('booking_rooms').select('room_type_id').in('booking_id', individualIds),
+    supabase.from('booking_room_nights').select('booking_id, night_date, room_type_id').in('booking_id', overlappingIds),
+    supabase.from('booking_rooms').select('booking_id, room_type_id').in('booking_id', overlappingIds),
   ]);
+
+  // 擋不擋房一律以「實際佔用了哪幾間房」為準，不看 whole_house 旗標——那個旗標的語意是
+  // 「押金算包棟價」，後台每一張新單預設都會勾，拿它當「整棟被佔走」會把所有日期重疊的訂單
+  // 全部互相擋死，個別房型的訂單就再也訂不進來了。實際佔房的判斷跟 fetchOccupiedRoomIds() 一致。
+  //
+  // 唯一的例外是「有包棟旗標、卻查不到任何房間明細」的訂單：OTA 的整棟頻道匯進來的訂單只有
+  // 旗標、沒有 booking_rooms（見 syncOneOtaChannel），查不出它佔哪幾間，只能當成整棟都被佔走，
+  // 否則那段日期會直接超賣。
+  const idsWithRoomDetail = new Set<string>([
+    ...(nightsRes.data || []).map((r: any) => r.booking_id),
+    ...(roomsRes.data || []).map((r: any) => r.booking_id),
+  ]);
+  if (overlapping.some((b: any) => b.whole_house && !idsWithRoomDetail.has(b.id))) return true;
+
+  // 這次要成立的訂單自己也查不到房間明細時同理：無從比對是哪幾間，保守視為要整棟。
+  if (target.roomTypeIdsByNight.size === 0 && target.whole_house) return true;
+
   // booking_rooms 沒有逐晚資料，但上面已經先用日期範圍篩過重疊的訂單了，
   // 所以只要房型對上就是衝突，不需要再比對是哪一晚。
   const occupiedRoomTypeIds = new Set((roomsRes.data || []).map((r: any) => r.room_type_id));
@@ -2055,16 +2068,13 @@ async function finishBookingFlow(
     const securityDeposit = openedRooms.rooms.reduce((sum, r) => sum + (roomDepositById.get(r.id) ?? 0), 0);
     const amounts = computeOrderAmounts(total, securityDeposit, Number(settings.deposit_percent ?? 0));
 
-    // 是否包棟：這欄以前被寫死成 false，於是「開了全部房間」的訂單在後台一律顯示成非包棟，
-    // 房型欄看到的是一長串房間名稱、Google 行事曆也不會標「·包棟」，而且 checkBookingConflict
-    // 的包棟捷徑（包棟訂單跟任何重疊訂單都算衝突）永遠不會生效。
+    // 是否包棟：這欄以前被寫死成 false。它的語意是「押金要用包棟押金，而不是各房押金加總」，
+    // 民宿的預設經營方式就是包棟，所以一律寫 true——不論這次開了幾間房。客服如果遇到少數
+    // 單賣個別房間的情況，到「訂單管理」把勾選取消即可。
     //
-    // 判斷方式以「實際開了哪幾間房」為準——那是 booking_rooms、檔期衝突檢查共同認定的事實；
-    // 顧客在流程裡明確回答過「要包棟」時也算數（流程有設 whole_house 欄位才會收集得到），
-    // 兩者取聯集：漏標成非包棟會讓衝突檢查少擋一層，比多標一層危險。
-    const activeRoomCount = (data.roomTypes || []).filter((rt: any) => rt.is_active !== false).length;
-    const allRoomsOpened = activeRoomCount > 0 && openedRooms.rooms.length >= activeRoomCount;
-    const isWholeHouse = allRoomsOpened || quoteValues.whole_house === 'true';
+    // 這一欄刻意不參與「開了哪幾間房」的判斷：實際佔房由 booking_rooms／booking_room_nights
+    // 決定（見 fetchOccupiedRoomIds 與 checkBookingConflict），跟這個旗標是兩件事。
+    const isWholeHouse = quoteValues.whole_house !== 'false';
 
     const { data: updatedBooking, error: updateError } = await supabase
       .from('bookings')

@@ -1263,22 +1263,23 @@ WHERE flow_type = 'quote' AND is_active = true;
 -- 執行後查詢確認結果：
 -- SELECT name, trigger_rules FROM public.booking_flows WHERE flow_type = 'quote' AND is_active = true;
 
--- 12.2 補正「開了全部房間、卻被記成非包棟」的既有訂單。
+-- 12.2 把既有的自家訂單補成「包棟」。
 --
--- 成因：line-webhook.ts 的 finishBookingFlow() 以前把 whole_house 寫死成 false，
--- 所以 LINE 自動報價成立的訂單一律是非包棟，即使它其實開了整棟所有房間。影響到後台
--- 房型欄的顯示、Google 行事曆的「·包棟」標記，以及檔期衝突檢查裡「包棟訂單跟任何重疊
--- 訂單都算衝突」那層保護。程式已修，這一段補的是修好之前建立的舊資料。
+-- 成因：line-webhook.ts 的 finishBookingFlow() 以前把 whole_house 寫死成 false，所以
+-- LINE 自動報價成立的訂單一律是非包棟。這個欄位的語意是「押金要用包棟押金，而不是各房押金
+-- 加總」，而民宿的預設經營方式就是包棟——舊資料裡的 false 全部是程式寫死造成的，不是誰真的
+-- 決定過要單賣個別房間，所以整批補成 true。程式已改成一律寫 true。
 --
--- 判斷方式跟程式端一致：這張訂單在 booking_rooms 裡登記的房間數，達到目前啟用中的
--- 「房間」類型總數，就是包棟。只往 false → true 補，不會把管理員手動勾成包棟的訂單改掉。
--- 可重複執行：已經是 true 的不會再被選中。
-UPDATE public.bookings b
+-- 只補 booking_source = 'direct'（LINE 訂房流程與後台人工建單）。第三方平台匯入的訂單不能碰：
+-- 綁定特定房型的 OTA 頻道會刻意寫 false（見 syncOneOtaChannel 的 whole_house: !channel.room_type_id），
+-- 那是「這筆只佔某一間房」的正確資訊，改成 true 會讓它被當成整棟訂單。
+--
+-- 只往 false → true 補，可重複執行；之後客服在「訂單管理」手動取消勾選的訂單，
+-- 重跑這份腳本會被改回 true，真的有單賣個別房間的需求時要留意這一點。
+UPDATE public.bookings
 SET whole_house = true
-WHERE COALESCE(b.whole_house, false) = false
-  AND (SELECT COUNT(*) FROM public.room_types rt WHERE rt.type = '房間' AND rt.is_active IS DISTINCT FROM false) > 0
-  AND (SELECT COUNT(DISTINCT br.room_type_id) FROM public.booking_rooms br WHERE br.booking_id = b.id)
-      >= (SELECT COUNT(*) FROM public.room_types rt WHERE rt.type = '房間' AND rt.is_active IS DISTINCT FROM false);
+WHERE COALESCE(whole_house, false) = false
+  AND booking_source = 'direct';
 
 -- 執行後查詢確認結果：
--- SELECT order_number, whole_house, room_type_label FROM public.bookings WHERE whole_house = true ORDER BY created_at DESC LIMIT 20;
+-- SELECT order_number, whole_house, room_type_label FROM public.bookings ORDER BY created_at DESC LIMIT 20;

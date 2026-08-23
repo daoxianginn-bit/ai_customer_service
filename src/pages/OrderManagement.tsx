@@ -1136,17 +1136,14 @@ export default function OrderManagement() {
                 checked={form.whole_house}
                 onChange={(e) => {
                   const wholeHouse = e.target.checked;
-                  // 包棟＝所有房間都開，勾選當下直接把全部房間帶進去，不用管理員自己一間一間點——
-                  // 房間一變動，下面的布巾用量會透過既有的 useEffect 自動照每間房的預設組合重算。
-                  const nextRoomIds = wholeHouse ? rooms.map((r) => r.id) : selectedRoomIds;
-                  // 押金跟著切換：勾起來就套用包棟押金，取消就回到已勾選房間的押金加總。
-                  // 直接寫進欄位而不是只當 placeholder，管理員看到多少就是實際會存進去的金額。
+                  // 這個勾選框只決定一件事：押金要用「包棟押金」還是「已選房間的押金加總」。
+                  // 刻意不動房型選取——要整理哪幾間房是另一回事，由上面的房型按鈕自己決定，
+                  // 勾一下包棟就把房間全選會蓋掉客服已經挑好的房間，那是資料被改掉、不是預設值。
                   setForm({
                     ...form,
                     whole_house: wholeHouse,
-                    security_deposit: String(computeDefaultSecurityDeposit(wholeHouse, nextRoomIds)),
+                    security_deposit: String(computeDefaultSecurityDeposit(wholeHouse, selectedRoomIds)),
                   });
-                  if (wholeHouse) setSelectedRoomIds(nextRoomIds);
                 }}
                 className="w-4 h-4"
               />
