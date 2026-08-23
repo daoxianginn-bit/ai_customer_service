@@ -1262,3 +1262,23 @@ WHERE flow_type = 'quote' AND is_active = true;
 
 -- 執行後查詢確認結果：
 -- SELECT name, trigger_rules FROM public.booking_flows WHERE flow_type = 'quote' AND is_active = true;
+
+-- 12.2 補正「開了全部房間、卻被記成非包棟」的既有訂單。
+--
+-- 成因：line-webhook.ts 的 finishBookingFlow() 以前把 whole_house 寫死成 false，
+-- 所以 LINE 自動報價成立的訂單一律是非包棟，即使它其實開了整棟所有房間。影響到後台
+-- 房型欄的顯示、Google 行事曆的「·包棟」標記，以及檔期衝突檢查裡「包棟訂單跟任何重疊
+-- 訂單都算衝突」那層保護。程式已修，這一段補的是修好之前建立的舊資料。
+--
+-- 判斷方式跟程式端一致：這張訂單在 booking_rooms 裡登記的房間數，達到目前啟用中的
+-- 「房間」類型總數，就是包棟。只往 false → true 補，不會把管理員手動勾成包棟的訂單改掉。
+-- 可重複執行：已經是 true 的不會再被選中。
+UPDATE public.bookings b
+SET whole_house = true
+WHERE COALESCE(b.whole_house, false) = false
+  AND (SELECT COUNT(*) FROM public.room_types rt WHERE rt.type = '房間' AND rt.is_active IS DISTINCT FROM false) > 0
+  AND (SELECT COUNT(DISTINCT br.room_type_id) FROM public.booking_rooms br WHERE br.booking_id = b.id)
+      >= (SELECT COUNT(*) FROM public.room_types rt WHERE rt.type = '房間' AND rt.is_active IS DISTINCT FROM false);
+
+-- 執行後查詢確認結果：
+-- SELECT order_number, whole_house, room_type_label FROM public.bookings WHERE whole_house = true ORDER BY created_at DESC LIMIT 20;

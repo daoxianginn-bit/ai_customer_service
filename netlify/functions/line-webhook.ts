@@ -2046,6 +2046,17 @@ async function finishBookingFlow(
     const securityDeposit = openedRooms.rooms.reduce((sum, r) => sum + (roomDepositById.get(r.id) ?? 0), 0);
     const amounts = computeOrderAmounts(total, securityDeposit, Number(settings.deposit_percent ?? 0));
 
+    // 是否包棟：這欄以前被寫死成 false，於是「開了全部房間」的訂單在後台一律顯示成非包棟，
+    // 房型欄看到的是一長串房間名稱、Google 行事曆也不會標「·包棟」，而且 checkBookingConflict
+    // 的包棟捷徑（包棟訂單跟任何重疊訂單都算衝突）永遠不會生效。
+    //
+    // 判斷方式以「實際開了哪幾間房」為準——那是 booking_rooms、檔期衝突檢查共同認定的事實；
+    // 顧客在流程裡明確回答過「要包棟」時也算數（流程有設 whole_house 欄位才會收集得到），
+    // 兩者取聯集：漏標成非包棟會讓衝突檢查少擋一層，比多標一層危險。
+    const activeRoomCount = (data.roomTypes || []).filter((rt: any) => rt.is_active !== false).length;
+    const allRoomsOpened = activeRoomCount > 0 && openedRooms.rooms.length >= activeRoomCount;
+    const isWholeHouse = allRoomsOpened || quoteValues.whole_house === 'true';
+
     const { data: updatedBooking, error: updateError } = await supabase
       .from('bookings')
       .update({
@@ -2055,7 +2066,7 @@ async function finishBookingFlow(
         checkout_date: checkoutIso,
         nights,
         headcount,
-        whole_house: false,
+        whole_house: isWholeHouse,
         room_amount: amounts.room_amount,
         security_deposit: amounts.security_deposit,
         total_amount: amounts.total_amount,
@@ -2367,7 +2378,9 @@ async function handleBookingConfirmation(
   let hasConflict = false;
   try {
     hasConflict = await checkBookingConflict(
-      { checkin_date: booking.checkin_date, checkout_date: booking.checkout_date, whole_house: false, roomTypeIdsByNight },
+      // 這裡以前也是寫死 false，等於包棟訂單在確認階段拿不到「跟任何重疊訂單都算衝突」那層保護，
+      // 只靠逐間房比對。現在 whole_house 會被正確寫入了（見 finishBookingFlow），照實傳。
+      { checkin_date: booking.checkin_date, checkout_date: booking.checkout_date, whole_house: !!booking.whole_house, roomTypeIdsByNight },
       // 這筆訂單如果是「客人改了日期重新報價」產生的，它取代掉的舊訂單等一下就會被取消，
       // 不該把自己的替身當成撞期對象。
       [booking.id, booking.supersedes_booking_id || '']
