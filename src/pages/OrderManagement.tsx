@@ -19,6 +19,10 @@ import { RoomOption, roomLabel } from '../lib/rooms';
 
 const PAGE_SIZE = 15;
 
+// 訂單清單自動刷新的間隔。LINE 自動成立的訂單會在客服沒有操作的情況下出現，
+// 固定重新查詢才不會讓畫面停在半分鐘前的狀態。
+const AUTO_REFRESH_MS = 30000;
+
 const FILTER_STATUS_OPTIONS = [{ value: '', label: '全部狀態（不含已取消）' }, ...BOOKING_STATUS_OPTIONS, ...SYSTEM_ONLY_STATUSES];
 
 interface OrderForm {
@@ -326,6 +330,28 @@ export default function OrderManagement() {
     runQuery(0);
   }, []);
 
+  // 每 30 秒自動刷新一次，讓客服不用自己按「查詢」也看得到 LINE 剛進來的新訂單與狀態變化。
+  //
+  // 用 ref 存「當下這一版的刷新動作」，setInterval 只負責固定時間呼叫它。若改成把 keyword、
+  // status、page 這些值列進 useEffect 的依賴，使用者每打一個字都會清掉計時器重新計時，
+  // 一直在打字就永遠等不到 30 秒；而只依賴 [] 又會讓 interval 內永遠讀到第一次 render 的
+  // 舊值，刷新出來的是初始條件而不是目前畫面上的篩選。
+  const autoRefreshRef = useRef<() => void>(() => {});
+  autoRefreshRef.current = () => {
+    // 編輯視窗開著時不動：使用者正在改這張單，背景把底下的資料換掉只會造成混淆。
+    if (showForm) return;
+    // 分頁在背景時不查：沒有人在看，卻每 30 秒打一次資料庫。
+    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+    runQuery(page, undefined, { silent: true });
+    fetchStatusCounts();
+    fetchSummaries();
+  };
+
+  useEffect(() => {
+    const timer = setInterval(() => autoRefreshRef.current(), AUTO_REFRESH_MS);
+    return () => clearInterval(timer);
+  }, []);
+
   // 「訂單流程狀態」進度列的即時筆數：輕量查詢（只抓 status 欄位），前端算每個狀態幾筆。
   const fetchStatusCounts = async () => {
     const { data } = await supabase.from('bookings').select('status');
@@ -479,10 +505,15 @@ export default function OrderManagement() {
 
   // overrides：呼叫端剛 setState 但還沒生效的最新值，優先用這個而不是 state，
   // 道理跟 selectStatusFilter 上面的說明一樣——不要靠 setTimeout 賭 state 更新的時機。
+  // opts.silent：每 30 秒自動刷新用。背景刷新不能表現得像使用者自己按了「查詢」——
+  // 不顯示「載入中」（列表每半分鐘閃一次很干擾）、不清掉批次勾選（正在勾要刪的訂單會被清空）、
+  // 也不把右側詳情跳回第一筆（游標底下的內容突然換掉）。
   const runQuery = async (
     pageIndex: number,
-    overrides?: Partial<{ keyword: string; startDate: string; endDate: string; status: string; roomType: string; manualOnly: boolean }>
+    overrides?: Partial<{ keyword: string; startDate: string; endDate: string; status: string; roomType: string; manualOnly: boolean }>,
+    opts?: { silent?: boolean }
   ) => {
+    const silent = !!opts?.silent;
     const eff = {
       keyword: overrides?.keyword ?? keyword,
       startDate: overrides?.startDate ?? startDate,
@@ -491,7 +522,7 @@ export default function OrderManagement() {
       roomType: overrides?.roomType ?? roomType,
       manualOnly: overrides?.manualOnly ?? manualOnly,
     };
-    setLoading(true);
+    if (!silent) setLoading(true);
     let query = supabase
       .from('bookings')
       .select('*')
@@ -522,11 +553,17 @@ export default function OrderManagement() {
       setHasMore(nextRows.length === PAGE_SIZE);
       // 右側詳情永遠對應一筆真的還在清單裡的訂單：換頁或改篩選後，原本選的那筆
       // 可能已經不在這一頁了，留著會變成看著一筆清單上找不到的單在操作。
-      setSelectedOrder((prev: any) => nextRows.find((r: any) => r.id === prev?.id) || nextRows[0] || null);
+      // 背景刷新時只更新原本那筆的內容（帶回最新狀態/金額），找不到就維持原狀，
+      // 不要在使用者沒動作的情況下自己跳到第一筆。
+      setSelectedOrder((prev: any) => {
+        const same = nextRows.find((r: any) => r.id === prev?.id);
+        if (same) return same;
+        return silent ? prev : nextRows[0] || null;
+      });
     }
     setPage(pageIndex);
-    setSelectedIds([]);
-    setLoading(false);
+    if (!silent) setSelectedIds([]);
+    if (!silent) setLoading(false);
   };
 
   // 「查看待我處理」：一次看完所有卡在人工關卡的訂單（流程 3/5/8 ＋ 例外流程）。
