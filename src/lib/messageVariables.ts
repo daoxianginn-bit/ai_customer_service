@@ -188,6 +188,29 @@ const EXTRA_VARIABLE_SECTION: Record<string, string> = {
 export interface PlaceholderGroup {
   label: string;
   items: string[];
+  /**
+   * 這一區的變數在目前這個編輯器算不出值。四個編輯器列出的分區刻意完全一樣（不然改了一邊
+   * 就會跟別處走鐘），但洗滌單的品項數量只有洗滌單排程統計得出來，插到客人訊息裡不會被替換、
+   * 會原樣寄出去。標記起來讓編輯器把它畫成警示色，並在真的插進去時提醒。
+   */
+  inert?: boolean;
+  /** inert 時顯示給編輯者看的說明。 */
+  note?: string;
+}
+
+/** 洗滌單自己的欄位。名稱必須跟 scheduled-tasks-run.ts 的 sendLaundryNotice() 算出來的 fields 一致。 */
+export const LAUNDRY_SHEET_VARIABLES = ['日期', '訂單數', '布巾明細'];
+export const LAUNDRY_SECTION_LABEL = '洗滌單';
+export const LINEN_SECTION_LABEL = '布巾備品洗滌成本';
+
+/**
+ * 布巾品項在洗滌單範本裡的變數名稱。必須跟後端 scheduled-tasks-run.ts 的 laundryItemName()
+ * 一致，否則按鈕插進去的變數替換不到、會原樣出現在發給洗滌廠的訊息裡。
+ */
+export function laundryItemName(item: { category: string; spec?: string | null; short_name?: string | null }): string {
+  const short = (item.short_name || '').trim();
+  if (short) return short;
+  return item.spec ? `${item.category}－${item.spec}` : item.category;
 }
 
 /**

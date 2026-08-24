@@ -3,7 +3,7 @@ import { supabase } from '../lib/supabase';
 import { Clock, Plus, Pencil, Trash2, AlertTriangle, CheckCircle2, XCircle, PlayCircle } from 'lucide-react';
 import { PageHeader, Button, Modal, ConfirmDialog, Switch, EmptyState } from '../components/ui';
 import { Recurrence, ScheduleConfig, computeNextRunAt, describeSchedule, MIN_INTERVAL_MINUTES } from '../lib/scheduleRecurrence';
-import { groupVariablesBySection } from '../lib/messageVariables';
+import { useTemplateVariables } from '../hooks/useTemplateVariables';
 import MessageTemplateEditor from '../components/MessageTemplateEditor';
 
 // 排程類型清單：之後新增排程類型（定時寄信、到期通知、LINE 分眾發送...）只需要在這裡多加一筆，
@@ -209,15 +209,7 @@ interface LineContactOption { line_user_id: string; nickname: string | null; cha
 // 洗滌單收件人：群組或個別聯絡人都可以。一定要連 channel_id 一起存——LINE 的 push 目標
 // 不分 userId／groupId，但憑證要用該對象所屬官方帳號的，用錯帳號一定推不出去。
 interface LaundryRecipient { id: string; channel_id: string }
-interface LinenItemOption { id: string; category: string; spec: string | null; short_name: string | null; display_order: number }
 
-// 品項在洗滌單範本裡的變數名稱。必須跟後端 scheduled-tasks-run.ts 的 laundryItemName() 一致，
-// 否則按鈕插進去的變數替換不到、會原樣出現在發出去的訊息裡。
-function laundryItemName(item: LinenItemOption): string {
-  const short = (item.short_name || '').trim();
-  if (short) return short;
-  return item.spec ? `${item.category}－${item.spec}` : item.category;
-}
 interface GroupOption { id: string; name: string; channel_id: string }
 
 export default function ScheduledTasks() {
@@ -228,9 +220,8 @@ export default function ScheduledTasks() {
   const [templates, setTemplates] = useState<TemplateOption[]>([]);
   const [groups, setGroups] = useState<GroupOption[]>([]);
   const [lineGroups, setLineGroups] = useState<LineGroupOption[]>([]);
-  const [linenItems, setLinenItems] = useState<LinenItemOption[]>([]);
-  // 洗滌單範本也能插入一般訂單變數，分區方式跟其他範本編輯器一致。
-  const [orderVariables, setOrderVariables] = useState<{ variable_name: string; field_key: string }[]>([]);
+  // 快捷插入清單（含分區）。四個範本編輯器共用同一份來源，見 useTemplateVariables。
+  const templateVars = useTemplateVariables('laundry');
   // 洗滌單群組清單要先選官方帳號再挑群組：群組是掛在各自的官方帳號底下的（實務上通常只有
   // 廠商用帳號才被邀進群組），全部混在一起列會分不清楚哪個群組屬於哪個帳號。
   // 這只是畫面上的篩選，不寫進 config——發送時後端會照 line_groups 記的帳號去拿憑證。
@@ -271,35 +262,19 @@ export default function ScheduledTasks() {
   // 「客製訊息範本」跟「通知名單」的下拉選單資料，跟 scheduled_tasks 本身無關，
   // 獨立查一次即可，不用每次開表單都重查。
   const fetchTemplateAndGroupOptions = async () => {
-    const [templateRes, groupRes, channelRes, lineGroupRes, linenItemRes, variableRes] = await Promise.all([
+    const [templateRes, groupRes, channelRes, lineGroupRes] = await Promise.all([
       supabase.from('custom_message_templates').select('id, title').order('created_at'),
       supabase.from('notification_recipient_groups').select('id, name, channel_id').order('created_at', { ascending: false }),
       supabase.from('line_channels').select('id, name'),
       // 機器人被邀進去的 LINE 群組聊天室（洗滌單發送對象）。只列還在使用中的。
       supabase.from('line_groups').select('group_id, name, channel_id, chat_type').eq('is_active', true).order('last_message_at', { ascending: false, nullsFirst: false }),
-      // 洗滌單範本的快捷插入鈕：每個啟用中的布巾品項各一個變數。
-      supabase.from('linen_items').select('id, category, spec, short_name, display_order').eq('is_active', true).order('display_order'),
-      supabase.from('message_variables').select('variable_name, field_key').order('display_order'),
     ]);
     setTemplates(templateRes.data || []);
     setGroups(groupRes.data || []);
     setLineGroups(lineGroupRes.data || []);
-    setLinenItems(linenItemRes.data || []);
-    setOrderVariables(variableRes.data || []);
     setChannelNameById(Object.fromEntries((channelRes.data || []).map((c: any) => [c.id, c.name])));
   };
 
-  // 洗滌單編輯器的兩層快捷選單：先是洗滌單自己的欄位與布巾品項，接著才是一般訂單變數
-  // （住宿與客人資料／費用資訊／款項核對與備註），分區規則跟其他範本編輯器共用同一份設定。
-  const laundryPlaceholderGroups = useMemo(
-    () =>
-      [
-        { label: '洗滌單', items: ['日期', '訂單數', '布巾明細'] },
-        { label: '布巾備品洗滌成本', items: linenItems.map(laundryItemName) },
-        ...groupVariablesBySection(orderVariables, ['今日日期', '明日日期']),
-      ].filter((g) => g.items.length > 0),
-    [linenItems, orderVariables]
-  );
   const openNew = () => {
     setEditingId(null);
     setForm(emptyForm());
@@ -627,8 +602,7 @@ export default function ScheduledTasks() {
             <MessageTemplateEditor
               value={form.laundry_template}
               onChange={(v) => setForm({ ...form, laundry_template: v })}
-              placeholders={['日期', '訂單數', '布巾明細', ...linenItems.map(laundryItemName), ...orderVariables.map((v) => v.variable_name)]}
-              placeholderGroups={laundryPlaceholderGroups}
+              {...templateVars}
               rows={10}
               placeholder={`日期:[日期]
 [布巾明細]

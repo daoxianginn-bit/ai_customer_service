@@ -7,7 +7,8 @@ import {
 import MessageTemplateEditor from '../components/MessageTemplateEditor';
 import VariableText from '../components/VariableText';
 import { PageHeader, Button, ConfirmDialog, Switch, EmptyState } from '../components/ui';
-import { TriggerRule, KeywordMatch, parseTriggerRules, serializeTriggerRules, groupVariablesBySection } from '../lib/messageVariables';
+import { TriggerRule, KeywordMatch, parseTriggerRules, serializeTriggerRules } from '../lib/messageVariables';
+import { useTemplateVariables } from '../hooks/useTemplateVariables';
 
 const NO_PURPOSE_OPTION = { value: '', label: '無（純收集資訊）' };
 
@@ -216,9 +217,8 @@ function ReplyModeSummary({ mode }: { mode: 'ai' | 'system' }) {
 export default function StandardMessages() {
   const [loading, setLoading] = useState(true);
   const [flows, setFlows] = useState<Flow[]>([]);
-  const [variables, setVariables] = useState<string[]>([]);
-  // 快捷插入的分區（住宿與客人資料／費用資訊…），依變數對應的欄位分好，見 groupVariablesBySection。
-  const [variableGroups, setVariableGroups] = useState<{ label: string; items: string[] }[]>([]);
+  // 快捷插入清單（含分區）。四個範本編輯器共用同一份來源，見 useTemplateVariables。
+  const templateVars = useTemplateVariables();
   const [roomCapacities, setRoomCapacities] = useState<number[]>([]);
   const [errorMsg, setErrorMsg] = useState('');
   const [warningMsg, setWarningMsg] = useState('');
@@ -266,11 +266,9 @@ export default function StandardMessages() {
   const fetchAll = async () => {
     setLoading(true);
     setErrorMsg('');
-    const [flowRes, stepRes, varRes, roomRes] = await Promise.all([
+    const [flowRes, stepRes, roomRes] = await Promise.all([
       supabase.from('booking_flows').select('*').order('display_order'),
       supabase.from('booking_flow_steps').select('*').order('step_order'),
-      // 連 field_key 一起拿：範本編輯器的快捷插入要依對應欄位分區。
-      supabase.from('message_variables').select('variable_name, field_key').order('display_order'),
       supabase.from('room_types').select('capacity').eq('type', '房間').eq('is_active', true),
     ]);
 
@@ -312,8 +310,6 @@ export default function StandardMessages() {
     }));
 
     setFlows(list);
-    setVariables((varRes.data || []).map((v: any) => v.variable_name));
-    setVariableGroups(groupVariablesBySection(varRes.data || [], ['今日日期', '明日日期']));
     setRoomCapacities(
       Array.from(new Set((roomRes.data || []).map((r: any) => r.capacity).filter((c: any) => Number.isFinite(c)))).sort((a: any, b: any) => a - b)
     );
@@ -739,8 +735,7 @@ export default function StandardMessages() {
                               <MessageTemplateEditor
                                 value={step.message_template}
                                 onChange={(v) => updateStep(si, { message_template: v })}
-                                placeholders={variables}
-                            placeholderGroups={variableGroups}
+                                {...templateVars}
                                 rows={3}
                                 placeholder="例如：請問您預計的入住與退房日期？"
                               />
@@ -823,7 +818,7 @@ export default function StandardMessages() {
                         current.steps.map((step) => (
                           <div key={step.step_order} className="bg-gray-50 rounded-lg p-3">
                             <p className="text-xs text-gray-400 mb-1.5">步驟 {step.step_order} · 送出訊息</p>
-                            <VariableText value={step.message_template} knownVariables={variables} />
+                            <VariableText value={step.message_template} knownVariables={templateVars.placeholders} />
                             {step.fields.length > 0 && (
                               <p className="text-xs text-gray-500 mt-2 pt-2 border-t border-gray-200">
                                 要取得：
@@ -875,14 +870,13 @@ export default function StandardMessages() {
                             <MessageTemplateEditor
                               value={draft!.incomplete_message}
                               onChange={(v) => patchDraft({ incomplete_message: v })}
-                              placeholders={variables}
-                            placeholderGroups={variableGroups}
+                              {...templateVars}
                               rows={4}
                               placeholder="感謝您提供的資訊！我們已經收到，將由客服人員盡快為您確認詳細報價，謝謝您的耐心等候 🙏"
                             />
                           ) : (
                             <div className="bg-gray-50 rounded-lg p-3">
-                              <VariableText value={current.incomplete_message || '（未設定，會用內建預設文字）'} knownVariables={variables} />
+                              <VariableText value={current.incomplete_message || '（未設定，會用內建預設文字）'} knownVariables={templateVars.placeholders} />
                             </div>
                           )}
                         </div>
@@ -897,14 +891,13 @@ export default function StandardMessages() {
                           <MessageTemplateEditor
                             value={draft!.quote_message}
                             onChange={(v) => patchDraft({ quote_message: v })}
-                            placeholders={variables}
-                            placeholderGroups={variableGroups}
+                            {...templateVars}
                             rows={8}
                           />
                         </>
                       ) : (
                         <div className="bg-gray-50 rounded-lg p-3">
-                          <VariableText value={current.quote_message} knownVariables={variables} />
+                          <VariableText value={current.quote_message} knownVariables={templateVars.placeholders} />
                           <p className="text-xs text-gray-400 mt-2 pt-2 border-t border-gray-200">送出後等顧客回覆「是」繼續、「否」取消。</p>
                         </div>
                       )}
@@ -922,14 +915,13 @@ export default function StandardMessages() {
                           <MessageTemplateEditor
                             value={draft!.confirm_message}
                             onChange={(v) => patchDraft({ confirm_message: v })}
-                            placeholders={variables}
-                            placeholderGroups={variableGroups}
+                            {...templateVars}
                             rows={10}
                           />
                         </>
                       ) : (
                         <div className="bg-gray-50 rounded-lg p-3">
-                          <VariableText value={current.confirm_message} knownVariables={variables} />
+                          <VariableText value={current.confirm_message} knownVariables={templateVars.placeholders} />
                           <p className="flex items-center gap-1.5 text-xs text-gray-400 mt-2 pt-2 border-t border-gray-200">
                             <UserRound className="w-3.5 h-3.5" />
                             訂單建立為「待預定」，實際入帳目前由人工在「訂單管理」核對後改成「已預定」。
@@ -954,14 +946,13 @@ export default function StandardMessages() {
                             <MessageTemplateEditor
                               value={draft!.remittance_received_message}
                               onChange={(v) => patchDraft({ remittance_received_message: v })}
-                              placeholders={variables}
-                            placeholderGroups={variableGroups}
+                              {...templateVars}
                               rows={3}
                               placeholder="好的，已收到您的訊息，我們核對後會盡快為您確認訂房，謝謝您的耐心等候 🙏"
                             />
                           ) : (
                             <div className="bg-gray-50 rounded-lg p-3">
-                              <VariableText value={current.remittance_received_message || '（未設定，會用內建預設文字）'} knownVariables={variables} />
+                              <VariableText value={current.remittance_received_message || '（未設定，會用內建預設文字）'} knownVariables={templateVars.placeholders} />
                             </div>
                           )}
                           <p className="text-xs text-gray-400 mt-1">
@@ -977,14 +968,13 @@ export default function StandardMessages() {
                             <MessageTemplateEditor
                               value={draft!.taken_message}
                               onChange={(v) => patchDraft({ taken_message: v })}
-                              placeholders={variables}
-                            placeholderGroups={variableGroups}
+                              {...templateVars}
                               rows={4}
                               placeholder={'非常抱歉，[已被預訂日期] 剛剛已經被其他客人預訂走了，這次沒辦法為您保留 🙏\n如果您想改其他日期，直接把新的日期與人數傳給我們就可以重新為您試算。'}
                             />
                           ) : (
                             <div className="bg-gray-50 rounded-lg p-3">
-                              <VariableText value={current.taken_message || '（未設定，會用內建預設文字）'} knownVariables={variables} />
+                              <VariableText value={current.taken_message || '（未設定，會用內建預設文字）'} knownVariables={templateVars.placeholders} />
                             </div>
                           )}
                           <p className="text-xs text-gray-400 mt-1">
@@ -1009,14 +999,13 @@ export default function StandardMessages() {
                           <MessageTemplateEditor
                             value={draft!.found_message}
                             onChange={(v) => patchDraft({ found_message: v })}
-                            placeholders={variables}
-                            placeholderGroups={variableGroups}
+                            {...templateVars}
                             rows={5}
                             placeholder={'您的訂單狀態：[訂單狀態]\n入住日期：[入住日期]\n退房日期：[退房日期]\n總金額：[總金額]'}
                           />
                         ) : (
                           <div className="bg-gray-50 rounded-lg p-3">
-                            <VariableText value={current.found_message || '（未設定，會用內建預設文字）'} knownVariables={variables} />
+                            <VariableText value={current.found_message || '（未設定，會用內建預設文字）'} knownVariables={templateVars.placeholders} />
                           </div>
                         )}
                       </div>
@@ -1026,14 +1015,13 @@ export default function StandardMessages() {
                           <MessageTemplateEditor
                             value={draft!.not_found_message}
                             onChange={(v) => patchDraft({ not_found_message: v })}
-                            placeholders={variables}
-                            placeholderGroups={variableGroups}
+                            {...templateVars}
                             rows={3}
                             placeholder="不好意思，查無這筆訂單資料，請確認訂單編號是否正確，或點選「真人客服」協助查詢。"
                           />
                         ) : (
                           <div className="bg-gray-50 rounded-lg p-3">
-                            <VariableText value={current.not_found_message || '（未設定，會用內建預設文字）'} knownVariables={variables} />
+                            <VariableText value={current.not_found_message || '（未設定，會用內建預設文字）'} knownVariables={templateVars.placeholders} />
                           </div>
                         )}
                       </div>
@@ -1048,8 +1036,7 @@ export default function StandardMessages() {
                         <MessageTemplateEditor
                           value={draft!.completion_message}
                           onChange={(v) => patchDraft({ completion_message: v })}
-                          placeholders={variables}
-                            placeholderGroups={variableGroups}
+                          {...templateVars}
                           rows={6}
                           placeholder="感謝您提供的資訊，我們已經收到了！"
                         />
@@ -1064,7 +1051,7 @@ export default function StandardMessages() {
                       </>
                     ) : (
                       <div className="bg-gray-50 rounded-lg p-3">
-                        <VariableText value={current.completion_message || '（未設定，會用內建預設文字）'} knownVariables={variables} />
+                        <VariableText value={current.completion_message || '（未設定，會用內建預設文字）'} knownVariables={templateVars.placeholders} />
                         <p className="text-xs text-gray-400 mt-2 pt-2 border-t border-gray-200">
                           {current.notify_agent_on_complete ? '完成後會通知真人客服' : '完成後不會通知真人客服'}
                         </p>

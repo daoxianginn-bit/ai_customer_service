@@ -2,7 +2,7 @@ import { Handler } from '@netlify/functions';
 import { Client } from '@line/bot-sdk';
 import { createClient } from '@supabase/supabase-js';
 import { randomUUID, createSign } from 'crypto';
-import { parseCsvKeywords, buildMergeFields, MessageVariable, computeTodayTomorrowFields } from '../../src/lib/messageVariables';
+import { parseCsvKeywords, buildMergeFields, MessageVariable, computeTodayTomorrowFields, laundryItemName } from '../../src/lib/messageVariables';
 import { computeNextRunAt, ScheduleConfig } from '../../src/lib/scheduleRecurrence';
 import { OCCUPYING_STATUSES, BALANCE_PAID_STATUSES } from '../../src/lib/bookingStatus';
 import { parseIcsEvents } from '../../src/lib/icsParser';
@@ -346,14 +346,6 @@ async function pushTextToLineTargets(targets: { id: string; channel_id: string }
     }
   }
   return { pushed };
-}
-
-// 洗滌單上顯示的品項名稱，同時也是它在範本裡的變數名稱。前端的快捷插入鈕用同一套規則產生
-// （見 ScheduledTasks.tsx 的 laundryPlaceholders），兩邊必須一致，否則插進去的變數會替換不到。
-function laundryItemName(item: { category: string; spec?: string | null; short_name?: string | null }): string {
-  const short = (item.short_name || '').trim();
-  if (short) return short;
-  return item.spec ? `${item.category}－${item.spec}` : item.category;
 }
 
 /** 8/23 這種短日期，洗滌單上不需要年份。 */

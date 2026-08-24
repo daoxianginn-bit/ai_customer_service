@@ -5,7 +5,7 @@ import MessageTemplateEditor from '../components/MessageTemplateEditor';
 import { PageHeader, Button, Modal, ConfirmDialog, StatusBadge } from '../components/ui';
 import { BOOKING_STATUS_OPTIONS } from '../lib/bookingStatus';
 import { channelRoleLabel } from '../lib/lineChannels';
-import { groupVariablesBySection } from '../lib/messageVariables';
+import { useTemplateVariables } from '../hooks/useTemplateVariables';
 
 interface ChannelOption {
   id: string;
@@ -126,9 +126,8 @@ export default function CustomMessageSending() {
 
   const [querying, setQuerying] = useState(false);
   const [rows, setRows] = useState<OrderRow[]>([]);
-  const [variables, setVariables] = useState<string[]>([]);
-  // 快捷插入的分區（住宿與客人資料／費用資訊…），依變數對應的欄位分好，見 groupVariablesBySection。
-  const [variableGroups, setVariableGroups] = useState<{ label: string; items: string[] }[]>([]);
+  // 快捷插入清單（含分區）。四個範本編輯器共用同一份來源，見 useTemplateVariables。
+  const templateVars = useTemplateVariables();
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   const [page, setPage] = useState(0);
 
@@ -153,7 +152,6 @@ export default function CustomMessageSending() {
   useEffect(() => {
     fetchTemplates();
     fetchRoomTypeOptions();
-    fetchVariables();
     fetchChannels();
     runQuery();
   }, []);
@@ -222,18 +220,6 @@ export default function CustomMessageSending() {
     return (c.nickname || '').toLowerCase().includes(kw) || c.line_user_id.toLowerCase().includes(kw);
   });
 
-  // 可用變數清單獨立於訂單查詢自己抓一次。
-  // 原本只在 runQuery() 成功時才會被填入（來自 custom-messages function 的回傳），
-  // 造成兩個問題：訂單查詢查不到資料時 variables 會被清成空陣列，範本裡原本正常的
-  // [變數] 全部變成「不在清單裡」的黃色警告、下方快捷插入鈕也整排消失。
-  // 變數清單跟查到幾筆訂單本來就沒有關係，改成跟「訊息變數資料維護」同一個來源直接查。
-  const fetchVariables = async () => {
-    // 連 field_key 一起拿：範本編輯器的快捷插入要依對應欄位分區（住宿與客人資料／費用資訊…）。
-    const { data } = await supabase.from('message_variables').select('variable_name, field_key').order('display_order');
-    setVariables((data || []).map((v: any) => v.variable_name));
-    setVariableGroups(groupVariablesBySection(data || [], ['今日日期', '明日日期']));
-  };
-
   const fetchTemplates = async () => {
     const { data } = await supabase.from('custom_message_templates').select('*').order('created_at');
     setTemplates(data || []);
@@ -270,8 +256,6 @@ export default function CustomMessageSending() {
         roomType: roomType === '包棟' ? '包棟' : roomTypeOptions.find((r) => r.id === roomType)?.name || '',
       });
       setRows(result.rows || []);
-      // 只有真的拿到清單才覆蓋；查無訂單時 function 會回空陣列，不能拿它把變數清單洗掉
-      if (result.variables?.length) setVariables(result.variables);
     } catch (e: any) {
       alert(`查詢失敗：${e.message}`);
     } finally {
@@ -287,7 +271,6 @@ export default function CustomMessageSending() {
     try {
       const result = await callCustomMessagesFunction('customers', { keyword });
       setCustomerRows(result.rows || []);
-      if (result.variables?.length) setVariables(result.variables);
     } catch (e: any) {
       alert(`查詢失敗：${e.message}`);
     } finally {
@@ -909,8 +892,7 @@ export default function CustomMessageSending() {
               )}
             </div>
 
-            <MessageTemplateEditor value={draftBody} onChange={setDraftBody} placeholders={variables}
-            placeholderGroups={variableGroups} rows={14} placeholder="輸入訊息內容，或點下方快捷欄位插入合併欄位" />
+            <MessageTemplateEditor value={draftBody} onChange={setDraftBody} {...templateVars} rows={14} placeholder="輸入訊息內容，或點下方快捷欄位插入合併欄位" />
 
             <div className="flex flex-wrap gap-2 pt-1">
               <button onClick={saveDraftAsTemplate} className="flex items-center gap-1 px-3 py-1.5 border rounded-lg text-xs text-gray-600 hover:bg-gray-50">
@@ -1007,8 +989,7 @@ export default function CustomMessageSending() {
               <MessageTemplateEditor
                 value={editingTemplate.body}
                 onChange={(v) => setEditingTemplate({ ...editingTemplate, body: v })}
-                placeholders={variables}
-                placeholderGroups={variableGroups}
+                {...templateVars}
                 rows={10}
               />
             </div>

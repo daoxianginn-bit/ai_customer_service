@@ -49,9 +49,27 @@ export default function MessageTemplateEditor({ value, onChange, placeholders, p
   const knownNames = useMemo(() => new Set([...placeholders, ...ALWAYS_AVAILABLE_VARIABLES]), [placeholders]);
   const segments = useMemo(() => parseTemplateSegments(value), [value]);
   const unknownNames = useMemo(() => findUnknownVariables(value, placeholders), [value, placeholders]);
+  // 四個編輯器列出的分區完全一樣，但有些分區的變數在這裡算不出值（例如客人訊息裡的洗滌單品項）。
+  // 光把按鈕畫成警示色不夠——真的插進去了要明講，否則 [床包(中)紅線] 會原樣寄到客人手上。
+  const inertNames = useMemo(() => {
+    const inert = new Set((placeholderGroups || []).filter((g) => g.inert).flatMap((g) => g.items));
+    if (inert.size === 0) return [] as string[];
+    const used = segments.filter((seg) => seg.type === 'variable' && inert.has(seg.name)).map((seg: any) => seg.name);
+    return [...new Set(used)];
+  }, [segments, placeholderGroups]);
+  const inertNote = useMemo(
+    () => (placeholderGroups || []).find((g) => g.inert && g.note)?.note || '',
+    [placeholderGroups]
+  );
   const quickInsertNames = useMemo(
     () => [...placeholders, ...QUICK_INSERT_EXTRA_VARIABLES.filter((n) => !placeholders.includes(n))],
     [placeholders]
+  );
+
+  // 沒選過就是第一區，這樣打開就看得到東西；選過的分區被移除時（例如品項全部停用）也退回第一區。
+  const currentGroup = useMemo(
+    () => (placeholderGroups || []).find((g) => g.label === activeGroup) || (placeholderGroups || [])[0],
+    [placeholderGroups, activeGroup]
   );
 
   const insertPlaceholder = (name: string) => {
@@ -125,29 +143,46 @@ export default function MessageTemplateEditor({ value, onChange, placeholders, p
         </p>
       )}
 
-      {placeholderGroups && placeholderGroups.length > 0 ? (
+      {inertNames.length > 0 && (
+        <p className="flex items-start gap-1.5 mt-2 text-xs text-amber-700">
+          <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+          <span>{inertNames.map((n) => `[${n}]`).join('、')} {inertNote}</span>
+        </p>
+      )}
+
+      {placeholderGroups && placeholderGroups.length > 0 && currentGroup ? (
         <div className="mt-2 space-y-2">
           <select
-            value={activeGroup || placeholderGroups[0].label}
+            value={currentGroup.label}
             onChange={(e) => setActiveGroup(e.target.value)}
             className="w-full px-3 py-2 border rounded-lg text-sm bg-white"
           >
             {placeholderGroups.map((g) => (
-              <option key={g.label} value={g.label}>{g.label}（{g.items.length}）</option>
+              <option key={g.label} value={g.label}>
+                {g.label}（{g.items.length}）{g.inert ? '：此處不會有值' : ''}
+              </option>
             ))}
           </select>
           <div className="flex flex-wrap gap-2">
-            {(placeholderGroups.find((g) => g.label === (activeGroup || placeholderGroups[0].label))?.items || []).map((p) => (
+            {(currentGroup?.items || []).map((p) => (
               <button
                 key={p}
                 type="button"
                 onClick={() => insertPlaceholder(p)}
-                className="px-3 py-1 text-xs bg-gray-100 hover:bg-green-100 hover:text-green-800 text-gray-700 rounded-full border border-gray-200 transition-colors"
+                title={currentGroup?.inert ? currentGroup.note : undefined}
+                className={
+                  currentGroup?.inert
+                    ? 'px-3 py-1 text-xs bg-amber-50 hover:bg-amber-100 text-amber-800 rounded-full border border-amber-300 border-dashed transition-colors'
+                    : 'px-3 py-1 text-xs bg-gray-100 hover:bg-green-100 hover:text-green-800 text-gray-700 rounded-full border border-gray-200 transition-colors'
+                }
               >
                 {p}
               </button>
             ))}
           </div>
+          {currentGroup?.inert && currentGroup.note && (
+            <p className="text-xs text-amber-700">{currentGroup.note}</p>
+          )}
         </div>
       ) : quickInsertNames.length > 0 ? (
         <div className="flex flex-wrap gap-2 mt-2">
