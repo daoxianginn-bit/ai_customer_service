@@ -5,6 +5,7 @@ import MessageTemplateEditor from '../components/MessageTemplateEditor';
 import { PageHeader, Button, Modal, ConfirmDialog, StatusBadge } from '../components/ui';
 import { BOOKING_STATUS_OPTIONS } from '../lib/bookingStatus';
 import { channelRoleLabel } from '../lib/lineChannels';
+import { groupVariablesBySection } from '../lib/messageVariables';
 
 interface ChannelOption {
   id: string;
@@ -126,6 +127,8 @@ export default function CustomMessageSending() {
   const [querying, setQuerying] = useState(false);
   const [rows, setRows] = useState<OrderRow[]>([]);
   const [variables, setVariables] = useState<string[]>([]);
+  // 快捷插入的分區（住宿與客人資料／費用資訊…），依變數對應的欄位分好，見 groupVariablesBySection。
+  const [variableGroups, setVariableGroups] = useState<{ label: string; items: string[] }[]>([]);
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   const [page, setPage] = useState(0);
 
@@ -225,8 +228,10 @@ export default function CustomMessageSending() {
   // [變數] 全部變成「不在清單裡」的黃色警告、下方快捷插入鈕也整排消失。
   // 變數清單跟查到幾筆訂單本來就沒有關係，改成跟「訊息變數資料維護」同一個來源直接查。
   const fetchVariables = async () => {
-    const { data } = await supabase.from('message_variables').select('variable_name').order('display_order');
+    // 連 field_key 一起拿：範本編輯器的快捷插入要依對應欄位分區（住宿與客人資料／費用資訊…）。
+    const { data } = await supabase.from('message_variables').select('variable_name, field_key').order('display_order');
     setVariables((data || []).map((v: any) => v.variable_name));
+    setVariableGroups(groupVariablesBySection(data || [], ['今日日期', '明日日期']));
   };
 
   const fetchTemplates = async () => {
@@ -904,7 +909,8 @@ export default function CustomMessageSending() {
               )}
             </div>
 
-            <MessageTemplateEditor value={draftBody} onChange={setDraftBody} placeholders={variables} rows={14} placeholder="輸入訊息內容，或點下方快捷欄位插入合併欄位" />
+            <MessageTemplateEditor value={draftBody} onChange={setDraftBody} placeholders={variables}
+            placeholderGroups={variableGroups} rows={14} placeholder="輸入訊息內容，或點下方快捷欄位插入合併欄位" />
 
             <div className="flex flex-wrap gap-2 pt-1">
               <button onClick={saveDraftAsTemplate} className="flex items-center gap-1 px-3 py-1.5 border rounded-lg text-xs text-gray-600 hover:bg-gray-50">

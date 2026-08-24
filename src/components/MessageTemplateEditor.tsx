@@ -1,11 +1,17 @@
 import { useMemo, useRef, useState } from 'react';
 import { AlertTriangle } from 'lucide-react';
-import { parseTemplateSegments, findUnknownVariables, ALWAYS_AVAILABLE_VARIABLES } from '../lib/messageVariables';
+import { parseTemplateSegments, findUnknownVariables, ALWAYS_AVAILABLE_VARIABLES, PlaceholderGroup } from '../lib/messageVariables';
 
 interface MessageTemplateEditorProps {
   value: string;
   onChange: (v: string) => void;
   placeholders: string[]; // 不含方括號，例如 ['姓名', '入住日期']
+  /**
+   * 有給就把快捷插入改成兩層（先選分區、再點變數）。變數一多時，一整排幾十顆按鈕
+   * 要用眼睛掃過去才找得到想要的；分區之後對應的是使用者本來就熟悉的訂單表單區塊。
+   * 沒給就維持原本的一排按鈕，呼叫端不用一次全部改。
+   */
+  placeholderGroups?: PlaceholderGroup[];
   rows?: number;
   placeholder?: string;
 }
@@ -33,10 +39,12 @@ const QUICK_INSERT_EXTRA_VARIABLES = ['今日日期', '明日日期'];
  * 讓編輯者一眼看得出哪一段是會被替換掉的。作法是「透明文字的 textarea 疊在著色層上」，
  * 而不是 contentEditable——contentEditable 配中文輸入法在組字階段很容易吃掉字或跳游標。
  */
-export default function MessageTemplateEditor({ value, onChange, placeholders, rows = 8, placeholder }: MessageTemplateEditorProps) {
+export default function MessageTemplateEditor({ value, onChange, placeholders, placeholderGroups, rows = 8, placeholder }: MessageTemplateEditorProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const backdropRef = useRef<HTMLDivElement>(null);
   const [composing, setComposing] = useState(false);
+  // 目前展開的分區。預設第一區，這樣打開就看得到東西，不會是一片空白。
+  const [activeGroup, setActiveGroup] = useState('');
 
   const knownNames = useMemo(() => new Set([...placeholders, ...ALWAYS_AVAILABLE_VARIABLES]), [placeholders]);
   const segments = useMemo(() => parseTemplateSegments(value), [value]);
@@ -117,7 +125,31 @@ export default function MessageTemplateEditor({ value, onChange, placeholders, r
         </p>
       )}
 
-      {quickInsertNames.length > 0 && (
+      {placeholderGroups && placeholderGroups.length > 0 ? (
+        <div className="mt-2 space-y-2">
+          <select
+            value={activeGroup || placeholderGroups[0].label}
+            onChange={(e) => setActiveGroup(e.target.value)}
+            className="w-full px-3 py-2 border rounded-lg text-sm bg-white"
+          >
+            {placeholderGroups.map((g) => (
+              <option key={g.label} value={g.label}>{g.label}（{g.items.length}）</option>
+            ))}
+          </select>
+          <div className="flex flex-wrap gap-2">
+            {(placeholderGroups.find((g) => g.label === (activeGroup || placeholderGroups[0].label))?.items || []).map((p) => (
+              <button
+                key={p}
+                type="button"
+                onClick={() => insertPlaceholder(p)}
+                className="px-3 py-1 text-xs bg-gray-100 hover:bg-green-100 hover:text-green-800 text-gray-700 rounded-full border border-gray-200 transition-colors"
+              >
+                {p}
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : quickInsertNames.length > 0 ? (
         <div className="flex flex-wrap gap-2 mt-2">
           {quickInsertNames.map((p) => (
             <button
@@ -130,7 +162,7 @@ export default function MessageTemplateEditor({ value, onChange, placeholders, r
             </button>
           ))}
         </div>
-      )}
+      ) : null}
     </div>
   );
 }

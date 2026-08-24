@@ -612,6 +612,10 @@ export default function ScheduledTasks() {
               value={form.laundry_template}
               onChange={(v) => setForm({ ...form, laundry_template: v })}
               placeholders={['日期', '訂單數', '布巾明細', ...linenItems.map(laundryItemName)]}
+              placeholderGroups={[
+                { label: '洗滌單', items: ['日期', '訂單數', '布巾明細'] },
+                { label: '布巾備品洗滌成本', items: linenItems.map(laundryItemName) },
+              ].filter((g) => g.items.length > 0)}
               rows={10}
               placeholder={`日期:[日期]
 [布巾明細]

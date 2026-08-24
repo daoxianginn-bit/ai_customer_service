@@ -7,7 +7,7 @@ import {
 import MessageTemplateEditor from '../components/MessageTemplateEditor';
 import VariableText from '../components/VariableText';
 import { PageHeader, Button, ConfirmDialog, Switch, EmptyState } from '../components/ui';
-import { TriggerRule, KeywordMatch, parseTriggerRules, serializeTriggerRules } from '../lib/messageVariables';
+import { TriggerRule, KeywordMatch, parseTriggerRules, serializeTriggerRules, groupVariablesBySection } from '../lib/messageVariables';
 
 const NO_PURPOSE_OPTION = { value: '', label: '無（純收集資訊）' };
 
@@ -217,6 +217,8 @@ export default function StandardMessages() {
   const [loading, setLoading] = useState(true);
   const [flows, setFlows] = useState<Flow[]>([]);
   const [variables, setVariables] = useState<string[]>([]);
+  // 快捷插入的分區（住宿與客人資料／費用資訊…），依變數對應的欄位分好，見 groupVariablesBySection。
+  const [variableGroups, setVariableGroups] = useState<{ label: string; items: string[] }[]>([]);
   const [roomCapacities, setRoomCapacities] = useState<number[]>([]);
   const [errorMsg, setErrorMsg] = useState('');
   const [warningMsg, setWarningMsg] = useState('');
@@ -267,7 +269,8 @@ export default function StandardMessages() {
     const [flowRes, stepRes, varRes, roomRes] = await Promise.all([
       supabase.from('booking_flows').select('*').order('display_order'),
       supabase.from('booking_flow_steps').select('*').order('step_order'),
-      supabase.from('message_variables').select('variable_name').order('display_order'),
+      // 連 field_key 一起拿：範本編輯器的快捷插入要依對應欄位分區。
+      supabase.from('message_variables').select('variable_name, field_key').order('display_order'),
       supabase.from('room_types').select('capacity').eq('type', '房間').eq('is_active', true),
     ]);
 
@@ -310,6 +313,7 @@ export default function StandardMessages() {
 
     setFlows(list);
     setVariables((varRes.data || []).map((v: any) => v.variable_name));
+    setVariableGroups(groupVariablesBySection(varRes.data || [], ['今日日期', '明日日期']));
     setRoomCapacities(
       Array.from(new Set((roomRes.data || []).map((r: any) => r.capacity).filter((c: any) => Number.isFinite(c)))).sort((a: any, b: any) => a - b)
     );
@@ -736,6 +740,7 @@ export default function StandardMessages() {
                                 value={step.message_template}
                                 onChange={(v) => updateStep(si, { message_template: v })}
                                 placeholders={variables}
+                            placeholderGroups={variableGroups}
                                 rows={3}
                                 placeholder="例如：請問您預計的入住與退房日期？"
                               />
@@ -871,6 +876,7 @@ export default function StandardMessages() {
                               value={draft!.incomplete_message}
                               onChange={(v) => patchDraft({ incomplete_message: v })}
                               placeholders={variables}
+                            placeholderGroups={variableGroups}
                               rows={4}
                               placeholder="感謝您提供的資訊！我們已經收到，將由客服人員盡快為您確認詳細報價，謝謝您的耐心等候 🙏"
                             />
@@ -892,6 +898,7 @@ export default function StandardMessages() {
                             value={draft!.quote_message}
                             onChange={(v) => patchDraft({ quote_message: v })}
                             placeholders={variables}
+                            placeholderGroups={variableGroups}
                             rows={8}
                           />
                         </>
@@ -916,6 +923,7 @@ export default function StandardMessages() {
                             value={draft!.confirm_message}
                             onChange={(v) => patchDraft({ confirm_message: v })}
                             placeholders={variables}
+                            placeholderGroups={variableGroups}
                             rows={10}
                           />
                         </>
@@ -947,6 +955,7 @@ export default function StandardMessages() {
                               value={draft!.remittance_received_message}
                               onChange={(v) => patchDraft({ remittance_received_message: v })}
                               placeholders={variables}
+                            placeholderGroups={variableGroups}
                               rows={3}
                               placeholder="好的，已收到您的訊息，我們核對後會盡快為您確認訂房，謝謝您的耐心等候 🙏"
                             />
@@ -969,6 +978,7 @@ export default function StandardMessages() {
                               value={draft!.taken_message}
                               onChange={(v) => patchDraft({ taken_message: v })}
                               placeholders={variables}
+                            placeholderGroups={variableGroups}
                               rows={4}
                               placeholder={'非常抱歉，[已被預訂日期] 剛剛已經被其他客人預訂走了，這次沒辦法為您保留 🙏\n如果您想改其他日期，直接把新的日期與人數傳給我們就可以重新為您試算。'}
                             />
@@ -1000,6 +1010,7 @@ export default function StandardMessages() {
                             value={draft!.found_message}
                             onChange={(v) => patchDraft({ found_message: v })}
                             placeholders={variables}
+                            placeholderGroups={variableGroups}
                             rows={5}
                             placeholder={'您的訂單狀態：[訂單狀態]\n入住日期：[入住日期]\n退房日期：[退房日期]\n總金額：[總金額]'}
                           />
@@ -1016,6 +1027,7 @@ export default function StandardMessages() {
                             value={draft!.not_found_message}
                             onChange={(v) => patchDraft({ not_found_message: v })}
                             placeholders={variables}
+                            placeholderGroups={variableGroups}
                             rows={3}
                             placeholder="不好意思，查無這筆訂單資料，請確認訂單編號是否正確，或點選「真人客服」協助查詢。"
                           />
@@ -1037,6 +1049,7 @@ export default function StandardMessages() {
                           value={draft!.completion_message}
                           onChange={(v) => patchDraft({ completion_message: v })}
                           placeholders={variables}
+                            placeholderGroups={variableGroups}
                           rows={6}
                           placeholder="感謝您提供的資訊，我們已經收到了！"
                         />

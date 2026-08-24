@@ -139,6 +139,87 @@ export function computeTodayTomorrowFields(): Record<string, string> {
 }
 
 // ------------------------------------------------------------------------
+// 變數分區：範本編輯器的快捷插入改成兩層（先選分區、再選變數）之後用的對照。
+// 分區名稱刻意跟「訂單管理」編輯畫面的區塊一致——編輯範本的人腦中想的是「我要插入訂單上
+// 費用那一區的某個欄位」，分區跟他看到的表單長得一樣，才不用在心裡再翻譯一次。
+// ------------------------------------------------------------------------
+export const VARIABLE_SECTIONS = {
+  guest: '住宿與客人資料',
+  fee: '費用資訊',
+  payment: '款項核對與備註',
+  business: '民宿資訊',
+  common: '常用',
+} as const;
+
+// 欄位 → 分區。沒列到的欄位歸「常用」，不會消失。
+const FIELD_SECTION: Record<string, string> = {
+  order_number: VARIABLE_SECTIONS.guest,
+  name: VARIABLE_SECTIONS.guest,
+  phone: VARIABLE_SECTIONS.guest,
+  nickname: VARIABLE_SECTIONS.guest,
+  line_user_id: VARIABLE_SECTIONS.guest,
+  last_message_at: VARIABLE_SECTIONS.guest,
+  first_message_at: VARIABLE_SECTIONS.guest,
+  checkin_date: VARIABLE_SECTIONS.guest,
+  checkout_date: VARIABLE_SECTIONS.guest,
+  headcount: VARIABLE_SECTIONS.guest,
+  adults_kids: VARIABLE_SECTIONS.guest,
+  whole_house: VARIABLE_SECTIONS.guest,
+  room_type_label: VARIABLE_SECTIONS.guest,
+  room_amount: VARIABLE_SECTIONS.fee,
+  security_deposit: VARIABLE_SECTIONS.fee,
+  total_amount: VARIABLE_SECTIONS.fee,
+  deposit: VARIABLE_SECTIONS.fee,
+  balance_due: VARIABLE_SECTIONS.fee,
+  status: VARIABLE_SECTIONS.payment,
+  business_name: VARIABLE_SECTIONS.business,
+  customer_service_line: VARIABLE_SECTIONS.business,
+  booking_gift_message: VARIABLE_SECTIONS.business,
+};
+
+// 不在對照表裡、由呼叫端即時算出來的變數各自的分區。
+const EXTRA_VARIABLE_SECTION: Record<string, string> = {
+  匯款日時間: VARIABLE_SECTIONS.payment,
+  入住密碼: VARIABLE_SECTIONS.payment,
+  今日日期: VARIABLE_SECTIONS.common,
+  明日日期: VARIABLE_SECTIONS.common,
+};
+
+export interface PlaceholderGroup {
+  label: string;
+  items: string[];
+}
+
+/**
+ * 把「訊息變數資料維護」設定的變數，依對應欄位分成幾區給編輯器用。
+ * 分區順序固定（跟訂單編輯畫面由上而下一致），空的分區不回傳。
+ */
+export function groupVariablesBySection(
+  variables: { variable_name: string; field_key: string }[],
+  extras: string[] = []
+): PlaceholderGroup[] {
+  const order = [
+    VARIABLE_SECTIONS.guest,
+    VARIABLE_SECTIONS.fee,
+    VARIABLE_SECTIONS.payment,
+    VARIABLE_SECTIONS.business,
+    VARIABLE_SECTIONS.common,
+  ];
+  const bucket = new Map<string, string[]>(order.map((k) => [k, []]));
+
+  for (const v of variables) {
+    const section = FIELD_SECTION[v.field_key] || VARIABLE_SECTIONS.common;
+    bucket.get(section)!.push(v.variable_name);
+  }
+  for (const name of extras) {
+    const section = EXTRA_VARIABLE_SECTION[name] || VARIABLE_SECTIONS.common;
+    if (!bucket.get(section)!.includes(name)) bucket.get(section)!.push(name);
+  }
+
+  return order.map((label) => ({ label, items: bucket.get(label)! })).filter((g) => g.items.length > 0);
+}
+
+// ------------------------------------------------------------------------
 // 訊息範本切段：把 "您好 [姓名]" 切成 [文字, 變數]，
 // 供編輯器上色與檢視模式渲染綠色標籤共用，避免兩邊的判斷規則走鐘。
 // 方括號裡不允許換行或巢狀括號，才算是一個變數 token。
