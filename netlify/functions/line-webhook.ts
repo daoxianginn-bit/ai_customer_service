@@ -254,7 +254,7 @@ async function handleGroupEvent(lineEvent: any, lineClient: Client, channel: Lin
     try { name = (await lineClient.getGroupSummary(groupId)).groupName; } catch {}
   }
 
-  await supabase.from('line_groups').upsert({
+  const { error } = await supabase.from('line_groups').upsert({
     channel_id: channel.id,
     group_id: groupId,
     name,
@@ -263,6 +263,23 @@ async function handleGroupEvent(lineEvent: any, lineClient: Client, channel: Lin
     last_message_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
   }, { onConflict: 'channel_id,group_id' });
+
+  // 這裡失敗過去是完全靜默的：這個函式在 processLineEvent 的 try 之外被呼叫，錯誤會一路
+  // 冒到 handler 的 Promise.allSettled 被吃掉，後台只看得到「群組還是 0」卻查不出原因。
+  // 最典型的情況是程式部署了但 supabase_schema.sql 還沒執行，chat_type 這個欄位不存在，
+  // 於是每一次群組事件都寫入失敗。把錯誤寫進「操作紀錄」，至少查得到。
+  if (error) {
+    console.error('[LineGroup] upsert failed:', error.message);
+    await writeOperationLog(supabase, {
+      feature: 'line-webhook',
+      action: '群組記錄失敗',
+      target: groupId,
+      actorType: 'system',
+      actorName: SYSTEM_ACTOR,
+      level: 'error',
+      errorMessage: `${channel.name}｜${isRoom ? '多人聊天室' : '群組'}｜${error.message}`,
+    });
+  }
 }
 
 async function processLineEvent(
@@ -273,7 +290,22 @@ async function processLineEvent(
 ): Promise<void> {
   const sourceType = (lineEvent as any).source?.type;
   if (sourceType === 'group' || sourceType === 'room') {
-    await handleGroupEvent(lineEvent, lineClient, channel);
+    // 這裡在下面那個 try 之外，例外會一路冒到 handler 的 Promise.allSettled 被吃掉，
+    // 變成「群組永遠記錄不到」卻沒有任何線索。自己接住並留下紀錄。
+    try {
+      await handleGroupEvent(lineEvent, lineClient, channel);
+    } catch (e: any) {
+      console.error('[LineGroup] handle failed:', e?.message || e);
+      await writeOperationLog(supabase, {
+        feature: 'line-webhook',
+        action: '群組事件處理失敗',
+        target: (lineEvent as any).source?.groupId || (lineEvent as any).source?.roomId || null,
+        actorType: 'system',
+        actorName: SYSTEM_ACTOR,
+        level: 'error',
+        errorMessage: `${channel.name}｜${e?.message || e}`,
+      });
+    }
     return;
   }
 
