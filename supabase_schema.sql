@@ -546,13 +546,14 @@ FROM (VALUES
     ('總金額', 'booking', 'total_amount', 12),
     ('總報價', 'booking', 'total_amount', 13),
     ('訂金', 'booking', 'deposit', 14),
-    ('尾款', 'booking', 'balance_due', 15),
-    ('電話', 'booking', 'phone', 16),
-    ('LINE暱稱', 'customer', 'nickname', 17),
-    ('LINE User ID', 'customer', 'line_user_id', 18),
-    ('禮金內容', 'settings', 'booking_gift_message', 19),
-    ('民宿名稱', 'settings', 'business_name', 20),
-    ('客服LINE', 'settings', 'customer_service_line', 21)
+    ('押金', 'booking', 'security_deposit', 15),
+    ('尾款', 'booking', 'balance_due', 16),
+    ('電話', 'booking', 'phone', 17),
+    ('LINE暱稱', 'customer', 'nickname', 18),
+    ('LINE User ID', 'customer', 'line_user_id', 19),
+    ('禮金內容', 'settings', 'booking_gift_message', 20),
+    ('民宿名稱', 'settings', 'business_name', 21),
+    ('客服LINE', 'settings', 'customer_service_line', 22)
 ) AS v(variable_name, source, field_key, display_order)
 WHERE NOT EXISTS (SELECT 1 FROM public.message_variables)
 ON CONFLICT (variable_name) DO NOTHING;
@@ -1283,6 +1284,24 @@ WHERE COALESCE(whole_house, false) = false
 
 -- 執行後查詢確認結果：
 -- SELECT order_number, whole_house, room_type_label FROM public.bookings ORDER BY created_at DESC LIMIT 20;
+
+-- 12.3 既有安裝補上「押金」變數。
+--
+-- 成因：上面 8.4 的預設變數清單漏了 security_deposit（有訂金、尾款、總金額，就是沒有押金），
+-- 所以範本編輯器的「費用資訊」區一直少一個押金可以插入。清單本身已補上，但那段 INSERT 的條件
+-- 是「整張表是空的才種」（刻意的，避免管理員刪掉的變數每次重跑腳本都復活），既有安裝不會生效，
+-- 要在這裡單獨補。
+--
+-- 只在「目前沒有任何變數指向 security_deposit」時才補，已經自己建過的（不管取什麼名字）不會多一筆。
+-- 跟 12.2 一樣有這個性質：之後若在「訊息變數資料維護」把押金刪掉，重跑這份腳本會被補回來。
+INSERT INTO public.message_variables (variable_name, source, field_key, display_order)
+SELECT '押金', 'booking', 'security_deposit',
+       COALESCE((SELECT MAX(display_order) FROM public.message_variables), 0) + 1
+WHERE NOT EXISTS (SELECT 1 FROM public.message_variables WHERE field_key = 'security_deposit')
+ON CONFLICT (variable_name) DO NOTHING;
+
+-- 執行後查詢確認結果：
+-- SELECT variable_name, source, field_key, display_order FROM public.message_variables ORDER BY display_order;
 
 -- 洗滌單簡稱：發給洗滌廠的訊息裡要顯示的短名稱（例如「床包(中)紅線」）。
 -- linen_items 原本的 category＋spec 是給成本計算與後台辨識用的完整名稱（例如
