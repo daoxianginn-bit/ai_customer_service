@@ -92,11 +92,16 @@ const rawHandler: Handler = async (event) => {
       const [{ data: contacts }, { data: groups }, { data: lineGroups }] = await Promise.all([
         supabase.from('user_states').select('line_user_id, nickname').eq('channel_id', channelId).order('last_message_at', { ascending: false, nullsFirst: false }),
         supabase.from('notification_recipient_groups').select('id, name, line_user_ids').eq('channel_id', channelId).order('created_at', { ascending: false }),
-        supabase.from('line_groups').select('group_id, name').eq('channel_id', channelId).eq('is_active', true).order('last_message_at', { ascending: false, nullsFirst: false }),
+        supabase.from('line_groups').select('group_id, name, chat_type').eq('channel_id', channelId).eq('is_active', true).order('last_message_at', { ascending: false, nullsFirst: false }),
       ]);
       const contactList = [
         ...(contacts || []).map((c: any) => ({ line_user_id: c.line_user_id, nickname: c.nickname, is_group: false })),
-        ...(lineGroups || []).map((g: any) => ({ line_user_id: g.group_id, nickname: g.name || '（未取得群組名稱）', is_group: true })),
+        ...(lineGroups || []).map((g: any) => ({
+          line_user_id: g.group_id,
+          // room（多人聊天室）沒有名稱這個概念，顯示成「多人聊天室」才不會被誤認為抓取失敗。
+          nickname: g.name || (g.chat_type === 'room' ? '多人聊天室' : '（未取得群組名稱）'),
+          is_group: true,
+        })),
       ];
       return { statusCode: 200, body: JSON.stringify({ contacts: contactList, groups: groups || [] }) };
     }

@@ -1289,3 +1289,7 @@ WHERE COALESCE(whole_house, false) = false
 -- 「床包－平紋貢緞床包-5x6.2尺-高28cm紅線」），直接貼進洗滌單會又長又難讀。
 -- 留空時洗滌訊息會退回顯示完整名稱，所以不填也不會出錯。
 ALTER TABLE public.linen_items ADD COLUMN IF NOT EXISTS short_name TEXT NOT NULL DEFAULT '';
+
+-- LINE 的多人聊天有兩種：group（群組，有名稱）與 room（多人聊天室，沒有名稱）。
+-- 兩者都記在 line_groups，用這一欄區分，後台才知道那筆沒有名稱是正常的、不是抓失敗。
+ALTER TABLE public.line_groups ADD COLUMN IF NOT EXISTS chat_type TEXT NOT NULL DEFAULT 'group';

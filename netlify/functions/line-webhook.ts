@@ -224,8 +224,14 @@ const rawHandler: Handler = async (event) => {
 // 裡面任何人講話都不代表「這位客人要訂房」，混進去會被 AI 誤判成客人訊息去回覆
 // （這是修這個功能之前真實會發生的問題：group 訊息的 source.userId 常常是 undefined，
 // 舊版程式碼直接用 lineEvent.source.userId! 硬轉型，等於把 undefined 當成一個使用者處理）。
+//
+// LINE 有兩種多人聊天：group（群組，有名稱）與 room（多人聊天室，沒有名稱，是把好友直接拉在一起的
+// 那種）。以前只處理 group，room 完全被忽略——機器人明明在裡面、後台卻永遠列不出來，
+// 也就永遠沒辦法選它當發送對象。兩者都存進 line_groups，用 chat_type 區分；room 沒有名稱可查，
+// 名稱留空由畫面顯示成「多人聊天室」。
 async function handleGroupEvent(lineEvent: any, lineClient: Client, channel: LineChannel): Promise<void> {
-  const groupId: string | undefined = lineEvent.source?.groupId;
+  const isRoom = lineEvent.source?.type === 'room';
+  const groupId: string | undefined = isRoom ? lineEvent.source?.roomId : lineEvent.source?.groupId;
   if (!groupId) return;
 
   if (lineEvent.type === 'leave') {
@@ -242,7 +248,8 @@ async function handleGroupEvent(lineEvent: any, lineClient: Client, channel: Lin
     .select('name').eq('channel_id', channel.id).eq('group_id', groupId).maybeSingle();
 
   let name = existing?.name || null;
-  if (!name) {
+  // room 沒有名稱這個概念，LINE 也沒有對應的查詢端點，只有 group 查得到摘要。
+  if (!name && !isRoom) {
     // 拿不到摘要（權限不足／群組已解散）不影響記錄本身，名稱留空，後台顯示群組 ID 代替。
     try { name = (await lineClient.getGroupSummary(groupId)).groupName; } catch {}
   }
@@ -251,6 +258,7 @@ async function handleGroupEvent(lineEvent: any, lineClient: Client, channel: Lin
     channel_id: channel.id,
     group_id: groupId,
     name,
+    chat_type: isRoom ? 'room' : 'group',
     is_active: true,
     last_message_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
@@ -263,7 +271,8 @@ async function processLineEvent(
   lineClient: Client,
   channel: LineChannel
 ): Promise<void> {
-  if ((lineEvent as any).source?.type === 'group') {
+  const sourceType = (lineEvent as any).source?.type;
+  if (sourceType === 'group' || sourceType === 'room') {
     await handleGroupEvent(lineEvent, lineClient, channel);
     return;
   }

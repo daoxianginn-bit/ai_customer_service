@@ -203,7 +203,7 @@ function formatDateTime(iso: string | null): string {
 }
 
 interface TemplateOption { id: string; title: string }
-interface LineGroupOption { group_id: string; name: string | null; channel_id: string }
+interface LineGroupOption { group_id: string; name: string | null; channel_id: string; chat_type?: string | null }
 interface LineContactOption { line_user_id: string; nickname: string | null; channel_id: string }
 // 洗滌單收件人：群組或個別聯絡人都可以。一定要連 channel_id 一起存——LINE 的 push 目標
 // 不分 userId／groupId，但憑證要用該對象所屬官方帳號的，用錯帳號一定推不出去。
@@ -273,7 +273,7 @@ export default function ScheduledTasks() {
       supabase.from('notification_recipient_groups').select('id, name, channel_id').order('created_at', { ascending: false }),
       supabase.from('line_channels').select('id, name'),
       // 機器人被邀進去的 LINE 群組聊天室（洗滌單發送對象）。只列還在使用中的。
-      supabase.from('line_groups').select('group_id, name, channel_id').eq('is_active', true).order('last_message_at', { ascending: false, nullsFirst: false }),
+      supabase.from('line_groups').select('group_id, name, channel_id, chat_type').eq('is_active', true).order('last_message_at', { ascending: false, nullsFirst: false }),
       // 洗滌單範本的快捷插入鈕：每個啟用中的布巾品項各一個變數。
       supabase.from('linen_items').select('id, category, spec, short_name, display_order').eq('is_active', true).order('display_order'),
     ]);
@@ -668,8 +668,12 @@ NG:0
                         onChange={() => toggleRecipient(g.group_id, g.channel_id)}
                         className="w-4 h-4"
                       />
-                      <span className="text-gray-700">{g.name || '（未取得群組名稱）'}</span>
-                      <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-blue-50 text-blue-600 border border-blue-200">群組</span>
+                      <span className="text-gray-700">
+                        {g.name || (g.chat_type === 'room' ? `多人聊天室（${g.group_id.slice(0, 8)}…）` : '（未取得群組名稱）')}
+                      </span>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-blue-50 text-blue-600 border border-blue-200">
+                        {g.chat_type === 'room' ? '多人聊天室' : '群組'}
+                      </span>
                     </label>
                   ))}
 
