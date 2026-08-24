@@ -1008,6 +1008,7 @@ export default function CustomMessageSending() {
                 value={editingTemplate.body}
                 onChange={(v) => setEditingTemplate({ ...editingTemplate, body: v })}
                 placeholders={variables}
+                placeholderGroups={variableGroups}
                 rows={10}
               />
             </div>

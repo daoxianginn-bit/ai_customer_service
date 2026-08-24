@@ -3,6 +3,7 @@ import { supabase } from '../lib/supabase';
 import { Clock, Plus, Pencil, Trash2, AlertTriangle, CheckCircle2, XCircle, PlayCircle } from 'lucide-react';
 import { PageHeader, Button, Modal, ConfirmDialog, Switch, EmptyState } from '../components/ui';
 import { Recurrence, ScheduleConfig, computeNextRunAt, describeSchedule, MIN_INTERVAL_MINUTES } from '../lib/scheduleRecurrence';
+import { groupVariablesBySection } from '../lib/messageVariables';
 import MessageTemplateEditor from '../components/MessageTemplateEditor';
 
 // 排程類型清單：之後新增排程類型（定時寄信、到期通知、LINE 分眾發送...）只需要在這裡多加一筆，
@@ -228,6 +229,8 @@ export default function ScheduledTasks() {
   const [groups, setGroups] = useState<GroupOption[]>([]);
   const [lineGroups, setLineGroups] = useState<LineGroupOption[]>([]);
   const [linenItems, setLinenItems] = useState<LinenItemOption[]>([]);
+  // 洗滌單範本也能插入一般訂單變數，分區方式跟其他範本編輯器一致。
+  const [orderVariables, setOrderVariables] = useState<{ variable_name: string; field_key: string }[]>([]);
   // 洗滌單群組清單要先選官方帳號再挑群組：群組是掛在各自的官方帳號底下的（實務上通常只有
   // 廠商用帳號才被邀進群組），全部混在一起列會分不清楚哪個群組屬於哪個帳號。
   // 這只是畫面上的篩選，不寫進 config——發送時後端會照 line_groups 記的帳號去拿憑證。
@@ -268,7 +271,7 @@ export default function ScheduledTasks() {
   // 「客製訊息範本」跟「通知名單」的下拉選單資料，跟 scheduled_tasks 本身無關，
   // 獨立查一次即可，不用每次開表單都重查。
   const fetchTemplateAndGroupOptions = async () => {
-    const [templateRes, groupRes, channelRes, lineGroupRes, linenItemRes] = await Promise.all([
+    const [templateRes, groupRes, channelRes, lineGroupRes, linenItemRes, variableRes] = await Promise.all([
       supabase.from('custom_message_templates').select('id, title').order('created_at'),
       supabase.from('notification_recipient_groups').select('id, name, channel_id').order('created_at', { ascending: false }),
       supabase.from('line_channels').select('id, name'),
@@ -276,14 +279,27 @@ export default function ScheduledTasks() {
       supabase.from('line_groups').select('group_id, name, channel_id, chat_type').eq('is_active', true).order('last_message_at', { ascending: false, nullsFirst: false }),
       // 洗滌單範本的快捷插入鈕：每個啟用中的布巾品項各一個變數。
       supabase.from('linen_items').select('id, category, spec, short_name, display_order').eq('is_active', true).order('display_order'),
+      supabase.from('message_variables').select('variable_name, field_key').order('display_order'),
     ]);
     setTemplates(templateRes.data || []);
     setGroups(groupRes.data || []);
     setLineGroups(lineGroupRes.data || []);
     setLinenItems(linenItemRes.data || []);
+    setOrderVariables(variableRes.data || []);
     setChannelNameById(Object.fromEntries((channelRes.data || []).map((c: any) => [c.id, c.name])));
   };
 
+  // 洗滌單編輯器的兩層快捷選單：先是洗滌單自己的欄位與布巾品項，接著才是一般訂單變數
+  // （住宿與客人資料／費用資訊／款項核對與備註），分區規則跟其他範本編輯器共用同一份設定。
+  const laundryPlaceholderGroups = useMemo(
+    () =>
+      [
+        { label: '洗滌單', items: ['日期', '訂單數', '布巾明細'] },
+        { label: '布巾備品洗滌成本', items: linenItems.map(laundryItemName) },
+        ...groupVariablesBySection(orderVariables, ['今日日期', '明日日期']),
+      ].filter((g) => g.items.length > 0),
+    [linenItems, orderVariables]
+  );
   const openNew = () => {
     setEditingId(null);
     setForm(emptyForm());
@@ -611,11 +627,8 @@ export default function ScheduledTasks() {
             <MessageTemplateEditor
               value={form.laundry_template}
               onChange={(v) => setForm({ ...form, laundry_template: v })}
-              placeholders={['日期', '訂單數', '布巾明細', ...linenItems.map(laundryItemName)]}
-              placeholderGroups={[
-                { label: '洗滌單', items: ['日期', '訂單數', '布巾明細'] },
-                { label: '布巾備品洗滌成本', items: linenItems.map(laundryItemName) },
-              ].filter((g) => g.items.length > 0)}
+              placeholders={['日期', '訂單數', '布巾明細', ...linenItems.map(laundryItemName), ...orderVariables.map((v) => v.variable_name)]}
+              placeholderGroups={laundryPlaceholderGroups}
               rows={10}
               placeholder={`日期:[日期]
 [布巾明細]
@@ -628,6 +641,8 @@ NG:0
               [布巾明細] 會自動展開成「品項：數量」多行；也可以改用下面每個品項各自的按鈕自己排版，
               那些變數帶入的是<strong>當日入住訂單的加總數量</strong>（沒用到的品項是 0）。
               品項名稱取自「備品管理」的洗滌單簡稱，改了簡稱記得回來重新插入。
+              訂單變數（[姓名]、[入住日期]…）也可以插入，但這張單子是<strong>當日多筆訂單的加總</strong>，
+              同一個變數在多筆訂單有不同值時會用「、」串起來，只有一筆訂單時就是原本的值。
             </p>
           </div>
         )}

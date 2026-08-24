@@ -230,9 +230,10 @@ async function advanceToAwaitingBalance(): Promise<{ ok: boolean; summary: strin
 }
 
 // 待入住(awaiting_checkin) → 入住中(checked_in)：今天 = 入住日。下午 1 點執行。
-async function advanceToCheckedIn(config: Record<string, any>): Promise<{ ok: boolean; summary: string }> {
+async function advanceToCheckedIn(config: Record<string, any>, settings: any): Promise<{ ok: boolean; summary: string }> {
   const today = taiwanTodayIso();
-  const { data, error } = await supabase.from('bookings').select('id, order_number').eq('status', 'awaiting_checkin').eq('checkin_date', today);
+  // 取整列而不只是 id：洗滌單範本可以插入訂單變數（[姓名]、[入住日期]...），要有完整欄位才算得出來。
+  const { data, error } = await supabase.from('bookings').select('*').eq('status', 'awaiting_checkin').eq('checkin_date', today);
   if (error) return { ok: false, summary: `查詢失敗：${error.message}` };
   if (!data?.length) return { ok: true, summary: '沒有今日入住、需要轉為入住中的訂單' };
   const { error: updateError } = await supabase.from('bookings').update({ status: 'checked_in', updated_at: new Date().toISOString() }).in('id', data.map((b) => b.id));
@@ -241,7 +242,7 @@ async function advanceToCheckedIn(config: Record<string, any>): Promise<{ ok: bo
 
   // 順便把今天要用的布巾數量彙整成洗滌單發到 LINE 群組。沒設定範本或群組時就只做狀態轉換，
   // 維持這支排程原本「純狀態轉換」的行為，既有安裝不會因為這次改版突然開始發訊息。
-  const laundry = await sendLaundryNotice(config, today, data.map((b) => b.id));
+  const laundry = await sendLaundryNotice(config, today, data, settings);
   return { ok: true, summary: `${data.length} 筆訂單已轉為入住中${laundry ? `；${laundry}` : ''}` };
 }
 
@@ -249,7 +250,8 @@ async function advanceToCheckedIn(config: Record<string, any>): Promise<{ ok: bo
 //
 // 品項名稱優先用「洗滌單簡稱」（例如「床包(中)紅線」）——linen_items 的 category＋spec 是給成本
 // 計算與後台辨識用的完整名稱，直接貼進洗滌單又長又難讀。沒填簡稱就退回完整名稱，不會漏掉品項。
-async function sendLaundryNotice(config: Record<string, any>, todayIso: string, bookingIds: string[]): Promise<string | null> {
+async function sendLaundryNotice(config: Record<string, any>, todayIso: string, bookings: any[], settings: any): Promise<string | null> {
+  const bookingIds = bookings.map((b) => b.id);
   // 收件人可以是 LINE 群組或個別聯絡人，兩者混在同一份清單裡：LINE 的 push 目標欄位不分
   // userId／groupId，差別只在要用哪個官方帳號的憑證推播，所以每一筆都記著自己的 channel_id。
   // line_group_ids 是這個功能最初版本的欄位，保留讀取，既有設定不會因為改版失效。
@@ -280,7 +282,21 @@ async function sendLaundryNotice(config: Record<string, any>, todayIso: string, 
 
   // 每個品項各自也是一個變數，讓管理員可以自己排版（例如只列某幾項、或跟別的文字混在同一行），
   // 不一定要用整包展開的 [布巾明細]。沒用到的品項數量是 0，直接寫 0 比留空白更符合洗滌單的讀法。
+  // 洗滌單範本也開放插入一般的訂單變數（[姓名]、[入住日期]、[訂金]...）。但這是「當日多筆訂單
+  // 的加總」，單筆訂單的欄位在多筆時沒有唯一值，所以把各筆的值去重後用「、」串起來——只有一筆
+  // 訂單時就等於原值（實務上最常見的情況）。不先算出來的話，管理員插了變數會原樣印在洗滌廠的訊息裡。
+  const variables = await fetchMessageVariablesList();
+  const orderFields: Record<string, string> = {};
+  for (const v of variables) {
+    const values = bookings
+      .map((b) => buildMergeFields([v], { booking: b, customer: { nickname: b.nickname, line_user_id: b.line_user_id }, settings })[v.variable_name])
+      .filter((x) => x !== undefined && String(x).trim() !== '');
+    orderFields[v.variable_name] = [...new Set(values)].join('、');
+  }
+
   const fields: Record<string, string> = {
+    // 洗滌單自己的欄位放在訂單變數之後，同名時以洗滌單的為準——這裡本來就是洗滌單的語境。
+    ...orderFields,
     日期: toSlashDateShort(todayIso),
     布巾明細: lines.join('\n'),
     訂單數: String(bookingIds.length),
