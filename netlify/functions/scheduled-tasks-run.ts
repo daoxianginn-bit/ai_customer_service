@@ -250,17 +250,52 @@ async function advanceToCheckedIn(config: Record<string, any>, settings: any): P
 //
 // 品項名稱優先用「洗滌單簡稱」（例如「床包(中)紅線」）——linen_items 的 category＋spec 是給成本
 // 計算與後台辨識用的完整名稱，直接貼進洗滌單又長又難讀。沒填簡稱就退回完整名稱，不會漏掉品項。
-async function sendLaundryNotice(config: Record<string, any>, todayIso: string, bookings: any[], settings: any): Promise<string | null> {
-  const bookingIds = bookings.map((b) => b.id);
-  // 收件人可以是 LINE 群組或個別聯絡人，兩者混在同一份清單裡：LINE 的 push 目標欄位不分
-  // userId／groupId，差別只在要用哪個官方帳號的憑證推播，所以每一筆都記著自己的 channel_id。
-  // line_group_ids 是這個功能最初版本的欄位，保留讀取，既有設定不會因為改版失效。
+// 排程的彙整通知（洗滌單、押金通知）都是同一套設定：一份寫在排程裡的範本 + 一份收件人清單。
+// 收件人可以是 LINE 群組或個別聯絡人，兩者混在同一份清單裡：LINE 的 push 目標欄位不分
+// userId／groupId，差別只在要用哪個官方帳號的憑證推播，所以每一筆都記著自己的 channel_id。
+interface NoticeSetup { template: string; recipients: { id: string; channel_id: string }[]; legacyGroupIds: string[] }
+
+function readNoticeSetup(config: Record<string, any>): NoticeSetup | null {
   const recipients: { id: string; channel_id: string }[] = Array.isArray(config?.line_recipients)
     ? config.line_recipients.filter((r: any) => r?.id && r?.channel_id)
     : [];
+  // line_group_ids 是這個功能最初版本的欄位，laundry_template 是只有洗滌單時的舊範本欄位名，
+  // 兩個都保留讀取，既有設定不會因為改版失效。
   const legacyGroupIds: string[] = Array.isArray(config?.line_group_ids) ? config.line_group_ids.filter(Boolean) : [];
-  const template: string = String(config?.laundry_template || '').trim();
+  const template = String(config?.notice_template ?? config?.laundry_template ?? '').trim();
   if (!template || (!recipients.length && !legacyGroupIds.length)) return null;
+  return { template, recipients, legacyGroupIds };
+}
+
+/**
+ * 彙整通知也開放插入一般的訂單變數（[姓名]、[入住日期]、[訂金]...）。但這是「當日多筆訂單的
+ * 彙整」，單筆訂單的欄位在多筆時沒有唯一值，所以把各筆的值去重後用「、」串起來——只有一筆訂單
+ * 時就等於原值（實務上最常見的情況）。不先算出來的話，管理員插了變數會原樣印在發出去的訊息裡。
+ */
+async function mergeOrderFieldsAcrossBookings(bookings: any[], settings: any): Promise<Record<string, string>> {
+  const variables = await fetchMessageVariablesList();
+  const fields: Record<string, string> = {};
+  for (const v of variables) {
+    const values = bookings
+      .map((b) => buildMergeFields([v], { booking: b, customer: { nickname: b.nickname, line_user_id: b.line_user_id }, settings })[v.variable_name])
+      .filter((x) => x !== undefined && String(x).trim() !== '');
+    fields[v.variable_name] = [...new Set(values)].join('、');
+  }
+  return fields;
+}
+
+async function pushNotice(setup: NoticeSetup, text: string, what: string): Promise<string> {
+  // 舊設定只存了群組 ID，沒存所屬帳號，得回頭查 line_groups 才知道要用哪個帳號的憑證。
+  const resolved = setup.recipients.length ? setup.recipients : await resolveLegacyGroupRecipients(setup.legacyGroupIds);
+  if (!resolved.length) return `${what}未發送：找不到指定的收件人（群組可能已停用或機器人已被移出）`;
+  const pushed = await pushTextToLineTargets(resolved, text);
+  return pushed.pushed ? `${what}已發送給 ${pushed.pushed} 個對象` : `${what}未發送：所有推播都失敗`;
+}
+
+async function sendLaundryNotice(config: Record<string, any>, todayIso: string, bookings: any[], settings: any): Promise<string | null> {
+  const setup = readNoticeSetup(config);
+  if (!setup) return null;
+  const bookingIds = bookings.map((b) => b.id);
 
   const [{ data: usage }, { data: items }] = await Promise.all([
     supabase.from('booking_linen_usage').select('linen_item_id, quantity').in('booking_id', bookingIds),
@@ -282,17 +317,7 @@ async function sendLaundryNotice(config: Record<string, any>, todayIso: string, 
 
   // 每個品項各自也是一個變數，讓管理員可以自己排版（例如只列某幾項、或跟別的文字混在同一行），
   // 不一定要用整包展開的 [布巾明細]。沒用到的品項數量是 0，直接寫 0 比留空白更符合洗滌單的讀法。
-  // 洗滌單範本也開放插入一般的訂單變數（[姓名]、[入住日期]、[訂金]...）。但這是「當日多筆訂單
-  // 的加總」，單筆訂單的欄位在多筆時沒有唯一值，所以把各筆的值去重後用「、」串起來——只有一筆
-  // 訂單時就等於原值（實務上最常見的情況）。不先算出來的話，管理員插了變數會原樣印在洗滌廠的訊息裡。
-  const variables = await fetchMessageVariablesList();
-  const orderFields: Record<string, string> = {};
-  for (const v of variables) {
-    const values = bookings
-      .map((b) => buildMergeFields([v], { booking: b, customer: { nickname: b.nickname, line_user_id: b.line_user_id }, settings })[v.variable_name])
-      .filter((x) => x !== undefined && String(x).trim() !== '');
-    orderFields[v.variable_name] = [...new Set(values)].join('、');
-  }
+  const orderFields = await mergeOrderFieldsAcrossBookings(bookings, settings);
 
   const fields: Record<string, string> = {
     // 洗滌單自己的欄位放在訂單變數之後，同名時以洗滌單的為準——這裡本來就是洗滌單的語境。
@@ -306,14 +331,39 @@ async function sendLaundryNotice(config: Record<string, any>, todayIso: string, 
   };
   for (const it of ordered) fields[laundryItemName(it)] = String(totals.get(it.id) ?? 0);
 
-  const text = mergeTemplate(template, fields);
+  return pushNotice(setup, mergeTemplate(setup.template, fields), '洗滌單');
+}
 
-  // 舊設定只存了群組 ID，沒存所屬帳號，得回頭查 line_groups 才知道要用哪個帳號的憑證。
-  const resolved = recipients.length ? recipients : await resolveLegacyGroupRecipients(legacyGroupIds);
-  if (!resolved.length) return '洗滌單未發送：找不到指定的收件人（群組可能已停用或機器人已被移出）';
+/**
+ * 押金通知：退房日轉「押金處理」之後，把這批訂單裡押金大於 0 的那幾筆彙整成一則訊息。
+ * 押金是 0 的訂單一樣會轉狀態（沒押金也還是走完流程），只是不會出現在這則通知裡。
+ */
+async function sendDepositNotice(config: Record<string, any>, todayIso: string, bookings: any[], settings: any): Promise<string | null> {
+  const setup = readNoticeSetup(config);
+  if (!setup) return null;
 
-  const pushed = await pushTextToLineTargets(resolved, text);
-  return pushed.pushed ? `洗滌單已發送給 ${pushed.pushed} 個對象` : '洗滌單未發送：所有推播都失敗';
+  const withDeposit = bookings.filter((b) => Number(b.security_deposit) > 0);
+  if (!withDeposit.length) return '這批訂單的押金都是 0，未發送押金通知';
+
+  const total = withDeposit.reduce((sum, b) => sum + Number(b.security_deposit), 0);
+  const lines = withDeposit.map((b) => {
+    const who = [b.order_number, b.name || b.nickname].filter(Boolean).join(' ');
+    return `${who}：${Number(b.security_deposit).toLocaleString()}`;
+  });
+
+  const fields: Record<string, string> = {
+    // 押金通知自己的欄位放在訂單變數之後，同名時以押金通知的為準——這裡本來就是押金通知的語境。
+    ...(await mergeOrderFieldsAcrossBookings(withDeposit, settings)),
+    日期: toSlashDateShort(todayIso),
+    訂單數: String(withDeposit.length),
+    押金總額: total.toLocaleString(),
+    押金明細: lines.join('\n'),
+    // [今日日期]／[明日日期] 在每個範本編輯器都是可插入的變數，這裡也要認得，
+    // 否則管理員插了它卻原樣出現在發出去的訊息裡。
+    ...computeTodayTomorrowFields(),
+  };
+
+  return pushNotice(setup, mergeTemplate(setup.template, fields), '押金通知');
 }
 
 async function resolveLegacyGroupRecipients(groupIds: string[]): Promise<{ id: string; channel_id: string }[]> {
@@ -355,15 +405,20 @@ function toSlashDateShort(iso: string): string {
 }
 
 // 入住中(checked_in) → 押金處理(deposit_processing)：今天 = 退房日。中午 12 點執行。
-async function advanceToDepositProcessing(): Promise<{ ok: boolean; summary: string }> {
+async function advanceToDepositProcessing(config: Record<string, any>, settings: any): Promise<{ ok: boolean; summary: string }> {
   const today = taiwanTodayIso();
-  const { data, error } = await supabase.from('bookings').select('id, order_number').eq('status', 'checked_in').eq('checkout_date', today);
+  // 取整列而不只是 id：通知要用到押金金額，範本也可以插入訂單變數（[姓名]、[退房日期]...）。
+  const { data, error } = await supabase.from('bookings').select('*').eq('status', 'checked_in').eq('checkout_date', today);
   if (error) return { ok: false, summary: `查詢失敗：${error.message}` };
   if (!data?.length) return { ok: true, summary: '沒有今日退房、需要轉為押金處理的訂單' };
   const { error: updateError } = await supabase.from('bookings').update({ status: 'deposit_processing', updated_at: new Date().toISOString() }).in('id', data.map((b) => b.id));
   if (updateError) return { ok: false, summary: `更新失敗：${updateError.message}` };
   await logStageAdvance(data, 'checked_in', 'deposit_processing', '退房日到，排程自動轉為押金處理');
-  return { ok: true, summary: `${data.length} 筆訂單已轉為押金處理` };
+
+  // 押金大於 0 的才通知。這個判斷刻意放在狀態轉換之後：退房日到了就是要轉，跟押金多少無關；
+  // 押金是 0 的訂單沒有東西要退，發出去只是雜訊。沒設定範本或收件人時就只做狀態轉換。
+  const notice = await sendDepositNotice(config, today, data, settings);
+  return { ok: true, summary: `${data.length} 筆訂單已轉為押金處理${notice ? `；${notice}` : ''}` };
 }
 
 // ========================================================================

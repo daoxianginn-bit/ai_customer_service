@@ -198,10 +198,16 @@ export interface PlaceholderGroup {
   note?: string;
 }
 
-/** 洗滌單自己的欄位。名稱必須跟 scheduled-tasks-run.ts 的 sendLaundryNotice() 算出來的 fields 一致。 */
+/**
+ * 排程彙整訊息自己的欄位。名稱必須跟 scheduled-tasks-run.ts 算出來的 fields 一致。
+ * [日期]、[訂單數] 兩區都有——每一區都要能自己寫完一則訊息，不然寫洗滌單還得跳到別區拿日期。
+ * 重複的名字由 useTemplateVariables 去重，不會有兩顆一樣的按鈕同時亮著。
+ */
 export const LAUNDRY_SHEET_VARIABLES = ['日期', '訂單數', '布巾明細'];
 export const LAUNDRY_SECTION_LABEL = '洗滌單';
 export const LINEN_SECTION_LABEL = '布巾備品洗滌成本';
+export const DEPOSIT_NOTICE_VARIABLES = ['日期', '訂單數', '押金總額', '押金明細'];
+export const DEPOSIT_SECTION_LABEL = '押金通知';
 
 /**
  * 布巾品項在洗滌單範本裡的變數名稱。必須跟後端 scheduled-tasks-run.ts 的 laundryItemName()

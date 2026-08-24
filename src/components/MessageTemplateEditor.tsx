@@ -53,6 +53,8 @@ export default function MessageTemplateEditor({ value, onChange, placeholders, p
   // 光把按鈕畫成警示色不夠——真的插進去了要明講，否則 [床包(中)紅線] 會原樣寄到客人手上。
   const inertNames = useMemo(() => {
     const inert = new Set((placeholderGroups || []).filter((g) => g.inert).flatMap((g) => g.items));
+    // [日期]、[訂單數] 這種同時出現在好幾區的變數，只要有任何一區在這裡算得出值就不算 inert。
+    for (const g of placeholderGroups || []) if (!g.inert) for (const item of g.items) inert.delete(item);
     if (inert.size === 0) return [] as string[];
     const used = segments.filter((seg) => seg.type === 'variable' && inert.has(seg.name)).map((seg: any) => seg.name);
     return [...new Set(used)];

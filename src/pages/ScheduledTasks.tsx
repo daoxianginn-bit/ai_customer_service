@@ -1,9 +1,9 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, ReactNode } from 'react';
 import { supabase } from '../lib/supabase';
 import { Clock, Plus, Pencil, Trash2, AlertTriangle, CheckCircle2, XCircle, PlayCircle } from 'lucide-react';
 import { PageHeader, Button, Modal, ConfirmDialog, Switch, EmptyState } from '../components/ui';
 import { Recurrence, ScheduleConfig, computeNextRunAt, describeSchedule, MIN_INTERVAL_MINUTES } from '../lib/scheduleRecurrence';
-import { useTemplateVariables } from '../hooks/useTemplateVariables';
+import { useTemplateVariables, TemplateVariableScope } from '../hooks/useTemplateVariables';
 import MessageTemplateEditor from '../components/MessageTemplateEditor';
 
 // 排程類型清單：之後新增排程類型（定時寄信、到期通知、LINE 分眾發送...）只需要在這裡多加一筆，
@@ -18,8 +18,14 @@ import MessageTemplateEditor from '../components/MessageTemplateEditor';
 // 兩者都要的（例如尾款排程）表示同時做兩件事：通知客人本人 + 彙整清單通知內部名單。
 // needsLineGroups：這個類型會把訊息發到「機器人被邀進去的 LINE 群組」（line_groups），
 //   跟 needsGroup 的「通知名單」是兩回事——那個是一份 user ID 清單，這個是群組聊天室本身。
-//   目前只有洗滌單用得到，而且是選填：沒設定就只做狀態轉換、不發訊息。
-const TASK_TYPE_OPTIONS: { value: string; label: string; description: string; needsTemplate?: boolean; needsGroup?: boolean; needsLineGroups?: boolean }[] = [
+//   目前是洗滌單與押金通知用得到，而且是選填：沒設定就只做狀態轉換、不發訊息。
+//   noticeScope：這個類型的通知訊息能算出哪一組專屬變數（洗滌單的布巾數量／押金通知的金額），
+//   決定範本編輯器裡哪幾區是實際有值的，見 useTemplateVariables。
+const TASK_TYPE_OPTIONS: {
+  value: string; label: string; description: string;
+  needsTemplate?: boolean; needsGroup?: boolean; needsLineGroups?: boolean;
+  noticeScope?: TemplateVariableScope; noticeLabel?: string; noticeHint?: ReactNode; noticePlaceholder?: string;
+}[] = [
   {
     value: 'cancel_unpaid_bookings',
     label: '訂單自動取消',
@@ -45,11 +51,41 @@ const TASK_TYPE_OPTIONS: { value: string; label: string; description: string; ne
       '洗滌單內容直接寫在下面，可插入 [日期]、[訂單數]、[布巾明細]，以及每個布巾品項各自的數量；' +
       '品項名稱取「備品管理」裡的洗滌單簡稱（沒填就用完整名稱）。建議設定為每天 13:00。',
     needsLineGroups: true,
+    noticeScope: 'laundry',
+    noticeLabel: '洗滌單',
+    noticePlaceholder: `日期:[日期]
+[布巾明細]
+NG:0
+下午取
+謝謝`,
+    noticeHint: (
+      <>
+        [布巾明細] 會自動展開成「品項：數量」多行；也可以改用「布巾備品洗滌成本」區每個品項各自的按鈕自己排版，
+        那些變數帶入的是<strong>當日入住訂單的加總數量</strong>（沒用到的品項是 0）。
+        品項名稱取自「備品管理」的洗滌單簡稱，改了簡稱記得回來重新插入。
+      </>
+    ),
   },
   {
     value: 'advance_to_deposit_processing',
     label: '訂單狀態：入住中→押金處理',
-    description: '退房日就是今天的「入住中」訂單，自動轉為「押金處理」。純狀態轉換，不會發送任何訊息。建議設定為每天 12:00。',
+    description:
+      '退房日就是今天的「入住中」訂單，自動轉為「押金處理」（不分押金多少，全部都轉）。' +
+      '轉完之後，這批訂單裡「押金大於 0」的那幾筆會另外發一則通知；押金全是 0 就不發。' +
+      '通知內容與發送對象都是選填，兩者都留空就只做狀態轉換、不發任何訊息。建議設定為每天 12:00。',
+    needsLineGroups: true,
+    noticeScope: 'deposit',
+    noticeLabel: '押金通知',
+    noticePlaceholder: `日期:[日期]
+待退押金共 [訂單數] 筆，合計 [押金總額]
+[押金明細]
+請安排退款`,
+    noticeHint: (
+      <>
+        [押金明細] 會自動展開成「訂單編號 姓名：押金金額」多行，[押金總額] 是這幾筆的合計。
+        只有<strong>押金大於 0</strong> 的訂單會被算進去，押金是 0 的雖然一樣會轉狀態，但不會出現在這則通知裡。
+      </>
+    ),
   },
   {
     value: 'balance_reminder',
@@ -147,10 +183,10 @@ type TaskForm = {
   // 排程類型專屬參數（見 TASK_TYPE_OPTIONS 的 needsTemplate / needsGroup），存進 scheduled_tasks.config。
   template_id: string;
   notification_group_id: string;
-  line_recipients: LaundryRecipient[];
-  // 洗滌單範本直接寫在排程設定裡，不從「客製訊息範本」挑——它的變數（布巾品項數量）
+  line_recipients: NoticeRecipient[];
+  // 通知內容直接寫在排程設定裡，不從「客製訊息範本」挑——它的變數（布巾品項數量、押金金額）
   // 只有這支排程算得出來，放進共用範本庫對其他排程沒有意義。
-  laundry_template: string;
+  notice_template: string;
 };
 
 const emptyForm = (): TaskForm => ({
@@ -165,7 +201,7 @@ const emptyForm = (): TaskForm => ({
   template_id: '',
   notification_group_id: '',
   line_recipients: [],
-  laundry_template: '',
+  notice_template: '',
 });
 
 function formToConfig(form: TaskForm): ScheduleConfig {
@@ -189,7 +225,7 @@ function buildTaskConfig(form: TaskForm): Record<string, any> {
   if (opt?.needsGroup) config.notification_group_id = form.notification_group_id || null;
   if (opt?.needsLineGroups) {
     config.line_recipients = form.line_recipients;
-    config.laundry_template = form.laundry_template;
+    config.notice_template = form.notice_template;
   }
   return config;
 }
@@ -206,9 +242,9 @@ function formatDateTime(iso: string | null): string {
 interface TemplateOption { id: string; title: string }
 interface LineGroupOption { group_id: string; name: string | null; channel_id: string; chat_type?: string | null }
 interface LineContactOption { line_user_id: string; nickname: string | null; channel_id: string }
-// 洗滌單收件人：群組或個別聯絡人都可以。一定要連 channel_id 一起存——LINE 的 push 目標
+// 通知收件人：群組或個別聯絡人都可以。一定要連 channel_id 一起存——LINE 的 push 目標
 // 不分 userId／groupId，但憑證要用該對象所屬官方帳號的，用錯帳號一定推不出去。
-interface LaundryRecipient { id: string; channel_id: string }
+interface NoticeRecipient { id: string; channel_id: string }
 
 interface GroupOption { id: string; name: string; channel_id: string }
 
@@ -220,8 +256,6 @@ export default function ScheduledTasks() {
   const [templates, setTemplates] = useState<TemplateOption[]>([]);
   const [groups, setGroups] = useState<GroupOption[]>([]);
   const [lineGroups, setLineGroups] = useState<LineGroupOption[]>([]);
-  // 快捷插入清單（含分區）。四個範本編輯器共用同一份來源，見 useTemplateVariables。
-  const templateVars = useTemplateVariables('laundry');
   // 洗滌單群組清單要先選官方帳號再挑群組：群組是掛在各自的官方帳號底下的（實務上通常只有
   // 廠商用帳號才被邀進群組），全部混在一起列會分不清楚哪個群組屬於哪個帳號。
   // 這只是畫面上的篩選，不寫進 config——發送時後端會照 line_groups 記的帳號去拿憑證。
@@ -233,6 +267,10 @@ export default function ScheduledTasks() {
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<TaskForm>(emptyForm());
+  // 快捷插入清單（含分區），所有範本編輯器共用同一份來源，見 useTemplateVariables。
+  // scope 跟著目前選的排程類型走：決定「洗滌單」「布巾備品洗滌成本」「押金通知」哪一組
+  // 在這個編輯器真的算得出值，其餘會被標成警示色。
+  const templateVars = useTemplateVariables(taskTypeOption(form.task_type)?.noticeScope || 'message');
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState('');
 
@@ -304,8 +342,10 @@ export default function ScheduledTasks() {
               const g = lineGroups.find((x) => x.group_id === gid);
               return g ? { id: gid, channel_id: g.channel_id } : null;
             })
-            .filter(Boolean) as LaundryRecipient[],
-      laundry_template: row.config?.laundry_template || '',
+            .filter(Boolean) as NoticeRecipient[],
+      // notice_template 是現在的欄位名；laundry_template 是這個功能最初只有洗滌單時的舊名稱，
+      // 保留讀取，既有排程設定不會因為改版變空白。
+      notice_template: row.config?.notice_template ?? row.config?.laundry_template ?? '',
     });
     setFormError('');
     setShowForm(true);
@@ -356,13 +396,14 @@ export default function ScheduledTasks() {
   const handleSave = async () => {
     if (!form.name.trim()) return setFormError('請輸入排程名稱');
     if (form.recurrence === 'once' && !form.run_at_date) return setFormError('請選擇執行日期');
-    // needsLineGroups 的類型（洗滌單）範本是選填，但「只填其中一個」一定是設定到一半，要擋下來。
+    // needsLineGroups 的類型（洗滌單、押金通知）內容是選填，但「只填其中一個」一定是設定到一半，要擋下來。
     if (currentTaskType?.needsTemplate && !currentTaskType?.needsLineGroups && !form.template_id)
       return setFormError('這個排程類型需要選擇一個客製訊息範本');
     if (currentTaskType?.needsLineGroups) {
-      const hasTemplate = !!form.laundry_template.trim();
-      if (hasTemplate && !form.line_recipients.length) return setFormError('已填寫洗滌單內容，請一併勾選要發送的對象');
-      if (!hasTemplate && form.line_recipients.length) return setFormError('已勾選發送對象，請一併填寫洗滌單內容');
+      const noticeLabel = `${currentTaskType.noticeLabel || '通知'}內容`;
+      const hasTemplate = !!form.notice_template.trim();
+      if (hasTemplate && !form.line_recipients.length) return setFormError(`已填寫${noticeLabel}，請一併勾選要發送的對象`);
+      if (!hasTemplate && form.line_recipients.length) return setFormError(`已勾選發送對象，請一併填寫${noticeLabel}`);
     }
     if (currentTaskType?.needsGroup && !form.notification_group_id) return setFormError('這個排程類型需要選擇一個通知名單');
 
@@ -598,24 +639,18 @@ export default function ScheduledTasks() {
 
         {currentTaskType?.needsLineGroups && (
           <div>
-            <label className="block text-xs text-gray-500 mb-1">洗滌單內容（選填）</label>
+            <label className="block text-xs text-gray-500 mb-1">{currentTaskType.noticeLabel || '通知'}內容（選填）</label>
             <MessageTemplateEditor
-              value={form.laundry_template}
-              onChange={(v) => setForm({ ...form, laundry_template: v })}
+              value={form.notice_template}
+              onChange={(v) => setForm({ ...form, notice_template: v })}
               {...templateVars}
               rows={10}
-              placeholder={`日期:[日期]
-[布巾明細]
-NG:0
-下午取
-謝謝`}
+              placeholder={currentTaskType.noticePlaceholder}
             />
             <p className="text-xs text-gray-400 mt-1">
-              這則訊息會發到下方勾選的 LINE 群組（不是發給客人）。
-              [布巾明細] 會自動展開成「品項：數量」多行；也可以改用下面每個品項各自的按鈕自己排版，
-              那些變數帶入的是<strong>當日入住訂單的加總數量</strong>（沒用到的品項是 0）。
-              品項名稱取自「備品管理」的洗滌單簡稱，改了簡稱記得回來重新插入。
-              訂單變數（[姓名]、[入住日期]…）也可以插入，但這張單子是<strong>當日多筆訂單的加總</strong>，
+              這則訊息會發到下方勾選的 LINE 群組或聯絡人（不是發給客人）。
+              {currentTaskType.noticeHint}
+              訂單變數（[姓名]、[入住日期]…）也可以插入，但這是<strong>當日多筆訂單的彙整</strong>，
               同一個變數在多筆訂單有不同值時會用「、」串起來，只有一筆訂單時就是原本的值。
             </p>
           </div>
@@ -623,7 +658,7 @@ NG:0
 
         {currentTaskType?.needsLineGroups && (
           <div>
-            <label className="block text-xs text-gray-500 mb-1">洗滌單發送對象（選填，可複選：群組與個別聯絡人）</label>
+            <label className="block text-xs text-gray-500 mb-1">{currentTaskType.noticeLabel || '通知'}發送對象（選填，可複選：群組與個別聯絡人）</label>
             {/* 判斷依據是「有沒有官方帳號」而不是「有沒有群組」——收件人也可以是個別聯絡人，
                 某個帳號沒有群組但有聯絡人時，整個選擇區不該被藏起來。 */}
             {channelOptions.length === 0 ? (
