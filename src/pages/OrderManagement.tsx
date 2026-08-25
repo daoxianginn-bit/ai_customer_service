@@ -4,7 +4,7 @@ import { ClipboardList, Search, RotateCcw, Save, Plus, Trash2, AlertCircle, Aler
 import { Button, Modal, StatusBadge, EmptyState, ConfirmDialog } from '../components/ui';
 import {
   BOOKING_STATUS_OPTIONS, SYSTEM_ONLY_STATUSES, REQUIRES_REMIT_LAST5_STATUS, REQUIRES_CHECKIN_PASSWORD_STATUS,
-  FLOW_STEP_STATUSES, flowStepIndex, bookingStatusLabel, nextFlowStatus,
+  FLOW_STEP_STATUSES, flowStepIndex, bookingStatusLabel, bookingStatusDescription, nextFlowStatus,
   MANUAL_ACTION_STATUSES, MANUAL_ACTION_FLOW_STATUSES, OCCUPYING_STATUSES,
 } from '../lib/bookingStatus';
 import { computeOrderAmounts } from '../lib/messageVariables';
@@ -184,10 +184,12 @@ function OrderDetailPanel({
   order,
   onEdit,
   onDelete,
+  onAdvance,
 }: {
   order: any | null;
   onEdit: () => void;
   onDelete: () => void;
+  onAdvance: (nextStatus: string) => void;
 }) {
   if (!order) {
     return (
@@ -199,6 +201,9 @@ function OrderDetailPanel({
 
   const stepIndex = flowStepIndex(order.status);
   const needsPerson = MANUAL_ACTION_STATUSES.includes(order.status);
+  // 例外流程（取消／退款／待人工確認／外部平台）沒有「下一關」，nextFlowStatus 回 null，
+  // 按鈕就不出現——那些狀態要往哪走是人的判斷，不該給一顆看起來理所當然的按鈕。
+  const nextStatus = nextFlowStatus(order.status);
   const balance = order.total_amount != null ? Number(order.total_amount) - Number(order.deposit || 0) : null;
   const money = (v: any) => (v != null ? `NT$ ${Number(v).toLocaleString()}` : '—');
   const slash = (d: any) => (d ? String(d).replace(/-/g, '/') : '—');
@@ -220,11 +225,18 @@ function OrderDetailPanel({
             {stepIndex ? `目前位於第 ${stepIndex} 關：${bookingStatusLabel(order.status)}` : `例外流程：${bookingStatusLabel(order.status)}`}
           </p>
         </div>
-        {needsPerson && (
-          <span className="shrink-0 text-xs bg-amber-100 text-amber-800 border border-amber-200 rounded-full px-3 py-1">
-            等待處理
-          </span>
-        )}
+        <div className="shrink-0 flex flex-col items-end gap-2">
+          {needsPerson && (
+            <span className="text-xs bg-amber-100 text-amber-800 border border-amber-200 rounded-full px-3 py-1">
+              等待處理
+            </span>
+          )}
+          {nextStatus && (
+            <Button onClick={() => onAdvance(nextStatus)} icon={<ChevronRight className="w-4 h-4" />}>
+              下一步：{bookingStatusLabel(nextStatus)}
+            </Button>
+          )}
+        </div>
       </div>
 
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
@@ -311,6 +323,13 @@ export default function OrderManagement() {
   // 押金與訂金比例的預設值來自「房型與報價」的設定，人工建單時按「重算」就會套用同一套算法，
   // 跟 LINE 自動報價算出來的金額一致。
   const [moneyDefaults, setMoneyDefaults] = useState({ wholeHouseSecurity: 3000, percent: 30 });
+
+  // 詳情面板「下一步」的確認視窗。推進狀態是不可逆的動作（會寫進訂單、留下操作紀錄，
+  // 待入住那一關還會影響排程），所以一律先問一次，不做「按了就直接改」。
+  const [advanceTarget, setAdvanceTarget] = useState<{ order: any; nextStatus: string } | null>(null);
+  const [advanceRemit, setAdvanceRemit] = useState('');
+  const [advanceError, setAdvanceError] = useState('');
+  const [advancing, setAdvancing] = useState(false);
 
   // 布巾備品：實際開了哪幾間房決定送洗成本（「包棟」只是使用權名稱，不影響算法）
   const [rooms, setRooms] = useState<RoomOption[]>([]);
@@ -676,6 +695,52 @@ export default function OrderManagement() {
   };
 
   const closeForm = () => setShowForm(false);
+
+  const openAdvance = (order: any, nextStatus: string) => {
+    // 「待確認 → 已預定」代表客服核對到訂金入帳，末5碼是核對的憑據，所以帶出訂單上已有的值
+    // 讓客服確認，不是每次都要重打。
+    setAdvanceRemit(order.remit_last5 || '');
+    setAdvanceError('');
+    setAdvanceTarget({ order, nextStatus });
+  };
+
+  const confirmAdvance = async () => {
+    if (!advanceTarget) return;
+    const { order, nextStatus } = advanceTarget;
+    const needsRemit = nextStatus === REQUIRES_REMIT_LAST5_STATUS;
+    const remit = advanceRemit.trim();
+    if (needsRemit && !remit) {
+      setAdvanceError('請先填寫匯款末5碼再推進到「已預定」。');
+      return;
+    }
+    setAdvancing(true);
+    setAdvanceError('');
+    try {
+      const payload: Record<string, any> = { status: nextStatus, updated_at: new Date().toISOString() };
+      if (needsRemit) payload.remit_last5 = remit;
+      const { error } = await supabase.from('bookings').update(payload).eq('id', order.id);
+      if (error) throw error;
+
+      const diff = diffRecords(order, payload, Object.keys(payload));
+      await logOperation({
+        feature: LOG_FEATURES.order,
+        action: '狀態變更',
+        target: order.order_number || order.id,
+        before: diff.before,
+        after: diff.after,
+      });
+
+      setAdvanceTarget(null);
+      runQuery(page);
+      fetchStatusCounts();
+      fetchSummaries();
+    } catch (err: any) {
+      setAdvanceError(`推進失敗：${err.message}`);
+      await logUiError({ feature: LOG_FEATURES.order, action: '狀態變更失敗', target: order.order_number || null, error: err });
+    } finally {
+      setAdvancing(false);
+    }
+  };
 
   // overrideStatus：「儲存並前往下一階段」「取消訂單」用的，帶入這次要寫進去的狀態。
   // 不先 setForm 再存的原因跟 selectStatusFilter 一樣——setState 是非同步的，
@@ -1069,6 +1134,7 @@ export default function OrderManagement() {
           order={selectedOrder}
           onEdit={() => selectedOrder && openEdit(selectedOrder)}
           onDelete={() => selectedOrder && setDeleteTarget(selectedOrder)}
+          onAdvance={(nextStatus) => selectedOrder && openAdvance(selectedOrder, nextStatus)}
         />
       </div>
 
@@ -1452,6 +1518,60 @@ export default function OrderManagement() {
         )}
       </div>
       </div>
+      </Modal>
+
+      {/* 「下一步」的確認視窗。用 Modal 而不是 ConfirmDialog，是因為推到「已預定」那一關
+          要在同一個視窗裡填匯款末5碼——ConfirmDialog 只有一句話跟兩顆按鈕，塞不進輸入欄位。 */}
+      <Modal
+        open={!!advanceTarget}
+        title="推進訂單狀態"
+        maxWidth="max-w-md"
+        onClose={() => setAdvanceTarget(null)}
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setAdvanceTarget(null)} disabled={advancing}>取消</Button>
+            <Button onClick={confirmAdvance} loading={advancing} icon={<ChevronRight className="w-4 h-4" />}>
+              {advanceTarget ? bookingStatusLabel(advanceTarget.nextStatus) : ''}
+            </Button>
+          </>
+        }
+      >
+        {advanceTarget && (
+          <>
+            <p className="text-sm text-gray-700">
+              訂單 <span className="font-mono">{advanceTarget.order.order_number || ''}</span>
+              （{advanceTarget.order.name || advanceTarget.order.nickname || '未取得'}）
+            </p>
+            <p className="text-sm text-gray-700">
+              目前是「{bookingStatusLabel(advanceTarget.order.status)}」，要推進到
+              「<strong>{bookingStatusLabel(advanceTarget.nextStatus)}</strong>」嗎？
+            </p>
+            <p className="text-xs text-gray-500">{bookingStatusDescription(advanceTarget.nextStatus)}</p>
+
+            {advanceTarget.nextStatus === REQUIRES_REMIT_LAST5_STATUS && (
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">
+                  匯款末5碼<span className="text-red-500"> *</span>
+                </label>
+                <input
+                  value={advanceRemit}
+                  onChange={(e) => setAdvanceRemit(e.target.value)}
+                  className="w-full px-3 py-2 border rounded-lg"
+                  placeholder="核對到帳的匯款末5碼"
+                  autoFocus
+                />
+                <p className="text-xs text-gray-400 mt-1">「已預定」代表訂金已經核對入帳，所以這一欄必填。</p>
+              </div>
+            )}
+
+            {advanceError && (
+              <p className="flex items-start gap-1.5 text-sm text-red-600">
+                <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
+                <span>{advanceError}</span>
+              </p>
+            )}
+          </>
+        )}
       </Modal>
 
       <ConfirmDialog
