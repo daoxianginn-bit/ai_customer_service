@@ -19,6 +19,7 @@ import { roomLabel } from '../../src/lib/rooms';
 import { generateOrderNumber } from '../../src/lib/orderNumber';
 import {
   SelectableRoom, RoomCountRequest, selectRoomsByRequest, toRoomCountRequests, describeShortfall,
+  totalRequestedCapacity, describeRoomRequests,
 } from '../../src/lib/roomSelection';
 import { computeUsage, normalizeChangeCount } from '../../src/lib/linenCost';
 import { LineChannel, isFullServiceRole, channelRoleLabel } from '../../src/lib/lineChannels';
@@ -1378,6 +1379,10 @@ async function checkBookingConflict(
 
 // ------------------------------------------------------------------------
 // 這張訂單開了哪幾間房
+// 報價的三要素。少了任何一個都算不出價格，所以是必填；其餘算價欄位（幾人房要開幾間、
+// 是否包棟）都是選填，客人沒填就由系統決定。
+const QUOTE_ESSENTIAL_FIELDS = ['checkin_date', 'checkout_date', 'headcount'];
+
 // 純粹決定「開哪幾間」，完全不碰價格——價格已經由 bookingEngine 算完。
 // 這份紀錄有三個用途：預訂單訊息列出房型、布巾洗滌成本、房況/檔期衝突。
 // ------------------------------------------------------------------------
@@ -1587,15 +1592,18 @@ async function tryStartQuoteFromCompleteInfo(
     const quoteFields = allFields.filter((f) => f.quote_field);
     // 這個流程必須真的問得到報價三要素，否則「所有算價欄位都齊了」會變成一句空話
     // （沒設定任何算價欄位的流程，條件會永遠成立、每則訊息都被當成完整訂房資訊）。
-    const hasQuoteEssentials = ['checkin_date', 'checkout_date', 'headcount'].every((k) =>
-      quoteFields.some((f) => f.quote_field === k)
-    );
+    const hasQuoteEssentials = QUOTE_ESSENTIAL_FIELDS.every((k) => quoteFields.some((f) => f.quote_field === k));
     if (!hasQuoteEssentials) continue;
+
+    // 只有三要素是必填。「幾人房要開幾間」是選填的——範本自己就寫「沒提到就是 null」，
+    // 客人照標準格式送出但把房數那一行留空是很常見的，以前這裡要求「每個算價欄位都要有值」，
+    // 於是整則訊息不被當成訂房資訊、掉去問 AI，客人收到一句「這個問題我不清楚」。
+    const requiredFields = quoteFields.filter((f) => QUOTE_ESSENTIAL_FIELDS.includes(f.quote_field as string));
 
     // 便宜的前置關卡：先用純程式擷取（不花 token）。沒有這一關的話，每一則沒有 session 的
     // 閒聊都會多打一次 AI 擷取，等於所有非流程訊息的 AI 成本都翻倍。
     const gate = normalizeInto(extractStepFieldsWithoutAi(userMessage, quoteFields), quoteFields);
-    if (quoteFields.some((f) => gate[f.key] === undefined)) continue;
+    if (requiredFields.some((f) => gate[f.key] === undefined)) continue;
 
     // 過了關卡才值得問 AI。AI 模式再擷取一次是為了把備註這類自由文字欄位也帶出來；
     // 擷取失敗或結果反而不完整時退回關卡的結果——算價要用的欄位本來就已經齊了，
@@ -1607,7 +1615,7 @@ async function tryStartQuoteFromCompleteInfo(
         return {} as Record<string, string>;
       });
       const aiCollected = normalizeInto(aiExtracted, allFields);
-      if (quoteFields.every((f) => aiCollected[f.key] !== undefined)) collected = { ...gate, ...aiCollected };
+      if (requiredFields.every((f) => aiCollected[f.key] !== undefined)) collected = { ...gate, ...aiCollected };
     }
 
     // 沿用 startBookingFlow 的判斷：客人可能有一筆還停在「待報價」的舊單（session 過期但訂單還在），
@@ -1942,7 +1950,7 @@ async function finishBookingFlow(
       quote: null,
     });
 
-  const hasAllQuoteFields = ['checkin_date', 'checkout_date', 'headcount'].every((k) => quoteValues[k] !== undefined);
+  const hasAllQuoteFields = QUOTE_ESSENTIAL_FIELDS.every((k) => quoteValues[k] !== undefined);
 
   if (!hasAllQuoteFields) {
     const name = pickByLabelHeuristic(collected, allFields, ['姓名', '名字']) || nickname;
@@ -1996,6 +2004,25 @@ async function finishBookingFlow(
     const activePromotion = settings.active_promotion_id ? data.promotions.find((p: any) => p.id === settings.active_promotion_id) || null : null;
     // 客人在「幾人房要開幾間」欄位裡指定的房型組合，沒指定就用系統自動算出的標準房型。
     const requestedLayout = deriveRequestedLayout(collected, allFields);
+
+    // 指定的房間住不下指定的人數就不報價。價格是依人數算的，房型組合只決定「開哪幾間」，
+    // 兩者之間沒有人把關的話，「12 人 + 2 人房 2 間」會照 12 人報價、卻只開 4 個床位的房間，
+    // 客人拿到看起來正常的報價，到現場才發現睡不下。這種指定本身就自相矛盾，直接請客人改。
+    const requestedRooms = toRoomCountRequests(requestedLayout);
+    const requestedCapacity = totalRequestedCapacity(requestedRooms);
+    if (requestedCapacity > 0 && requestedCapacity < headcount) {
+      await supabase
+        .from('bookings')
+        .update({ collected_answers: collected, checkin_date: checkinIso, checkout_date: checkoutIso, nights, headcount, updated_at: new Date().toISOString() })
+        .eq('id', bookingId);
+      const replyText =
+        `不好意思，您指定的房間住不下 ${headcount} 位：${describeRoomRequests(requestedRooms)}最多 ${requestedCapacity} 人 🙏` +
+        `\n麻煩您調整房數或人數再送一次；房數留空的話我們會自動幫您安排，也可以點選「真人客服」由專人為您確認。`;
+      await sendReply(replyText);
+      await logConversation(userId, nickname, 'outbound', replyText, 'system');
+      await keepSessionForRetry();
+      return;
+    }
 
     const result = computeUnifiedMultiNightQuote({
       checkInDate: checkinDate,

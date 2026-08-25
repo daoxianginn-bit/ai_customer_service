@@ -69,6 +69,16 @@ export function toRoomCountRequests(countsByCapacity: Record<number, number>): R
     .sort((a, b) => a.capacity - b.capacity);
 }
 
+/** 這組房間總共住得下幾人。用來擋掉「2 人房 2 間卻要住 12 人」這種自相矛盾的指定。 */
+export function totalRequestedCapacity(requests: RoomCountRequest[]): number {
+  return requests.reduce((sum, r) => sum + r.capacity * r.count, 0);
+}
+
+/** 把指定的房型組合寫成人看得懂的一句話，例如「2人房 2 間、4人房 1 間」。 */
+export function describeRoomRequests(requests: RoomCountRequest[]): string {
+  return requests.map((r) => `${r.capacity}人房 ${r.count} 間`).join('、');
+}
+
 export function describeShortfall(shortfall: RoomCountRequest[]): string {
   return shortfall.map((s) => `${s.capacity}人房還差 ${s.count} 間`).join('、');
 }
