@@ -289,10 +289,6 @@ export default function FormulaSettings() {
     setSavingDeposits(true);
     try {
       if (roomTypes.length) await supabase.from('room_types').upsert(roomTypes);
-      // 包棟押金跟各房型押金放在同一張卡片一起編輯，所以也要一起存——它存在 settings 表、
-      // 不在 room_types，兩個 update 打不同張表但屬於同一次「儲存押金設定」。
-      const patch = { whole_house_security_deposit: wholeHouseSecurityDeposit };
-      if (settingsId) await supabase.from('settings').update(patch).eq('id', settingsId);
 
       // 押金是直接影響收款金額的設定，改了要留下軌跡。各房型押金逐間比對，只列出真的有改的那幾間，
       // 用房型名稱當欄位名（不是 security_deposit），否則五間房改完會變成五個一模一樣的「押金」。
@@ -305,14 +301,13 @@ export default function FormulaSettings() {
         roomDiffBefore[label] = old.security_deposit ?? 0;
         roomDiffAfter[label] = r.security_deposit ?? 0;
       }
-      const wholeHouseDiff = diffRecords(settingsSnapshot, patch, Object.keys(patch));
-      if (Object.keys(roomDiffAfter).length || wholeHouseDiff.changed) {
+      if (Object.keys(roomDiffAfter).length) {
         await logOperation({
           feature: LOG_FEATURES.pricingFormula,
           action: '修改',
           target: '房型押金',
-          before: { ...roomDiffBefore, ...wholeHouseDiff.before },
-          after: { ...roomDiffAfter, ...wholeHouseDiff.after },
+          before: roomDiffBefore,
+          after: roomDiffAfter,
         });
       }
       await fetchAll({ silent: true });
@@ -344,7 +339,7 @@ export default function FormulaSettings() {
   const handleSaveDepositSettings = async () => {
     setSavingDepositSettings(true);
     try {
-      const patch = { deposit_percent: depositPercent };
+      const patch = { deposit_percent: depositPercent, whole_house_security_deposit: wholeHouseSecurityDeposit };
       if (settingsId) await supabase.from('settings').update(patch).eq('id', settingsId);
       await logSettingsPatch(patch);
       await fetchAll({ silent: true });
@@ -508,9 +503,6 @@ export default function FormulaSettings() {
                 ))}
               </Stack>
             )}
-            <Typography variant="body2" color="text.secondary">
-              包棟押金 <strong>NT$ {wholeHouseSecurityDeposit.toLocaleString()}</strong>
-            </Typography>
           </Stack>
         }
         edit={
@@ -535,15 +527,6 @@ export default function FormulaSettings() {
                 </TableBody>
               </Table>
             </TableContainer>
-            <TextField
-              label="包棟押金"
-              type="number"
-              size="small"
-              value={wholeHouseSecurityDeposit}
-              onChange={(e) => setWholeHouseSecurityDeposit(Number(e.target.value))}
-              sx={{ width: 220 }}
-              InputProps={{ endAdornment: <InfoHint text="「訂單管理」手動建單時勾選「是否包棟」，押金欄位就會直接帶入這個金額（仍可手動改）。LINE 自動報價不分包棟／個別租房，一律用上面各房型押金的加總，不會用到這個數字。" /> }}
-            />
           </Stack>
         }
       />
@@ -609,7 +592,7 @@ export default function FormulaSettings() {
 
         <EditableCard
           title="押金與訂金"
-          tooltip="訂單總額 ＝ 房價 ＋ 押金（開了哪幾間房，押金就是那幾間房押金的加總，見上方「房型押金」）；本次需匯訂金 ＝ 房價的固定比例（不含押金）。"
+          tooltip="押金與訂金是兩筆獨立的錢，各自有自己的設定。押金：訂單勾選「是否包棟」時用這裡的包棟押金，沒勾選才是實際開的那幾間房押金加總（見上方「房型押金」）。訂金：房價的固定比例，不含押金。訂單總額 ＝ 房價 ＋ 押金。"
           editing={editingDepositSettings}
           saving={savingDepositSettings}
           onEdit={() => setEditingDepositSettings(true)}
@@ -617,11 +600,20 @@ export default function FormulaSettings() {
           onSave={handleSaveDepositSettings}
           view={
             <Typography variant="body2" color="text.secondary">
-              訂金比例 <strong>{depositPercent}%</strong>
+              包棟押金 <strong>NT$ {wholeHouseSecurityDeposit.toLocaleString()}</strong>　·　訂金比例 <strong>{depositPercent}%</strong>
             </Typography>
           }
           edit={
             <Stack direction="row" flexWrap="wrap" gap={2}>
+              <TextField
+                label="包棟押金（金額）"
+                type="number"
+                size="small"
+                value={wholeHouseSecurityDeposit}
+                onChange={(e) => setWholeHouseSecurityDeposit(Number(e.target.value))}
+                sx={{ width: 200 }}
+                InputProps={{ endAdornment: <InfoHint text="訂單勾選「是否包棟」時，押金欄位直接帶入這個金額——LINE 自動報價與「訂單管理」手動建單都一樣（仍可在訂單上手動改）。沒勾選包棟的訂單才用各房型押金的加總。" /> }}
+              />
               <TextField label="訂金比例（房價的 %）" type="number" size="small" value={depositPercent} onChange={(e) => setDepositPercent(Number(e.target.value))} sx={{ width: 180 }} />
             </Stack>
           }

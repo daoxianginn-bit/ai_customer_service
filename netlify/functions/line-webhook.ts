@@ -2008,16 +2008,22 @@ async function finishBookingFlow(
     // 指定的房間住不下指定的人數就不報價。價格是依人數算的，房型組合只決定「開哪幾間」，
     // 兩者之間沒有人把關的話，「12 人 + 2 人房 2 間」會照 12 人報價、卻只開 4 個床位的房間，
     // 客人拿到看起來正常的報價，到現場才發現睡不下。這種指定本身就自相矛盾，直接請客人改。
+    //
+    // 沒填的房數就是 0 間，不是「沒意見」——所以整張表單的房數全部留空／填 0 時算出來的容量是 0，
+    // 一樣擋下來請客人改。只有「這個流程根本沒有問房數」時才輪到系統自動配房（hasRoomCountFields）。
     const requestedRooms = toRoomCountRequests(requestedLayout);
     const requestedCapacity = totalRequestedCapacity(requestedRooms);
-    if (requestedCapacity > 0 && requestedCapacity < headcount) {
+    const hasRoomCountFields = allFields.some((f) => f.quote_field === 'room_count');
+    if (hasRoomCountFields && requestedCapacity < headcount) {
       await supabase
         .from('bookings')
         .update({ collected_answers: collected, checkin_date: checkinIso, checkout_date: checkoutIso, nights, headcount, updated_at: new Date().toISOString() })
         .eq('id', bookingId);
-      const replyText =
-        `不好意思，您指定的房間住不下 ${headcount} 位：${describeRoomRequests(requestedRooms)}最多 ${requestedCapacity} 人 🙏` +
-        `\n麻煩您調整房數或人數再送一次；房數留空的話我們會自動幫您安排，也可以點選「真人客服」由專人為您確認。`;
+      const replyText = requestedRooms.length
+        ? `不好意思，您指定的房間住不下 ${headcount} 位：${describeRoomRequests(requestedRooms)}最多 ${requestedCapacity} 人 🙏` +
+          `\n麻煩您調整房數再送一次，或點選「真人客服」由專人為您確認。`
+        : `不好意思，房數的欄位沒有填，這樣安排不出 ${headcount} 位的房間 🙏` +
+          `\n麻煩您填一下每種房型各要開幾間再送一次，或點選「真人客服」由專人為您確認。`;
       await sendReply(replyText);
       await logConversation(userId, nickname, 'outbound', replyText, 'system');
       await keepSessionForRetry();
@@ -2130,13 +2136,6 @@ async function finishBookingFlow(
     const name = pickByLabelHeuristic(collected, allFields, ['姓名', '名字']) || nickname;
     const phone = pickByLabelHeuristic(collected, allFields, ['電話', '手機', '聯絡']);
 
-    // 報價引擎算出來的 total 是「房價」，押金與訂金在這裡一次算齊。
-    // 押金＝這張訂單開的每間房押金加總（不再分個別租房/包棟，這個模型下所有訂單都是「開了哪幾間房」）。
-    const roomDepositById = new Map(data.roomTypes.map((rt: any) => [rt.id, Number(rt.security_deposit ?? 0)]));
-    const securityDeposit = openedRooms.rooms.reduce((sum, r) => sum + (roomDepositById.get(r.id) ?? 0), 0);
-    const amounts = computeOrderAmounts(total, securityDeposit, Number(settings.deposit_percent ?? 0));
-
-    // 是否包棟：這欄以前被寫死成 false。它的語意是「押金要用包棟押金，而不是各房押金加總」，
     // 民宿的預設經營方式就是包棟，所以一律寫 true——不論這次開了幾間房。客服如果遇到少數
     // 單賣個別房間的情況，到「訂單管理」把勾選取消即可。
     //
@@ -2144,6 +2143,17 @@ async function finishBookingFlow(
     // 決定（見 fetchOccupiedRoomIds 與 checkBookingConflict），跟這個旗標是兩件事。
     const isWholeHouse = quoteValues.whole_house !== 'false';
 
+    // 報價引擎算出來的 total 是「房價」，押金與訂金在這裡一次算齊。
+    // 押金看「是否包棟」：包棟用「計價公式設定 → 押金與訂金」設定的包棟押金，個別租房才是這張訂單
+    // 開的每間房押金加總。這跟「訂單管理」手動建單勾選「是否包棟」的行為一致——以前 LINE 自動報價
+    // 一律用加總，同一筆包棟訂單從 LINE 進來跟人工建單會拿到不同的押金。
+    const roomDepositById = new Map(data.roomTypes.map((rt: any) => [rt.id, Number(rt.security_deposit ?? 0)]));
+    const securityDeposit = isWholeHouse
+      ? Number(settings.whole_house_security_deposit ?? 0)
+      : openedRooms.rooms.reduce((sum, r) => sum + (roomDepositById.get(r.id) ?? 0), 0);
+    const amounts = computeOrderAmounts(total, securityDeposit, Number(settings.deposit_percent ?? 0));
+
+    // 是否包棟：這欄以前被寫死成 false。它的語意是「押金要用包棟押金，而不是各房押金加總」，
     const { data: updatedBooking, error: updateError } = await supabase
       .from('bookings')
       .update({
