@@ -494,6 +494,26 @@ CREATE TABLE IF NOT EXISTS public.line_groups (
 );
 CREATE INDEX IF NOT EXISTS idx_line_groups_channel_active ON public.line_groups(channel_id) WHERE is_active;
 
+-- 群組成員：排程通知要 @tag 特定成員時，需要知道對方的 LINE user ID 才能組出 mention。
+--
+-- 為什麼是「被動記錄有發言過的人」而不是直接跟 LINE 要完整成員名單：LINE 的
+-- GET /v2/bot/group/{groupId}/members/ids 只開放給認證帳號或付費帳號，一般未認證的官方帳號
+-- 呼叫會被回 403。所以這裡改成每當群組裡有人發言，就把發言者記下來（display_name 用
+-- getGroupMemberProfile() 取得，這支沒有帳號等級限制）。代價是「從來沒在群組裡講過話的人」
+-- 不會出現在可 tag 的名單裡，請那個人在群組隨便講一句就會被記錄到。
+CREATE TABLE IF NOT EXISTS public.line_group_members (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    channel_id UUID NOT NULL REFERENCES public.line_channels(id) ON DELETE CASCADE,
+    group_id TEXT NOT NULL,
+    line_user_id TEXT NOT NULL,
+    display_name TEXT, -- 拿不到（對方隱私設定／API 失敗）就留空，後台顯示 user ID 代替
+    last_message_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now(),
+    UNIQUE (channel_id, group_id, line_user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_line_group_members_lookup ON public.line_group_members(channel_id, group_id);
+
 -- 客製訊息發送：後台自訂的可重複使用訊息範本
 CREATE TABLE IF NOT EXISTS public.custom_message_templates (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -1096,6 +1116,7 @@ ALTER TABLE public.settings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.line_channels ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.notification_recipient_groups ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.line_groups ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.line_group_members ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.ota_channels ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.user_states ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.processed_events ENABLE ROW LEVEL SECURITY;
@@ -1142,6 +1163,8 @@ DROP POLICY IF EXISTS "Allow Auth Access Notification Groups" ON public.notifica
 CREATE POLICY "Allow Auth Access Notification Groups" ON public.notification_recipient_groups FOR ALL USING (auth.role() = 'authenticated');
 DROP POLICY IF EXISTS "Allow Auth Access Line Groups" ON public.line_groups;
 CREATE POLICY "Allow Auth Access Line Groups" ON public.line_groups FOR ALL USING (auth.role() = 'authenticated');
+DROP POLICY IF EXISTS "Allow Auth Access Line Group Members" ON public.line_group_members;
+CREATE POLICY "Allow Auth Access Line Group Members" ON public.line_group_members FOR ALL USING (auth.role() = 'authenticated');
 -- export_token 等同密碼（外部平台訂閱時無法帶 Authorization 標頭，只能靠網址裡的 token 驗證），
 -- 一般前台不能讀到，只有已登入的管理員能在後台看到／管理。
 DROP POLICY IF EXISTS "Allow Auth Access OTA Channels" ON public.ota_channels;

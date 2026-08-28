@@ -281,6 +281,43 @@ async function handleGroupEvent(lineEvent: any, lineClient: Client, channel: Lin
       errorMessage: `${channel.name}｜${isRoom ? '多人聊天室' : '群組'}｜${error.message}`,
     });
   }
+
+  await recordGroupMember(lineEvent, lineClient, channel, groupId);
+}
+
+// 記下「在這個群組裡發言過的人」，供排程通知 @tag 特定成員時挑選（見 NoticeComposer）。
+//
+// 只能被動記錄：LINE 抓完整成員名單的 API 只開放認證/付費帳號，一般帳號會被回 403。
+// 這裡改成每次有人在群組發言就記一筆，代價是沒發言過的人不會出現在可 tag 名單裡。
+// 失敗一律靜默略過——這是附帶功能，不能因為它壞掉就讓群組本身的記錄或客服流程受影響。
+async function recordGroupMember(lineEvent: any, lineClient: Client, channel: LineChannel, groupId: string): Promise<void> {
+  const memberId: string | undefined = lineEvent.source?.userId;
+  if (!memberId || lineEvent.type !== 'message') return;
+
+  try {
+    const { data: existing } = await supabase.from('line_group_members')
+      .select('display_name').eq('channel_id', channel.id).eq('group_id', groupId).eq('line_user_id', memberId).maybeSingle();
+
+    let displayName = existing?.display_name || null;
+    if (!displayName) {
+      // getGroupMemberProfile 沒有帳號等級限制（跟撈完整名單那支不同），但對方隱私設定
+      // 仍可能讓它失敗；拿不到就留空，後台顯示 user ID 代替。
+      try {
+        displayName = (await lineClient.getGroupMemberProfile(groupId, memberId)).displayName;
+      } catch {}
+    }
+
+    await supabase.from('line_group_members').upsert({
+      channel_id: channel.id,
+      group_id: groupId,
+      line_user_id: memberId,
+      display_name: displayName,
+      last_message_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    }, { onConflict: 'channel_id,group_id,line_user_id' });
+  } catch (e: any) {
+    console.error('[LineGroupMember] record failed:', e?.message || e);
+  }
 }
 
 async function processLineEvent(
