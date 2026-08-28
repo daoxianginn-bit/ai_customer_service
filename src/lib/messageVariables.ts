@@ -203,20 +203,32 @@ export interface PlaceholderGroup {
  * [日期]、[訂單數] 兩區都有——每一區都要能自己寫完一則訊息，不然寫洗滌單還得跳到別區拿日期。
  * 重複的名字由 useTemplateVariables 去重，不會有兩顆一樣的按鈕同時亮著。
  */
-export const LAUNDRY_SHEET_VARIABLES = ['日期', '訂單數', '布巾明細'];
+export const LAUNDRY_SHEET_VARIABLES = ['日期', '訂單數', '布巾明細', '布巾明細(簡稱)'];
 export const LAUNDRY_SECTION_LABEL = '洗滌單';
 export const LINEN_SECTION_LABEL = '布巾備品洗滌成本';
 export const DEPOSIT_NOTICE_VARIABLES = ['日期', '訂單數', '押金總額', '押金明細'];
 export const DEPOSIT_SECTION_LABEL = '押金通知';
+/** 每種彙整通知都算得出來的共同欄位，沒有洗滌單／押金那種專屬數字。 */
+export const BOOKING_NOTICE_VARIABLES = ['日期', '訂單數'];
+export const BOOKING_NOTICE_SECTION_LABEL = '彙整通知';
+
+/**
+ * 布巾品項的完整名稱（category＋spec）——「備品管理」用來辨識品項的正式寫法，
+ * 例如「床包－平紋貢緞床包-5x6.2尺-高28cm紅線」。[布巾明細] 展開時用這個。
+ */
+export function laundryItemFullName(item: { category: string; spec?: string | null }): string {
+  return item.spec ? `${item.category}－${item.spec}` : item.category;
+}
 
 /**
  * 布巾品項在洗滌單範本裡的變數名稱。必須跟後端 scheduled-tasks-run.ts 的 laundryItemName()
  * 一致，否則按鈕插進去的變數替換不到、會原樣出現在發給洗滌廠的訊息裡。
+ * 優先用「備品管理」填的洗滌單簡稱，沒填就退回完整名稱（不會漏掉品項）。
  */
 export function laundryItemName(item: { category: string; spec?: string | null; short_name?: string | null }): string {
   const short = (item.short_name || '').trim();
   if (short) return short;
-  return item.spec ? `${item.category}－${item.spec}` : item.category;
+  return laundryItemFullName(item);
 }
 
 /**
