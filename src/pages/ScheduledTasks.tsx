@@ -4,7 +4,7 @@ import { Clock, Plus, Pencil, Trash2, AlertTriangle, CheckCircle2, XCircle, Play
 import { PageHeader, Button, Modal, ConfirmDialog, Switch, EmptyState } from '../components/ui';
 import { Recurrence, ScheduleConfig, computeNextRunAt, describeSchedule, MIN_INTERVAL_MINUTES } from '../lib/scheduleRecurrence';
 import { useTemplateVariables, TemplateVariableScope } from '../hooks/useTemplateVariables';
-import MessageTemplateEditor from '../components/MessageTemplateEditor';
+import NoticeComposer, { type NoticeRecipient, type MentionMember } from '../components/NoticeComposer';
 
 // 排程類型清單：之後新增排程類型（定時寄信、到期通知、LINE 分眾發送...）只需要在這裡多加一筆，
 // 不用改頁面其他邏輯或資料表結構。
@@ -39,7 +39,32 @@ const TASK_TYPE_OPTIONS: {
   {
     value: 'advance_to_awaiting_balance',
     label: '訂單狀態：已預定→待收尾款',
-    description: '入住日剩 3 天的「已預定」訂單，自動轉為「待收尾款」。純狀態轉換，不會發送任何訊息。建議設定為每天 00:00。',
+    description:
+      '入住日剩 3 天的「已預定」訂單，自動轉為「待收尾款」。' +
+      '另外可以選填「待收尾款通知內容」與「發送對象」：填了就會把這批訂單彙整成一則訊息，發給指定的 LINE 群組或聯絡人；' +
+      '兩者都留空就只做狀態轉換、不發任何訊息。建議設定為每天 00:00。',
+    needsLineGroups: true,
+    noticeScope: 'booking',
+    noticeLabel: '待收尾款通知',
+    noticePlaceholder: `日期:[日期]
+以下 [訂單數] 筆訂單入住日剩 3 天，尚未收尾款：
+[姓名]／[入住日期]
+請協助追款`,
+  },
+  {
+    value: 'checkin_reminder_notice',
+    label: '入住前提醒（入住日前 2 天）',
+    description:
+      '入住日是 2 天後、狀態為「待入住」的訂單，把這批訂單彙整成一則訊息發給指定的 LINE 群組或聯絡人。' +
+      '純通知排程，不會改動任何訂單狀態（狀態轉換由「待入住→入住中」那支在入住當天處理），也不會發訊息給客人。' +
+      '通知內容與發送對象都留空就不發。建議設定為每天 09:00。',
+    needsLineGroups: true,
+    noticeScope: 'booking',
+    noticeLabel: '入住前提醒',
+    noticePlaceholder: `日期:[日期]
+後天入住共 [訂單數] 筆：
+[姓名]／[入住日期]／[房型]
+請提前準備`,
   },
   {
     value: 'advance_to_checked_in',
@@ -48,21 +73,23 @@ const TASK_TYPE_OPTIONS: {
       '入住日就是今天的「待入住」訂單，自動轉為「入住中」。' +
       '另外可以選填「洗滌單內容」與「發送對象」：填了就會把這批訂單今天要用的布巾品項數量加總，發給指定的 LINE 群組或聯絡人；' +
       '兩者都留空就只做狀態轉換、不發任何訊息。' +
-      '洗滌單內容直接寫在下面，可插入 [日期]、[訂單數]、[布巾明細]，以及每個布巾品項各自的數量；' +
-      '品項名稱取「備品管理」裡的洗滌單簡稱（沒填就用完整名稱）。建議設定為每天 13:00。',
+      '洗滌單內容直接寫在下面，可插入 [日期]、[訂單數]、[布巾明細]、[布巾明細(簡稱)]，以及每個布巾品項各自的數量。' +
+      '建議設定為每天 13:00。',
     needsLineGroups: true,
     noticeScope: 'laundry',
     noticeLabel: '洗滌單',
     noticePlaceholder: `日期:[日期]
-[布巾明細]
+[布巾明細(簡稱)]
 NG:0
 下午取
 謝謝`,
     noticeHint: (
       <>
-        [布巾明細] 會自動展開成「品項：數量」多行；也可以改用「布巾備品洗滌成本」區每個品項各自的按鈕自己排版，
-        那些變數帶入的是<strong>當日入住訂單的加總數量</strong>（沒用到的品項是 0）。
-        品項名稱取自「備品管理」的洗滌單簡稱，改了簡稱記得回來重新插入。
+        [布巾明細] 跟 [布巾明細(簡稱)] 都會展開成「品項：數量」多行，差別只在品項名稱：
+        前者用<strong>完整名稱</strong>（備品管理裡的分類＋規格，內部核對用），
+        後者用<strong>洗滌單簡稱</strong>（發給洗滌廠的單子用，沒填簡稱的品項會自動退回完整名稱）。
+        也可以改用「布巾備品洗滌成本」區每個品項各自的按鈕自己排版，那些變數帶入的是
+        <strong>當日入住訂單的加總數量</strong>（沒用到的品項是 0），名稱用的是簡稱，改了簡稱記得回來重新插入。
       </>
     ),
   },
@@ -184,6 +211,8 @@ type TaskForm = {
   template_id: string;
   notification_group_id: string;
   line_recipients: NoticeRecipient[];
+  // 每個群組各自要 @tag 哪些成員：{ [groupId]: [{ id, name }] }。
+  mention_members: Record<string, MentionMember[]>;
   // 通知內容直接寫在排程設定裡，不從「客製訊息範本」挑——它的變數（布巾品項數量、押金金額）
   // 只有這支排程算得出來，放進共用範本庫對其他排程沒有意義。
   notice_template: string;
@@ -201,6 +230,7 @@ const emptyForm = (): TaskForm => ({
   template_id: '',
   notification_group_id: '',
   line_recipients: [],
+  mention_members: {},
   notice_template: '',
 });
 
@@ -226,6 +256,7 @@ function buildTaskConfig(form: TaskForm): Record<string, any> {
   if (opt?.needsLineGroups) {
     config.line_recipients = form.line_recipients;
     config.notice_template = form.notice_template;
+    config.mention_members = form.mention_members;
   }
   return config;
 }
@@ -240,11 +271,9 @@ function formatDateTime(iso: string | null): string {
 }
 
 interface TemplateOption { id: string; title: string }
-interface LineGroupOption { group_id: string; name: string | null; channel_id: string; chat_type?: string | null }
-interface LineContactOption { line_user_id: string; nickname: string | null; channel_id: string }
-// 通知收件人：群組或個別聯絡人都可以。一定要連 channel_id 一起存——LINE 的 push 目標
-// 不分 userId／groupId，但憑證要用該對象所屬官方帳號的，用錯帳號一定推不出去。
-interface NoticeRecipient { id: string; channel_id: string }
+// LINE 群組清單只留給「載入舊設定時把群組 ID 補上所屬帳號」用；勾選介面本身已經搬到
+// NoticeComposer，那裡自己查自己要的資料。
+interface LineGroupOption { group_id: string; channel_id: string }
 
 interface GroupOption { id: string; name: string; channel_id: string }
 
@@ -255,13 +284,9 @@ export default function ScheduledTasks() {
 
   const [templates, setTemplates] = useState<TemplateOption[]>([]);
   const [groups, setGroups] = useState<GroupOption[]>([]);
+  // 只留給「載入舊設定時把群組 ID 補上所屬帳號」用（見 openEdit）。勾選介面與它需要的
+  // 帳號／群組／聯絡人／成員清單都由 NoticeComposer 自己查，這裡不再重複維護一份。
   const [lineGroups, setLineGroups] = useState<LineGroupOption[]>([]);
-  // 洗滌單群組清單要先選官方帳號再挑群組：群組是掛在各自的官方帳號底下的（實務上通常只有
-  // 廠商用帳號才被邀進群組），全部混在一起列會分不清楚哪個群組屬於哪個帳號。
-  // 這只是畫面上的篩選，不寫進 config——發送時後端會照 line_groups 記的帳號去拿憑證。
-  const [groupChannelFilter, setGroupChannelFilter] = useState('');
-  const [channelContacts, setChannelContacts] = useState<LineContactOption[]>([]);
-  const [contactsLoading, setContactsLoading] = useState(false);
   const [channelNameById, setChannelNameById] = useState<Record<string, string>>({});
 
   const [showForm, setShowForm] = useState(false);
@@ -343,6 +368,10 @@ export default function ScheduledTasks() {
               return g ? { id: gid, channel_id: g.channel_id } : null;
             })
             .filter(Boolean) as NoticeRecipient[],
+      mention_members:
+        row.config?.mention_members && typeof row.config.mention_members === 'object' && !Array.isArray(row.config.mention_members)
+          ? row.config.mention_members
+          : {},
       // notice_template 是現在的欄位名；laundry_template 是這個功能最初只有洗滌單時的舊名稱，
       // 保留讀取，既有排程設定不會因為改版變空白。
       notice_template: row.config?.notice_template ?? row.config?.laundry_template ?? '',
@@ -351,47 +380,7 @@ export default function ScheduledTasks() {
     setShowForm(true);
   };
 
-  // 選定官方帳號後才查它的個別聯絡人：聯絡人可能成千上百，沒必要在打開頁面時全部撈進來。
-  useEffect(() => {
-    if (!groupChannelFilter) { setChannelContacts([]); return; }
-    let cancelled = false;
-    setContactsLoading(true);
-    supabase
-      .from('user_states')
-      .select('line_user_id, nickname, channel_id')
-      .eq('channel_id', groupChannelFilter)
-      .order('last_message_at', { ascending: false, nullsFirst: false })
-      .limit(200)
-      .then(({ data }) => {
-        if (cancelled) return;
-        setChannelContacts(data || []);
-        setContactsLoading(false);
-      });
-    return () => { cancelled = true; };
-  }, [groupChannelFilter]);
-
-  const toggleRecipient = (id: string, channelId: string) => {
-    setForm((f) => ({
-      ...f,
-      line_recipients: f.line_recipients.some((r) => r.id === id)
-        ? f.line_recipients.filter((r) => r.id !== id)
-        : [...f.line_recipients, { id, channel_id: channelId }],
-    }));
-  };
-
   const currentTaskType = taskTypeOption(form.task_type);
-
-  // 收件人可以是群組也可以是個別聯絡人，所以帳號清單要列出所有官方帳號，不能只列「有群組的」——
-  // 某個帳號可能沒有群組但有聯絡人，那也是合法的發送對象。
-  const channelOptions = useMemo(
-    () => Object.entries(channelNameById).map(([id, name]) => ({ id, name })),
-    [channelNameById]
-  );
-
-  const visibleLineGroups = useMemo(
-    () => (groupChannelFilter ? lineGroups.filter((g) => g.channel_id === groupChannelFilter) : lineGroups),
-    [lineGroups, groupChannelFilter]
-  );
 
   const handleSave = async () => {
     if (!form.name.trim()) return setFormError('請輸入排程名稱');
@@ -638,101 +627,18 @@ export default function ScheduledTasks() {
         )}
 
         {currentTaskType?.needsLineGroups && (
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">{currentTaskType.noticeLabel || '通知'}內容（選填）</label>
-            <MessageTemplateEditor
-              value={form.notice_template}
-              onChange={(v) => setForm({ ...form, notice_template: v })}
-              {...templateVars}
-              rows={10}
-              placeholder={currentTaskType.noticePlaceholder}
-            />
-            <p className="text-xs text-gray-400 mt-1">
-              這則訊息會發到下方勾選的 LINE 群組或聯絡人（不是發給客人）。
-              {currentTaskType.noticeHint}
-              訂單變數（[姓名]、[入住日期]…）也可以插入，但這是<strong>當日多筆訂單的彙整</strong>，
-              同一個變數在多筆訂單有不同值時會用「、」串起來，只有一筆訂單時就是原本的值。
-            </p>
-          </div>
-        )}
-
-        {currentTaskType?.needsLineGroups && (
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">{currentTaskType.noticeLabel || '通知'}發送對象（選填，可複選：群組與個別聯絡人）</label>
-            {/* 判斷依據是「有沒有官方帳號」而不是「有沒有群組」——收件人也可以是個別聯絡人，
-                某個帳號沒有群組但有聯絡人時，整個選擇區不該被藏起來。 */}
-            {channelOptions.length === 0 ? (
-              <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
-                還沒有設定任何 LINE 官方帳號，請先到「系統設定 → LINE 串接設定」新增。
-              </p>
-            ) : (
-              <>
-              <select
-                value={groupChannelFilter}
-                onChange={(e) => setGroupChannelFilter(e.target.value)}
-                className="w-full px-3 py-2 border rounded-lg bg-white mb-2 text-sm"
-              >
-                <option value="">請先選擇官方帳號</option>
-                {channelOptions.map((c) => (
-                  <option key={c.id} value={c.id}>{c.name}</option>
-                ))}
-              </select>
-
-              {!groupChannelFilter ? (
-                <p className="text-xs text-gray-400 px-1">
-                  收件人分屬各個官方帳號（群組通常掛在廠商用帳號底下），先選帳號才列得出它的群組與聯絡人。
-                </p>
-              ) : (
-                <div className="border rounded-lg divide-y max-h-56 overflow-y-auto">
-                  <p className="px-3 py-1.5 text-xs text-gray-400 bg-gray-50 sticky top-0">LINE 群組</p>
-                  {visibleLineGroups.length === 0 && (
-                    <p className="px-3 py-2 text-xs text-gray-400">這個帳號底下沒有群組。</p>
-                  )}
-                  {visibleLineGroups.map((g) => (
-                    <label key={g.group_id} className="flex items-center gap-2 px-3 py-2 text-sm cursor-pointer hover:bg-gray-50">
-                      <input
-                        type="checkbox"
-                        checked={form.line_recipients.some((r) => r.id === g.group_id)}
-                        onChange={() => toggleRecipient(g.group_id, g.channel_id)}
-                        className="w-4 h-4"
-                      />
-                      <span className="text-gray-700">
-                        {g.name || (g.chat_type === 'room' ? `多人聊天室（${g.group_id.slice(0, 8)}…）` : '（未取得群組名稱）')}
-                      </span>
-                      <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-blue-50 text-blue-600 border border-blue-200">
-                        {g.chat_type === 'room' ? '多人聊天室' : '群組'}
-                      </span>
-                    </label>
-                  ))}
-
-                  <p className="px-3 py-1.5 text-xs text-gray-400 bg-gray-50 sticky top-0">個別聯絡人</p>
-                  {contactsLoading ? (
-                    <p className="px-3 py-2 text-xs text-gray-400">載入中...</p>
-                  ) : channelContacts.length === 0 ? (
-                    <p className="px-3 py-2 text-xs text-gray-400">這個帳號底下還沒有聯絡人。</p>
-                  ) : (
-                    channelContacts.map((c) => (
-                      <label key={c.line_user_id} className="flex items-center gap-2 px-3 py-2 text-sm cursor-pointer hover:bg-gray-50">
-                        <input
-                          type="checkbox"
-                          checked={form.line_recipients.some((r) => r.id === c.line_user_id)}
-                          onChange={() => toggleRecipient(c.line_user_id, c.channel_id)}
-                          className="w-4 h-4"
-                        />
-                        <span className="text-gray-700">{c.nickname || '（未取得暱稱）'}</span>
-                      </label>
-                    ))
-                  )}
-                </div>
-              )}
-              </>
-            )}
-            <p className="text-xs text-gray-400 mt-1">
-              已勾選 {form.line_recipients.length} 個對象
-              {form.line_recipients.length > 0 && groupChannelFilter ? '（切換帳號不會取消其他帳號已勾選的對象）' : ''}。
-              留空＝這支排程只做狀態轉換、不發洗滌單。要發送的話，上面的「洗滌單內容」也要一起填。
-            </p>
-          </div>
+          <NoticeComposer
+            label={currentTaskType.noticeLabel || '通知'}
+            template={form.notice_template}
+            onTemplateChange={(v) => setForm((f) => ({ ...f, notice_template: v }))}
+            recipients={form.line_recipients}
+            onRecipientsChange={(v) => setForm((f) => ({ ...f, line_recipients: v }))}
+            mentions={form.mention_members}
+            onMentionsChange={(v) => setForm((f) => ({ ...f, mention_members: v }))}
+            templateVars={templateVars}
+            placeholder={currentTaskType.noticePlaceholder}
+            hint={currentTaskType.noticeHint}
+          />
         )}
 
         {currentTaskType?.needsGroup && (

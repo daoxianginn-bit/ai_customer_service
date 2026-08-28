@@ -2,7 +2,7 @@ import { Handler } from '@netlify/functions';
 import { Client } from '@line/bot-sdk';
 import { createClient } from '@supabase/supabase-js';
 import { randomUUID, createSign } from 'crypto';
-import { parseCsvKeywords, buildMergeFields, MessageVariable, computeTodayTomorrowFields, laundryItemName } from '../../src/lib/messageVariables';
+import { parseCsvKeywords, buildMergeFields, MessageVariable, computeTodayTomorrowFields, laundryItemName, laundryItemFullName } from '../../src/lib/messageVariables';
 import { computeNextRunAt, ScheduleConfig } from '../../src/lib/scheduleRecurrence';
 import { OCCUPYING_STATUSES, BALANCE_PAID_STATUSES } from '../../src/lib/bookingStatus';
 import { parseIcsEvents } from '../../src/lib/icsParser';
@@ -218,15 +218,35 @@ function addDaysIso(iso: string, days: number): string {
 }
 
 // 已預定(reserved) → 待收尾款(awaiting_balance)：今天 = 入住日 - 3 天。00:00 執行。
-async function advanceToAwaitingBalance(): Promise<{ ok: boolean; summary: string }> {
-  const targetCheckin = addDaysIso(taiwanTodayIso(), 3);
-  const { data, error } = await supabase.from('bookings').select('id, order_number').eq('status', 'reserved').eq('checkin_date', targetCheckin);
+async function advanceToAwaitingBalance(config: Record<string, any>, settings: any): Promise<{ ok: boolean; summary: string }> {
+  const today = taiwanTodayIso();
+  const targetCheckin = addDaysIso(today, 3);
+  // 取整列而不只是 id：通知範本可以插入訂單變數（[姓名]、[入住日期]...），要有完整欄位才算得出來。
+  const { data, error } = await supabase.from('bookings').select('*').eq('status', 'reserved').eq('checkin_date', targetCheckin);
   if (error) return { ok: false, summary: `查詢失敗：${error.message}` };
   if (!data?.length) return { ok: true, summary: '沒有需要轉為待收尾款的訂單' };
   const { error: updateError } = await supabase.from('bookings').update({ status: 'awaiting_balance', updated_at: new Date().toISOString() }).in('id', data.map((b) => b.id));
   if (updateError) return { ok: false, summary: `更新失敗：${updateError.message}` };
   await logStageAdvance(data, 'reserved', 'awaiting_balance', '入住日前 3 天，排程自動轉為待收尾款');
-  return { ok: true, summary: `${data.length} 筆訂單已轉為待收尾款` };
+
+  // 轉完狀態後可以另外通知內部群組/聯絡人。沒設定範本或收件人就只做狀態轉換，
+  // 維持這支排程原本「純狀態轉換」的行為，既有安裝不會因為這次改版突然開始發訊息。
+  const notice = await sendBookingNotice(config, today, data, settings, '待收尾款通知');
+  return { ok: true, summary: `${data.length} 筆訂單已轉為待收尾款${notice ? `；${notice}` : ''}` };
+}
+
+// 入住前提醒：狀態為「待入住」、且入住日就是 2 天後的訂單，發通知給指定的群組/聯絡人。
+// 純通知排程，不改任何訂單狀態——狀態轉換由「待入住→入住中」那支在入住當天處理。
+async function checkinReminderNotice(config: Record<string, any>, settings: any): Promise<{ ok: boolean; summary: string }> {
+  const today = taiwanTodayIso();
+  const targetCheckin = addDaysIso(today, 2);
+  const { data, error } = await supabase.from('bookings').select('*').eq('status', 'awaiting_checkin').eq('checkin_date', targetCheckin);
+  if (error) return { ok: false, summary: `查詢失敗：${error.message}` };
+  if (!data?.length) return { ok: true, summary: '沒有 2 天後入住的待入住訂單' };
+
+  const notice = await sendBookingNotice(config, today, data, settings, '入住前提醒');
+  if (!notice) return { ok: true, summary: `${data.length} 筆 2 天後入住，但尚未填寫通知內容或發送對象，未發送` };
+  return { ok: true, summary: `${data.length} 筆 2 天後入住；${notice}` };
 }
 
 // 待入住(awaiting_checkin) → 入住中(checked_in)：今天 = 入住日。下午 1 點執行。
@@ -253,7 +273,15 @@ async function advanceToCheckedIn(config: Record<string, any>, settings: any): P
 // 排程的彙整通知（洗滌單、押金通知）都是同一套設定：一份寫在排程裡的範本 + 一份收件人清單。
 // 收件人可以是 LINE 群組或個別聯絡人，兩者混在同一份清單裡：LINE 的 push 目標欄位不分
 // userId／groupId，差別只在要用哪個官方帳號的憑證推播，所以每一筆都記著自己的 channel_id。
-interface NoticeSetup { template: string; recipients: { id: string; channel_id: string }[]; legacyGroupIds: string[] }
+type MentionMember = { id: string; name?: string | null };
+interface NoticeSetup {
+  template: string;
+  recipients: { id: string; channel_id: string }[];
+  legacyGroupIds: string[];
+  // 每個群組各自要 @tag 哪些成員：{ [groupId]: [{ id, name }] }。個別聯絡人不需要 tag
+  // （訊息本來就直接發給他），所以這裡實務上只會有群組的 key。
+  mentions: Record<string, MentionMember[]>;
+}
 
 function readNoticeSetup(config: Record<string, any>): NoticeSetup | null {
   const recipients: { id: string; channel_id: string }[] = Array.isArray(config?.line_recipients)
@@ -264,7 +292,15 @@ function readNoticeSetup(config: Record<string, any>): NoticeSetup | null {
   const legacyGroupIds: string[] = Array.isArray(config?.line_group_ids) ? config.line_group_ids.filter(Boolean) : [];
   const template = String(config?.notice_template ?? config?.laundry_template ?? '').trim();
   if (!template || (!recipients.length && !legacyGroupIds.length)) return null;
-  return { template, recipients, legacyGroupIds };
+
+  const raw = config?.mention_members;
+  const mentions: Record<string, MentionMember[]> = {};
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    for (const [groupId, list] of Object.entries(raw)) {
+      if (Array.isArray(list)) mentions[groupId] = (list as any[]).filter((m) => m?.id).map((m) => ({ id: m.id, name: m.name }));
+    }
+  }
+  return { template, recipients, legacyGroupIds, mentions };
 }
 
 /**
@@ -288,7 +324,8 @@ async function pushNotice(setup: NoticeSetup, text: string, what: string): Promi
   // 舊設定只存了群組 ID，沒存所屬帳號，得回頭查 line_groups 才知道要用哪個帳號的憑證。
   const resolved = setup.recipients.length ? setup.recipients : await resolveLegacyGroupRecipients(setup.legacyGroupIds);
   if (!resolved.length) return `${what}未發送：找不到指定的收件人（群組可能已停用或機器人已被移出）`;
-  const pushed = await pushTextToLineTargets(resolved, text);
+  const withMentions = resolved.map((r) => ({ ...r, mentions: setup.mentions[r.id] || [] }));
+  const pushed = await pushTextToLineTargets(withMentions, text);
   return pushed.pushed ? `${what}已發送給 ${pushed.pushed} 個對象` : `${what}未發送：所有推播都失敗`;
 }
 
@@ -311,9 +348,11 @@ async function sendLaundryNotice(config: Record<string, any>, todayIso: string, 
 
   // 依後台設定的顯示順序列出，洗滌廠每天收到的單子排列才一致。
   const ordered = (items || []).slice().sort((a: any, b: any) => (a.display_order ?? 0) - (b.display_order ?? 0));
-  const lines = ordered
-    .filter((it: any) => totals.get(it.id))
-    .map((it: any) => `${laundryItemName(it)}：${totals.get(it.id)}`);
+  const usedItems = ordered.filter((it: any) => totals.get(it.id));
+  // 兩種寫法各出一個變數：[布巾明細] 用完整名稱（內部核對看得懂是哪一款），
+  // [布巾明細(簡稱)] 用洗滌單簡稱（發給洗滌廠的單子才不會又長又難讀）。
+  const lines = usedItems.map((it: any) => `${laundryItemFullName(it)}：${totals.get(it.id)}`);
+  const shortLines = usedItems.map((it: any) => `${laundryItemName(it)}：${totals.get(it.id)}`);
 
   // 每個品項各自也是一個變數，讓管理員可以自己排版（例如只列某幾項、或跟別的文字混在同一行），
   // 不一定要用整包展開的 [布巾明細]。沒用到的品項數量是 0，直接寫 0 比留空白更符合洗滌單的讀法。
@@ -324,6 +363,7 @@ async function sendLaundryNotice(config: Record<string, any>, todayIso: string, 
     ...orderFields,
     日期: toSlashDateShort(todayIso),
     布巾明細: lines.join('\n'),
+    '布巾明細(簡稱)': shortLines.join('\n'),
     訂單數: String(bookingIds.length),
     // [今日日期]／[明日日期] 在每個範本編輯器都是可插入的變數，這裡也要認得，
     // 否則管理員插了它卻原樣出現在發給洗滌廠的訊息裡。
@@ -366,16 +406,69 @@ async function sendDepositNotice(config: Record<string, any>, todayIso: string, 
   return pushNotice(setup, mergeTemplate(setup.template, fields), '押金通知');
 }
 
+/**
+ * 一般的訂單彙整通知：沒有洗滌單／押金那種專屬欄位，只有 [日期]、[訂單數] 跟一般訂單變數。
+ * 「已預定→待收尾款」與「入住前提醒」都用這個——它們要通知的就是「這批訂單怎麼了」，
+ * 不需要額外算什麼。
+ */
+async function sendBookingNotice(
+  config: Record<string, any>,
+  todayIso: string,
+  bookings: any[],
+  settings: any,
+  what: string
+): Promise<string | null> {
+  const setup = readNoticeSetup(config);
+  if (!setup) return null;
+  if (!bookings.length) return null;
+
+  const fields: Record<string, string> = {
+    ...(await mergeOrderFieldsAcrossBookings(bookings, settings)),
+    日期: toSlashDateShort(todayIso),
+    訂單數: String(bookings.length),
+    ...computeTodayTomorrowFields(),
+  };
+
+  return pushNotice(setup, mergeTemplate(setup.template, fields), what);
+}
+
 async function resolveLegacyGroupRecipients(groupIds: string[]): Promise<{ id: string; channel_id: string }[]> {
   if (!groupIds.length) return [];
   const { data } = await supabase.from('line_groups').select('group_id, channel_id').in('group_id', groupIds).eq('is_active', true);
   return (data || []).map((g: any) => ({ id: g.group_id, channel_id: g.channel_id }));
 }
 
+// LINE 平台限制：一則訊息最多 20 個 mention。超過的直接不 tag（訊息照樣發），
+// 不是整則丟掉——通知本身的內容比 tag 到誰更重要。
+const MAX_MENTIONS = 20;
+
+/**
+ * 把要 @tag 的成員接在訊息最前面，並算出每個「@名字」在字串裡的起始位置與長度。
+ * index/length 的單位是 UTF-16 code unit，剛好就是 JS 字串的 .length，中文不用另外換算。
+ * 名字直接用記錄下來的 display_name：LINE 不會驗證這段文字跟 userId 是否相符，
+ * 真正決定 tag 到誰的是 mentionees[].userId。
+ */
+function buildLineTextMessage(text: string, mentions: { id: string; name?: string | null }[] = []): any {
+  const picked = mentions.filter((m) => m?.id).slice(0, MAX_MENTIONS);
+  if (!picked.length) return { type: 'text', text };
+
+  const mentionees: { index: number; length: number; userId: string }[] = [];
+  let prefix = '';
+  for (const m of picked) {
+    const token = `@${(m.name || '').trim() || '成員'}`;
+    mentionees.push({ index: prefix.length, length: token.length, userId: m.id });
+    prefix += `${token} `;
+  }
+  return { type: 'text', text: `${prefix}\n${text}`, mention: { mentionees } };
+}
+
 // 發文字訊息給指定對象（群組或個別聯絡人皆可）。收件人屬於哪個官方帳號一定要照著記錄走——
 // 群組 ID 跟聯絡人 ID 都是各帳號獨立的，用錯帳號的憑證推播一定失敗。
 // 同一個帳號的收件人共用一個 client，不用每筆都重建。
-async function pushTextToLineTargets(targets: { id: string; channel_id: string }[], text: string): Promise<{ pushed: number }> {
+async function pushTextToLineTargets(
+  targets: { id: string; channel_id: string; mentions?: { id: string; name?: string | null }[] }[],
+  text: string
+): Promise<{ pushed: number }> {
   const channelIds = Array.from(new Set(targets.map((t) => t.channel_id)));
   const { data: channels } = await supabase.from('line_channels').select('id, channel_access_token, channel_secret').in('id', channelIds);
   const clientById = new Map<string, any>();
@@ -389,10 +482,10 @@ async function pushTextToLineTargets(targets: { id: string; channel_id: string }
     const client = clientById.get(t.channel_id);
     if (!client) continue;
     try {
-      await client.pushMessage(t.id, { type: 'text', text });
+      await client.pushMessage(t.id, buildLineTextMessage(text, t.mentions));
       pushed++;
     } catch (e: any) {
-      console.error('[ScheduledTasks] laundry push failed:', e.message);
+      console.error('[ScheduledTasks] notice push failed:', e.message);
     }
   }
   return { pushed };
@@ -1204,6 +1297,7 @@ const TASK_EXECUTORS: Record<string, TaskExecutor> = {
   advance_to_awaiting_balance: advanceToAwaitingBalance,
   advance_to_checked_in: advanceToCheckedIn,
   advance_to_deposit_processing: advanceToDepositProcessing,
+  checkin_reminder_notice: checkinReminderNotice,
   balance_reminder: balanceReminder,
   deposit_awaiting_notice: depositAwaitingNotice,
   awaiting_confirmation_notice: awaitingConfirmationNotice,
