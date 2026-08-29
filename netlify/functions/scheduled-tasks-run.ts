@@ -1345,13 +1345,17 @@ function toScheduleConfig(task: any): ScheduleConfig {
   };
 }
 
-// 「立即執行」（排程管理頁的測試按鈕）：手動觸發單一任務，不管 next_run_at 是否已到期，
+// 「立即執行」（排程管理頁的測試按鈕、房況行事曆的手動整合）：手動觸發單一任務，不管 next_run_at 是否已到期，
 // 也不影響原本的排程節奏——只更新 last_run_*，刻意不動 next_run_at/is_active，
 // 這樣測試完不會打亂使用者原本設定好的排程時間。
 // 這支函式本來是給 Netlify 排程器打的公開端點（cron 觸發沒有登入權杖），但手動觸發是新增的
 // 攻擊面，而且有些任務會實際取消訂單、發 LINE 訊息給客人，所以這條路徑額外要求 Supabase 登入權杖，
 // 跟 custom-messages.ts 同一套作法。
-async function runTaskNow(event: any, taskId: string) {
+//
+// 呼叫端是 run-task-now.ts 那支一般函式，不是這支。這支在 netlify.toml 設了 schedule，是
+// Netlify 的排程函式，而排程函式不能用 HTTP 叫起來，POST 過來的請求根本進不到這裡。
+// 詳見 run-task-now.ts 的說明。
+export async function runTaskNow(event: any, taskId: string) {
   const authHeader = event.headers?.['authorization'] || event.headers?.['Authorization'];
   const token = authHeader?.replace(/^Bearer\s+/i, '');
   if (!token) return { statusCode: 401, body: JSON.stringify({ error: '未登入' }) };
@@ -1390,12 +1394,6 @@ async function runTaskNow(event: any, taskId: string) {
 }
 
 const rawHandler: Handler = async (event) => {
-  if (event?.httpMethod === 'POST' && event.body) {
-    let body: any = null;
-    try { body = JSON.parse(event.body); } catch { body = null; }
-    if (body?.taskId) return runTaskNow(event, body.taskId);
-  }
-
   const { data: settings } = await supabase.from('settings').select('*').single();
   if (!settings) return { statusCode: 200, body: 'settings not found, skipped' };
 

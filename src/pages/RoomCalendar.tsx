@@ -151,7 +151,7 @@ export default function RoomCalendar() {
     setOtaChannelList((data || []) as OtaChannel[]);
   };
 
-  // 借用「排程管理」的立即執行邏輯：POST taskId 給 scheduled-tasks-run，完成後把摘要顯示出來，
+  // 借用「排程管理」的立即執行邏輯：POST taskId 給 run-task-now，完成後把摘要顯示出來，
   // 讓管理員不用跳頁去排程管理也能知道這次同步有沒有成功、抓到幾筆。
   const runSyncNow = async () => {
     if (!syncTaskId) return;
@@ -160,19 +160,21 @@ export default function RoomCalendar() {
     try {
       const { data: sessionData } = await supabase.auth.getSession();
       const token = sessionData.session?.access_token;
-      const res = await fetch('/.netlify/functions/scheduled-tasks-run', {
+      const res = await fetch('/.netlify/functions/run-task-now', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ taskId: syncTaskId }),
       });
-      // 先讀純文字再自己 parse：伺服器逾時中斷連線時回應本文是空的，直接呼叫 res.json()
-      // 會丟出讓人看不懂的「Unexpected end of JSON input」，要先分辨出是不是這種情況。
+      // 先讀純文字再自己 parse：回應本文是空的時候直接呼叫 res.json() 會丟出讓人看不懂的
+      // 「Unexpected end of JSON input」。空本文一定要連 HTTP 狀態一起講——這段訊息曾經寫死成
+      // 「資料量太大所以逾時」，但當時真正的原因是打到了不能用 HTTP 呼叫的排程函式，
+      // 每一個排程都失敗，訊息卻把人帶去查資料量。
       const rawText = await res.text();
       let result: any = null;
       try { result = rawText ? JSON.parse(rawText) : null; } catch {}
       if (!res.ok || !result) {
         const detail = result?.error
-          || (!rawText ? '伺服器沒有回應內容，可能是這次要同步/推送的訂單量較大，執行時間超過伺服器單次執行上限而中斷' : `HTTP ${res.status}`);
+          || (!rawText ? `伺服器回應是空的（HTTP ${res.status}）。訂單量大的時候這一步可能超過單次執行上限——排程自己到點執行不受這個上限影響。` : `HTTP ${res.status}`);
         throw new Error(detail);
       }
       setSyncResult({ ok: true, text: result.summary || '整合完成' });

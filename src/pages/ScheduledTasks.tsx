@@ -491,19 +491,21 @@ export default function ScheduledTasks() {
     try {
       const { data: sessionData } = await supabase.auth.getSession();
       const token = sessionData.session?.access_token;
-      const res = await fetch('/.netlify/functions/scheduled-tasks-run', {
+      const res = await fetch('/.netlify/functions/run-task-now', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ taskId: row.id }),
       });
-      // 先讀純文字再自己 parse：伺服器逾時中斷連線時回應本文是空的，直接呼叫 res.json()
-      // 會丟出讓人看不懂的「Unexpected end of JSON input」，要先分辨出是不是這種情況。
+      // 先讀純文字再自己 parse：回應本文是空的時候直接呼叫 res.json() 會丟出讓人看不懂的
+      // 「Unexpected end of JSON input」。空本文一定要連 HTTP 狀態一起講——這段訊息曾經寫死成
+      // 「資料量太大所以逾時」，但當時真正的原因是打到了不能用 HTTP 呼叫的排程函式，
+      // 每一個排程都失敗，訊息卻把人帶去查資料量。
       const rawText = await res.text();
       let result: any = null;
       try { result = rawText ? JSON.parse(rawText) : null; } catch {}
       if (!res.ok || !result) {
         const detail = result?.error
-          || (!rawText ? '伺服器沒有回應內容，可能是這次要處理的資料量較大，執行時間超過伺服器單次執行上限而中斷' : `HTTP ${res.status}`);
+          || (!rawText ? `伺服器回應是空的（HTTP ${res.status}）。若是「行事曆整合同步」這種要處理大量訂單的排程，可能是超過單次執行上限——排程自己到點執行不受這個上限影響。` : `HTTP ${res.status}`);
         throw new Error(detail);
       }
       await fetchRows();
