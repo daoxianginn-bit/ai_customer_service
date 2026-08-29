@@ -117,9 +117,18 @@ NG:0
   {
     value: 'balance_reminder',
     label: '尾款提醒排程',
-    description: '入住日在 3 天內、狀態仍是「待收尾款」的訂單：直接提醒客人本人繳尾款，同時把整批清單彙整通知給通知名單。建議設定為每天執行。',
+    description:
+      '入住日在 3 天內、狀態仍是「待收尾款」的訂單，做兩件事：(1) 用「客製訊息範本」直接提醒客人本人繳尾款；' +
+      '(2) 另外可以選填「尾款提醒通知內容」與「發送對象」，把這批訂單彙整成一則訊息發給指定的 LINE 群組或聯絡人。' +
+      '兩件事各自獨立，只想做其中一件就把另一件留空。建議設定為每天執行。',
     needsTemplate: true,
-    needsGroup: true,
+    needsLineGroups: true,
+    noticeScope: 'booking',
+    noticeLabel: '尾款提醒通知',
+    noticePlaceholder: `日期:[日期]
+以下 [訂單數] 筆訂單即將入住，尚未收到尾款：
+[姓名]／[入住日期]／[尾款]
+請協助追款`,
   },
   {
     value: 'deposit_awaiting_notice',

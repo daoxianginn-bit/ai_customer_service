@@ -615,13 +615,19 @@ async function pushSummaryToGroup(
 // ========================================================================
 
 // 尾款排程：入住日在「今天～今天+2天」內、狀態仍是待收尾款的訂單。
-// 同時做兩件事：(1) 直接提醒客人本人繳尾款 (2) 把整批清單彙整通知給通知名單，方便客服追。
+// 同時做兩件事：(1) 直接提醒客人本人繳尾款 (2) 把整批清單彙整成一則內部通知。
+//
+// (2) 原本走 pushSummaryToGroup 的固定格式（標題＋逐筆列出），內容改不了；改成跟其他排程
+// 一樣用管理員自己編的範本 + NoticeComposer 挑收件人。舊設定裡還留著 notification_group_id 的
+// 照原本的固定格式繼續發，不然升級當下那些排程會安靜地停止通知；管理員在後台重存一次就會
+// 換成新的自訂範本路徑（buildTaskConfig 不再寫入 notification_group_id）。
 async function balanceReminder(config: Record<string, any>, settings: any): Promise<{ ok: boolean; summary: string }> {
   const today = taiwanTodayIso();
   const until = addDaysIso(today, 2);
+  // 取整列而不只是必要欄位：通知範本可以插入任何訂單變數，要有完整欄位才算得出來。
   const { data, error } = await supabase
     .from('bookings')
-    .select('id, order_number, name, nickname, line_user_id, checkin_date, checkout_date, headcount, room_type_label, total_amount, deposit, status')
+    .select('*')
     .eq('status', 'awaiting_balance')
     .gte('checkin_date', today)
     .lte('checkin_date', until);
@@ -629,16 +635,24 @@ async function balanceReminder(config: Record<string, any>, settings: any): Prom
   if (!data?.length) return { ok: true, summary: '沒有 3 天內入住、尚未收尾款的訂單' };
 
   const direct = await pushToCustomersWithTemplate(data, config.template_id, settings);
-  const group = await pushSummaryToGroup(
-    data,
-    config.notification_group_id,
-    '💰 尾款提醒：以下訂單即將入住，尚未收到尾款',
-    (b) => `・${b.order_number || b.id.slice(0, 8)}　${b.name || b.nickname || '未知'}　${b.checkin_date}~${b.checkout_date}`
-  );
 
   const parts = [`${data.length} 筆符合條件`];
   parts.push(direct.skippedNoTemplate ? '未設定客人提醒範本，略過直接通知' : `直接通知客人 ${direct.pushed} 位成功、${direct.failed} 位失敗`);
-  parts.push(group.skipped ? group.skipped : `名單通知 ${group.pushed} 位`);
+
+  const notice = await sendBookingNotice(config, today, data, settings, '尾款提醒通知');
+  if (notice) parts.push(notice);
+
+  // 舊版設定的相容路徑，見上面說明。
+  if (config.notification_group_id) {
+    const group = await pushSummaryToGroup(
+      data,
+      config.notification_group_id,
+      '💰 尾款提醒：以下訂單即將入住，尚未收到尾款',
+      (b) => `・${b.order_number || b.id.slice(0, 8)}　${b.name || b.nickname || '未知'}　${b.checkin_date}~${b.checkout_date}`
+    );
+    parts.push(group.skipped ? group.skipped : `名單通知 ${group.pushed} 位`);
+  }
+
   return { ok: true, summary: parts.join('；') };
 }
 
