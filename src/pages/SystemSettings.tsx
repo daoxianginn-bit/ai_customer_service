@@ -174,15 +174,13 @@ export default function SystemSettings() {
           <div className="border-t pt-6">
             <NotificationGroupsPanel />
           </div>
-
-          <div className="border-t pt-6">
-            <OtaChannelsPanel />
-          </div>
         </div>
         )}
 
-        {/* 行事曆設定：原本擠在「LINE 串接設定」分頁的最下面，但它跟 LINE 一點關係都沒有，
-            找不到是常態。獨立成一個分頁，欄位與儲存邏輯完全沒動，純粹是版面搬家。 */}
+        {/* 行事曆設定：兩個方向的行事曆同步放在一起——往外推的 Google 行事曆，跟往內收的
+            第三方平台 iCal。兩者都由「排程管理」的同一筆「行事曆整合同步」排程執行，設定卻
+            原本分散在「LINE 串接設定」分頁的最下面，跟 LINE 一點關係都沒有，找不到是常態。
+            欄位與儲存邏輯完全沒動，純粹是版面搬家。 */}
         {tab === 'calendar' && (
         <div className="p-6 space-y-6">
           <div className="space-y-4">
@@ -231,6 +229,10 @@ export default function SystemSettings() {
                 </span>
               </p>
             )}
+          </div>
+
+          <div className="border-t pt-6">
+            <OtaChannelsPanel />
           </div>
         </div>
         )}

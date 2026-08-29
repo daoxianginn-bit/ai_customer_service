@@ -290,7 +290,7 @@ export default function RoomCalendar() {
             <Button variant="contained" startIcon={<SlidersHorizontal size={16} />} onClick={() => setDateRangeModalOpen(true)} sx={{ ml: 1 }}>
               旺季/連假日期設定
             </Button>
-            <Tooltip title={syncTaskId ? '手動抓取第三方平台行事曆、同步進系統並推播到 Google 行事曆' : '請先到「排程管理」新增一筆「第三方平台 iCal 同步」排程'}>
+            <Tooltip title={syncTaskId ? '手動抓取第三方平台行事曆、同步進系統並推播到 Google 行事曆' : '請先到「排程管理」新增一筆「行事曆整合同步」排程'}>
               <span>
                 <Button
                   variant="outlined"
