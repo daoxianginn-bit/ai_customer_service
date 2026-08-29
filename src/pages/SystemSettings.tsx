@@ -11,11 +11,12 @@ import OtaChannelsPanel from '../components/OtaChannelsPanel';
 // settings 表的單一表單（同一個 useSettings() hook），合成一頁三個分頁籤（比照
 // LinenManagement.tsx 既有的多分頁寫法），一次只顯示一個區塊，不用一直往下滾展開/收合。
 // 欄位名稱、儲存邏輯、驗證規則完全沒動，純粹是版面搬家。
-type Tab = 'ai' | 'line' | 'handover';
+type Tab = 'ai' | 'line' | 'calendar' | 'handover';
 
 const TABS: { key: Tab; label: string; icon: JSX.Element }[] = [
   { key: 'ai', label: 'AI 引擎設定', icon: <Bot className="w-4 h-4" /> },
   { key: 'line', label: 'LINE 串接設定', icon: <MessageCircle className="w-4 h-4" /> },
+  { key: 'calendar', label: '行事曆設定', icon: <CalendarDays className="w-4 h-4" /> },
   { key: 'handover', label: '轉接規則', icon: <UserCheck className="w-4 h-4" /> },
 ];
 
@@ -56,7 +57,7 @@ export default function SystemSettings() {
       <PageHeader
         icon={<SlidersHorizontal className="w-6 h-6 text-green-600" />}
         title="基本設定"
-        description="AI 引擎、LINE 串接與真人轉接規則"
+        description="AI 引擎、LINE 串接、行事曆同步與真人轉接規則"
         action={
           <Button onClick={handleSave} loading={saving} icon={<Save className="w-4 h-4" />}>
             {saving ? '儲存中...' : '儲存變更'}
@@ -174,7 +175,17 @@ export default function SystemSettings() {
             <NotificationGroupsPanel />
           </div>
 
-          <div className="border-t pt-6 space-y-4">
+          <div className="border-t pt-6">
+            <OtaChannelsPanel />
+          </div>
+        </div>
+        )}
+
+        {/* 行事曆設定：原本擠在「LINE 串接設定」分頁的最下面，但它跟 LINE 一點關係都沒有，
+            找不到是常態。獨立成一個分頁，欄位與儲存邏輯完全沒動，純粹是版面搬家。 */}
+        {tab === 'calendar' && (
+        <div className="p-6 space-y-6">
+          <div className="space-y-4">
             <h4 className="text-sm font-bold text-gray-600 flex items-center gap-2"><CalendarDays className="w-4 h-4" />Google 行事曆同步</h4>
             <p className="text-sm text-gray-500">
               「排程管理」的「行事曆整合同步」排程會把目前所有已鎖房的訂單（不分直接訂房或第三方平台匯入）
@@ -216,10 +227,6 @@ export default function SystemSettings() {
                 </span>
               </p>
             )}
-          </div>
-
-          <div className="border-t pt-6">
-            <OtaChannelsPanel />
           </div>
         </div>
         )}
