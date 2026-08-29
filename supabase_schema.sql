@@ -305,6 +305,10 @@ ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS google_service_account_json
 ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS google_calendar_last_synced_at TIMESTAMPTZ;
 ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS google_calendar_last_sync_status TEXT; -- 'success' | 'failed'，還沒同步過是 NULL
 ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS google_calendar_last_sync_summary TEXT;
+-- 事件標題/內容的格式版本（對應 scheduled-tasks-run.ts 的 GOOGLE_EVENT_FORMAT_VERSION）。
+-- 跟程式碼裡的版本對不起來時，同步排程會忽略「這張訂單沒異動」的判斷、整批重推一次，
+-- 讓行事曆上既有的事件跟著換成新格式，不用手動去清 bookings.google_synced_at。
+ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS google_calendar_format_version INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS booking_welcome_message TEXT DEFAULT '🏡 LINE AI 訂房
 若您想先詢問空房或報價，請直接回覆以下資訊，我們會協助您確認：
 

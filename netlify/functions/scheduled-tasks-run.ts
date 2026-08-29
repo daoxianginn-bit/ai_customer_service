@@ -1115,15 +1115,14 @@ async function deleteGoogleEvent(accessToken: string, calendarId: string, eventI
   }
 }
 
-function formatAdultsKidsGCal(adults: number | null, kids: number | null, infants: number | null): string {
-  const a = adults ?? 0; const k = kids ?? 0; const i = infants ?? 0;
-  return `${a}大${k}小${i > 0 ? `${i}幼` : ''}`;
-}
-
 // 每個 Google API 呼叫都要等對方回應，訂單一多、依序打就很容易超過 Netlify 單次執行的時間上限
 // 而被中斷連線（呼叫端會收到空的回應內容）。改成一次併發打一批，同一批內互相獨立、失敗互不影響，
 // 大幅縮短總時間；併發數字沒有調太高，避免同時撞到 Google Calendar API 的速率限制。
 const GOOGLE_SYNC_CONCURRENCY = 6;
+
+// 事件標題/內容的格式版本。改了 summary/description 的組法就把這個數字加一，
+// 下一次同步會忽略「這張訂單沒異動」的判斷、整批重推一次，讓行事曆上既有的事件跟著換成新格式。
+const GOOGLE_EVENT_FORMAT_VERSION = 2;
 
 async function runInBatches<T>(items: T[], concurrency: number, worker: (item: T) => Promise<void>): Promise<void> {
   for (let i = 0; i < items.length; i += concurrency) {
@@ -1158,10 +1157,16 @@ async function pushBookingsToGoogleCalendar(settings: any): Promise<string> {
     .gte('checkout_date', pastWindowIso);
   if (bookingsError) return `查詢訂單失敗：${bookingsError.message}`;
 
+  // 改過事件的標題/內容格式之後，已經同步過的訂單本身沒有異動，會被下面的
+  // google_synced_at 比對擋掉，行事曆上就一直停留在舊格式——除非那張訂單剛好又被編輯。
+  // 所以把格式版本存進 settings：跟程式碼裡的版本對不起來就整批重推一次，推完寫回新版本。
+  // 之後要再改格式，把 GOOGLE_EVENT_FORMAT_VERSION 加一即可，不用手動去清 google_synced_at。
+  const formatChanged = Number(settings.google_calendar_format_version ?? 0) !== GOOGLE_EVENT_FORMAT_VERSION;
+
   // PostgREST 沒辦法在查詢條件裡比較兩個欄位（updated_at > google_synced_at），改成整批抓回來後
   // 在這裡用 JS 過濾——這個專案的訂單量不大，這樣做比另外寫一個資料庫函式簡單很多。
   const toPush = (bookings || []).filter(
-    (b: any) => !b.google_synced_at || new Date(b.updated_at).getTime() > new Date(b.google_synced_at).getTime()
+    (b: any) => formatChanged || !b.google_synced_at || new Date(b.updated_at).getTime() > new Date(b.google_synced_at).getTime()
   );
 
   let created = 0;
@@ -1179,27 +1184,31 @@ async function pushBookingsToGoogleCalendar(settings: any): Promise<string> {
     // 通用預留字串「Airbnb 訂單」（見 syncOneOtaChannel）。客服到平台後台查到真實姓名、
     // 在「訂單管理」補上去之後才會顯示姓名人數；還沒補之前顯示「已預訂」，不要秀空欄位。
     // 確認碼撈得到才加括號那一段（Airbnb 有，其他平台的規則還沒建立時會是 null）。
-    const sourcePrefix = isExternal ? `【${platformLabel}】` : '【Line】';
+    const sourcePrefix = isExternal ? `【${platformLabel}】` : '';
     const hasRealName = isExternal && b.name && b.name !== `${platformLabel} 訂單`;
     const code = b.external_confirmation_code ? ` (${b.external_confirmation_code})` : '';
+    // 標題＝訂單編號 姓名 人數人（例：Z12AX9 王XX 10人）。本地訂單不再加【Line】前綴——
+    // 我們自己的訂單編號本來就認得出來，前綴只是在標題最前面佔位；第三方訂單仍保留平台前綴，
+    // 因為那是分辨檔期來源的唯一線索。
+    const who = `${b.name || b.nickname || '未填姓名'}${b.headcount != null ? ` ${b.headcount}人` : ''}`;
+    const orderNo = b.order_number ? `${b.order_number} ` : '';
     const summaryParts = isExternal
       ? [`${sourcePrefix}${hasRealName ? `${b.name}${b.headcount ? ` ${b.headcount}人` : ''}` : '已預訂'}${code}`]
-      : [`${sourcePrefix}${`${b.name || b.nickname || '未填姓名'} ${b.headcount ?? ''}人`.trim()}`];
+      : [`${orderNo}${who}`];
     if ((!isExternal || hasRealName) && b.whole_house) summaryParts.push('·包棟');
     if (!isExternal && !BALANCE_PAID_STATUSES.includes(b.status)) summaryParts.push(' ⚠️尾款未收');
     if (b.ota_conflict_detected_at) summaryParts.push(' ⚠️疑似撞期');
     const summary = summaryParts.join('');
 
-    const descParts = [`訂單編號: ${b.order_number || ''}`];
+    // 內容只留房型與備註：訂單編號、姓名、人數都已經在標題上，在內容再列一次只是把
+    // 行事曆的預覽卡片撐長。第三方訂單另外帶來源平台與平台訂單編號——那兩項標題塞不下。
+    const descParts: string[] = [];
     if (isExternal) {
-      descParts.push(`來源平台: ${otaPlatformLabel(b.booking_source)}`);
+      descParts.push(`來源平台: ${platformLabel}`);
       if (b.external_confirmation_code) descParts.push(`平台訂單編號: ${b.external_confirmation_code}`);
-      if (b.notes) descParts.push(`備註: ${b.notes}`); // 平台只給得到電話末 4 碼，匯入時寫在這裡
-    } else {
-      descParts.push(`大人小孩: ${formatAdultsKidsGCal(b.adults, b.kids, b.infants)}`);
-      if (b.room_type_label) descParts.push(`房型: ${b.room_type_label}`);
-      if (b.notes) descParts.push(`備註: ${b.notes}`);
     }
+    descParts.push(`房型：${b.room_type_label || (b.whole_house ? '包棟' : '')}`);
+    descParts.push(`備註：${b.notes || ''}`);
 
     const eventInput: GoogleEventInput = {
       summary, description: descParts.join('\n'),
@@ -1249,12 +1258,15 @@ async function pushBookingsToGoogleCalendar(settings: any): Promise<string> {
   const parts = [`新增 ${created} 筆`, `更新 ${updated} 筆`];
   if (removed) parts.push(`移除 ${removed} 筆`);
   if (failed) parts.push(`⚠️ ${failed} 筆失敗`);
+  if (formatChanged) parts.push('（事件格式更新，本次整批重推）');
   const summary = parts.join('、');
   const anySuccess = created + updated + removed > 0;
   await supabase.from('settings').update({
     google_calendar_last_synced_at: nowIso,
     google_calendar_last_sync_status: failed > 0 && !anySuccess ? 'failed' : 'success',
     google_calendar_last_sync_summary: summary,
+    // 有失敗的就先不記版本，下次再整批重推一次，不然失敗的那幾筆會永遠停在舊格式。
+    ...(formatChanged && failed === 0 ? { google_calendar_format_version: GOOGLE_EVENT_FORMAT_VERSION } : {}),
   }).eq('id', settings.id);
 
   return summary;
