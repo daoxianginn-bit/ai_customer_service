@@ -37,7 +37,14 @@ function InfoTooltip({ children }: { children: React.ReactNode }) {
   );
 }
 
-export default function QuoteCalculator() {
+/**
+ * 試算報價。原本是「價格設定」底下的獨立頁面，現在改成「計價公式設定」標題列的一顆按鈕，
+ * 開在對話框裡——改公式跟驗證公式本來就是同一件事的兩半，分成兩頁要來回切換才比得出差異。
+ *
+ * embedded：開在對話框裡時傳 true，省掉頁面標題與外層卡片邊框（對話框自己有標題與框）。
+ * 業務邏輯完全共用，沒有第二份試算程式碼。
+ */
+export default function QuoteCalculator({ embedded = false }: { embedded?: boolean } = {}) {
   const [loading, setLoading] = useState(true);
 
   const [roomTypes, setRoomTypes] = useState<any[]>([]);
@@ -194,14 +201,16 @@ export default function QuoteCalculator() {
   if (loading) return <div className="p-8 text-center text-gray-500">載入中...</div>;
 
   return (
-    <div className="w-full space-y-4">
-      <PageHeader
-        icon={<Calculator className="w-6 h-6 text-orange-600" />}
-        title="試算報價"
-        description="這裡試算的是「目前已儲存」的計價公式/日期加價/促銷設定，不含其他分頁還沒按儲存的修改。要改公式請到「計價公式設定」。"
-      />
+    <div className={embedded ? '' : 'w-full space-y-4'}>
+      {!embedded && (
+        <PageHeader
+          icon={<Calculator className="w-6 h-6 text-orange-600" />}
+          title="試算報價"
+          description="這裡試算的是「目前已儲存」的計價公式/日期加價/促銷設定，不含其他分頁還沒按儲存的修改。要改公式請到「計價公式設定」。"
+        />
+      )}
 
-      <div className="bg-white rounded-xl shadow-sm border overflow-hidden">
+      <div className={embedded ? 'overflow-hidden' : 'bg-white rounded-xl shadow-sm border overflow-hidden'}>
         <div className="p-6 border-b space-y-4">
           <div>
             <button

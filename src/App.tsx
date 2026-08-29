@@ -13,7 +13,6 @@ import KnowledgeBase from './pages/KnowledgeBase';
 import AiServiceCenter from './pages/AiServiceCenter';
 import AdminAccounts from './pages/AdminAccounts';
 import PricingOverview from './pages/pricing/Overview';
-import QuoteCalculator from './pages/pricing/QuoteCalculator';
 import FormulaSettings from './pages/pricing/FormulaSettings';
 import StandardMessages from './pages/StandardMessages';
 import MessageVariables from './pages/MessageVariables';
@@ -121,7 +120,9 @@ function App() {
           <Route path="/room-calendar" element={<RoomCalendar />} />
           <Route path="/room-spaces" element={<RoomSpaceManagement />} />
           <Route path="/room-pricing" element={<PricingOverview />} />
-          <Route path="/room-pricing/quote" element={<QuoteCalculator />} />
+          {/* 試算報價改成「計價公式設定」標題列的一顆按鈕（開在對話框裡），不再是獨立頁面。
+              舊路徑保留轉址，避免書籤失效。 */}
+          <Route path="/room-pricing/quote" element={<Navigate to="/room-pricing/formula" replace />} />
           <Route path="/room-pricing/formula" element={<FormulaSettings />} />
           <Route path="/linens" element={<LinenManagement />} />
           {/* 舊路徑（改版前「耗材維護」獨立頁面）保留轉址，避免書籤失效 */}

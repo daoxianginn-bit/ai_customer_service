@@ -71,7 +71,6 @@ const navEntries: NavEntry[] = [
     icon: Calculator,
     children: [
       { to: '/room-pricing', label: '價格總覽', icon: LayoutDashboard },
-      { to: '/room-pricing/quote', label: '試算報價', icon: Calculator },
       { to: '/room-pricing/formula', label: '計價公式設定', icon: SlidersHorizontal },
     ],
   },

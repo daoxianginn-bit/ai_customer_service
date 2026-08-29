@@ -4,10 +4,12 @@ import { supabase } from '../../lib/supabase';
 import {
   Box, Paper, Stack, Typography, Button, IconButton, TextField, MenuItem, Chip, Tooltip, Divider,
   Radio, RadioGroup, FormControlLabel, Table, TableHead, TableBody, TableRow, TableCell, TableContainer,
+  Dialog, DialogTitle, DialogContent,
 } from '@mui/material';
-import { SlidersHorizontal, Pencil, Sparkles, Plus, Trash2, Info } from 'lucide-react';
+import { SlidersHorizontal, Pencil, Sparkles, Plus, Trash2, Info, Calculator, X } from 'lucide-react';
 import PageHeaderMui from '../../components/ui-mui/PageHeaderMui';
 import SpecialDatesModal from '../../components/SpecialDatesModal';
+import QuoteCalculator from './QuoteCalculator';
 import { computeStandardRoomLayout, RoomCapacityCount, CapacityLayout } from '../../lib/bookingEngine';
 import { logOperation } from '../../lib/logOperation';
 import { LOG_FEATURES, diffRecords } from '../../lib/operationLog';
@@ -115,6 +117,8 @@ export default function FormulaSettings() {
 
   // 房型押金
   const [roomTypes, setRoomTypes] = useState<any[]>([]);
+  // 報價試算對話框。試算跟改公式是同一件事的兩半，開在這一頁才不用來回切頁比對。
+  const [quoteOpen, setQuoteOpen] = useState(false);
   const [editingDeposits, setEditingDeposits] = useState(false);
   const [savingDeposits, setSavingDeposits] = useState(false);
 
@@ -383,7 +387,32 @@ export default function FormulaSettings() {
         icon={<SlidersHorizontal size={26} color="#16a34a" />}
         title="計價公式設定"
         description="所有人數統一用這套公式自動報價：標準房型（依人數湊出的床位數）× 每床基礎價 ＋ 滿載獎勵 ＋ 加開房費 ＋ 日期加價。每個區塊預設唯讀，點「編輯」才能修改，各自獨立儲存。房型基本資料（名稱/樓層/容納人數）請到「房型與空間維護」調整。"
+        action={
+          <Button variant="outlined" startIcon={<Calculator size={18} />} onClick={() => setQuoteOpen(true)}>
+            報價試算
+          </Button>
+        }
       />
+
+      {/* 試算用的是「已儲存」的設定，所以每次開都重新掛載（key 由 open 決定會太粗糙，
+          直接靠 open 控制渲染即可）——剛按完儲存再打開，看到的就是新設定算出來的價格。 */}
+      <Dialog open={quoteOpen} onClose={() => setQuoteOpen(false)} maxWidth="md" fullWidth>
+        <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 2, pr: 1 }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+            <Calculator size={20} color="#ea580c" />
+            <Typography component="span" fontWeight={700}>報價試算</Typography>
+          </Box>
+          <IconButton onClick={() => setQuoteOpen(false)} size="small" aria-label="關閉">
+            <X size={18} />
+          </IconButton>
+        </DialogTitle>
+        <DialogContent dividers>
+          <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1.5 }}>
+            試算用的是<strong>目前已儲存</strong>的計價公式／日期加價／促銷設定，上面還沒按儲存的修改不會算進去。
+          </Typography>
+          {quoteOpen && <QuoteCalculator embedded />}
+        </DialogContent>
+      </Dialog>
 
       <Box id="pricing-formula-section" sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
       <Typography variant="h6" fontWeight={700}>計價公式</Typography>
