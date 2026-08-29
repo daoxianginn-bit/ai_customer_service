@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import { ScrollText, Search, RotateCcw, ListFilter, UserCog, CalendarDays, ArrowRight, AlertTriangle } from 'lucide-react';
-import { PageHeader, Button, EmptyState } from '../components/ui';
+import { PageHeader, Button, EmptyState, Modal } from '../components/ui';
 import { LOG_FEATURE_OPTIONS, LOG_FUNCTION_NAMES, formatLogValue } from '../lib/operationLog';
 
 const PAGE_SIZE = 30;
@@ -37,26 +37,50 @@ const ACTION_STYLE: Record<string, string> = {
   批次刪除: 'bg-red-50 text-red-700 border-red-200',
 };
 
+// 表格列裡的摘要上限。整份設定的 JSON、AI 提示詞、錯誤堆疊都可能是幾百幾千字，整個攤在
+// 表格裡會把那一列撐成一整頁高，前後幾筆紀錄就被推出畫面外，反而看不出「這一天做了什麼」。
+// 表格只給看得出是哪一筆的線索，完整內容點開來看。
+const PREVIEW_FIELD_LIMIT = 3;
+const PREVIEW_VALUE_LIMIT = 40;
+const PREVIEW_ERROR_LIMIT = 120;
+
+function truncate(text: string, limit: number): string {
+  return text.length > limit ? `${text.slice(0, limit)}…` : text;
+}
+
 // 異動前後並排，一行一個欄位。只列出真的有變的欄位（寫入時就已經比對過，見 operationLog.ts），
 // 所以這裡不用再過濾，直接把兩邊的鍵聯集起來顯示即可。
-function ChangeTable({ before, after }: { before: Record<string, unknown> | null; after: Record<string, unknown> | null }) {
+// preview：表格列用的摘要模式，只列前幾個欄位、值也截短；詳細視窗傳 false 顯示完整內容。
+function ChangeTable({
+  before, after, preview = false,
+}: {
+  before: Record<string, unknown> | null;
+  after: Record<string, unknown> | null;
+  preview?: boolean;
+}) {
   const keys = Array.from(new Set([...Object.keys(before || {}), ...Object.keys(after || {})]));
   if (keys.length === 0) return <span className="text-xs text-gray-400">—</span>;
 
+  const shown = preview ? keys.slice(0, PREVIEW_FIELD_LIMIT) : keys;
+  const value = (v: unknown) => (preview ? truncate(formatLogValue(v), PREVIEW_VALUE_LIMIT) : formatLogValue(v));
+
   return (
     <div className="space-y-1">
-      {keys.map((key) => (
+      {shown.map((key) => (
         <div key={key} className="flex flex-wrap items-center gap-1.5 text-xs">
           <span className="text-gray-500 shrink-0">{key}</span>
-          <span className="px-1.5 py-0.5 rounded bg-gray-100 text-gray-600 break-all">
-            {formatLogValue(before?.[key])}
+          <span className="px-1.5 py-0.5 rounded bg-gray-100 text-gray-600 break-all whitespace-pre-wrap">
+            {value(before?.[key])}
           </span>
           <ArrowRight className="w-3 h-3 text-gray-300 shrink-0" />
-          <span className="px-1.5 py-0.5 rounded bg-green-50 text-green-800 border border-green-100 break-all">
-            {formatLogValue(after?.[key])}
+          <span className="px-1.5 py-0.5 rounded bg-green-50 text-green-800 border border-green-100 break-all whitespace-pre-wrap">
+            {value(after?.[key])}
           </span>
         </div>
       ))}
+      {shown.length < keys.length && (
+        <p className="text-xs text-gray-400">還有 {keys.length - shown.length} 個欄位，點這一列看完整內容</p>
+      )}
     </div>
   );
 }
@@ -66,6 +90,8 @@ export default function OperationLogs() {
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(0);
   const [hasMore, setHasMore] = useState(false);
+  // 點開來看完整內容的那一筆。表格裡只放摘要，見 ChangeTable 的 preview。
+  const [detail, setDetail] = useState<LogRow | null>(null);
 
   const [keyword, setKeyword] = useState('');
   const [feature, setFeature] = useState('');
@@ -211,7 +237,7 @@ export default function OperationLogs() {
                 <th className="py-3 px-4 whitespace-nowrap">動作</th>
                 <th className="py-3 px-4 whitespace-nowrap">對象</th>
                 <th className="py-3 px-4 whitespace-nowrap">異動者</th>
-                <th className="py-3 px-4 min-w-[280px]">異動前 → 異動後</th>
+                <th className="py-3 px-4 min-w-[280px]">異動前 → 異動後<span className="ml-2 font-normal text-xs text-gray-400">（點一列看完整內容）</span></th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
@@ -223,7 +249,12 @@ export default function OperationLogs() {
                 rows.map((row) => {
                   const isError = row.level === 'error';
                   return (
-                    <tr key={row.id} className={`align-top ${isError ? 'bg-red-50/40 hover:bg-red-50' : 'hover:bg-gray-50'}`}>
+                    <tr
+                      key={row.id}
+                      onClick={() => setDetail(row)}
+                      title="點一下看完整的異動前後內容"
+                      className={`align-top cursor-pointer ${isError ? 'bg-red-50/40 hover:bg-red-50' : 'hover:bg-gray-50'}`}
+                    >
                       <td className="py-3 px-4 whitespace-nowrap text-gray-500 text-xs">{formatDateTime(row.created_at)}</td>
                       <td className="py-3 px-4 whitespace-nowrap text-gray-700">{row.feature}</td>
                       <td className="py-3 px-4 whitespace-nowrap">
@@ -252,10 +283,12 @@ export default function OperationLogs() {
                               </span>
                             )}
                             {/* 錯誤訊息可能含堆疊，用 pre-wrap 保留換行才看得出是哪一層出錯 */}
-                            <p className="text-xs text-red-800 whitespace-pre-wrap break-all">{row.error_message || '（沒有錯誤訊息）'}</p>
+                            <p className="text-xs text-red-800 whitespace-pre-wrap break-all">
+                              {truncate(row.error_message || '（沒有錯誤訊息）', PREVIEW_ERROR_LIMIT)}
+                            </p>
                           </div>
                         ) : (
-                          <ChangeTable before={row.before} after={row.after} />
+                          <ChangeTable before={row.before} after={row.after} preview />
                         )}
                       </td>
                     </tr>
@@ -271,6 +304,50 @@ export default function OperationLogs() {
           <button disabled={!hasMore || loading} onClick={() => runQuery(page + 1)} className="px-3 py-1 border rounded-lg disabled:opacity-40">下一頁</button>
         </div>
       </div>
+
+      <Modal
+        open={!!detail}
+        title="操作紀錄明細"
+        maxWidth="max-w-3xl"
+        onClose={() => setDetail(null)}
+        footer={<Button variant="secondary" onClick={() => setDetail(null)}>關閉</Button>}
+      >
+        {detail && (
+          <>
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
+              {[
+                ['更新時間', formatDateTime(detail.created_at)],
+                ['功能', detail.feature],
+                ['動作', detail.action],
+                ['對象', detail.target || '—'],
+                ['異動者', detail.actor_type === 'system' ? '系統' : detail.actor_name],
+                ['層級', detail.level === 'error' ? `錯誤${detail.status_code != null ? ` · HTTP ${detail.status_code}` : ''}` : '一般'],
+              ].map(([label, value]) => (
+                <div key={label} className="border rounded-lg px-3 py-2">
+                  <p className="text-xs text-gray-500">{label}</p>
+                  <p className="text-sm text-gray-800 mt-0.5 break-all">{value}</p>
+                </div>
+              ))}
+            </div>
+
+            {detail.level === 'error' ? (
+              <div>
+                <p className="text-xs text-gray-500 mb-1">錯誤訊息</p>
+                <pre className="text-xs text-red-800 bg-red-50 border border-red-200 rounded-lg p-3 whitespace-pre-wrap break-all max-h-[50vh] overflow-y-auto">
+                  {detail.error_message || '（沒有錯誤訊息）'}
+                </pre>
+              </div>
+            ) : (
+              <div>
+                <p className="text-xs text-gray-500 mb-1.5">異動前 → 異動後</p>
+                <div className="border rounded-lg p-3 max-h-[50vh] overflow-y-auto">
+                  <ChangeTable before={detail.before} after={detail.after} />
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </Modal>
     </div>
   );
 }
