@@ -5,7 +5,7 @@ import { Button, Modal, StatusBadge, EmptyState, ConfirmDialog } from '../compon
 import {
   BOOKING_STATUS_OPTIONS, SYSTEM_ONLY_STATUSES, REQUIRES_REMIT_LAST5_STATUS, REQUIRES_CHECKIN_PASSWORD_STATUS,
   FLOW_STEP_STATUSES, flowStepIndex, bookingStatusLabel, bookingStatusDescription, nextFlowStatus,
-  MANUAL_ACTION_STATUSES, MANUAL_ACTION_FLOW_STATUSES, OCCUPYING_STATUSES,
+  MANUAL_ACTION_STATUSES, MANUAL_ACTION_FLOW_STATUSES, OCCUPYING_STATUSES, bookingStatusRowClass,
 } from '../lib/bookingStatus';
 import { computeOrderAmounts } from '../lib/messageVariables';
 import { generateOrderNumber } from '../lib/orderNumber';
@@ -1063,7 +1063,9 @@ export default function OrderManagement() {
               全選這一頁（{selectedIds.length}/{rows.length}）
             </label>
           )}
-          <div className="divide-y divide-gray-100 max-h-[560px] overflow-y-auto">
+          {/* 分隔線改由每一列自己畫（border-b），不用 divide-y：divide-{color} 會在每個子元素上
+              設 border-color 這個「簡寫」屬性，把各列依狀態上色的 border-l-* 整個蓋掉。 */}
+          <div className="max-h-[560px] overflow-y-auto">
             {loading ? (
               <p className="py-10 text-center text-gray-400 text-sm">載入中...</p>
             ) : rows.length === 0 ? (
@@ -1075,8 +1077,14 @@ export default function OrderManagement() {
                   <div
                     key={row.id}
                     onClick={() => (batchMode ? toggleSelectRow(row.id) : setSelectedOrder(row))}
-                    className={`px-4 py-3 cursor-pointer transition-colors border-l-4 ${
-                      isSelected && !batchMode ? 'bg-green-50/70 border-l-green-500' : 'border-l-transparent hover:bg-gray-50'
+                    // 底色與左側色條一律照狀態上色（見 bookingStatus.ts 的 rowClassName），
+                    // 選取中的那列不換掉底色、改用綠色外框＋色條標示——不然「目前選哪張」跟
+                    // 「這張是什麼狀態」會互相蓋掉，只剩一個看得到。
+                    // hover 用 brightness 而不是換成灰底，才不會一滑過去就把狀態色洗掉。
+                    className={`px-4 py-3 cursor-pointer transition-colors border-l-4 border-b border-b-gray-100 ${bookingStatusRowClass(row.status)} ${
+                      isSelected && !batchMode
+                        ? '!border-l-green-500 ring-2 ring-inset ring-green-500/40'
+                        : 'hover:brightness-95'
                     }`}
                   >
                     <div className="flex items-start gap-2">

@@ -21,6 +21,11 @@ export interface BookingStatusOption {
   label: string;
   description: string;
   badgeClassName: string;
+  // 訂單清單整列的淡色底色＋左側色條，讓一整頁訂單不用逐列讀狀態標籤就能分辨進度。
+  // 刻意只用 50/100 這種最淡的色階：底色要能襯托上面的文字，不是自己搶著被看見。
+  // 色系跟 badgeClassName 對齊（同一個狀態在哪裡看都是同一個顏色），只有三個例外是依指定調整：
+  // 待確認＝淡紅（要人工核對匯款，紅色代表「等你動手」）、待入住＝淡藍、已處理＝淡灰（結案、退居背景）。
+  rowClassName: string;
   // 對應規格書裡的流程編號（1~9 主流程、20~22 例外分支），供畫面顯示「3.待確認」
   // 這種帶編號的呈現方式，跟客服原本習慣的編號對齊。系統專用狀態（pending_manual_conflict）
   // 沒有編號。
@@ -30,18 +35,18 @@ export interface BookingStatusOption {
 // 管理員可以在「訂單管理」手動選擇的狀態，依正常流程先後排序（1~9），
 // 例外分支（取消/退款）緊接在後（20~22）。
 export const BOOKING_STATUS_OPTIONS: BookingStatusOption[] = [
-  { value: 'inquiring', label: '待報價', description: '客戶資訊都收集了，AI 尚未算出報價。', badgeClassName: 'bg-gray-100 text-gray-600', code: 1 },
-  { value: 'awaiting_deposit', label: '待預定', description: 'AI 已算出報價並送出，等待客戶回覆是否要預訂。', badgeClassName: 'bg-yellow-100 text-yellow-700', code: 2 },
-  { value: 'awaiting_confirmation', label: '待確認', description: '客戶已回覆確認要預訂，等待客服核對匯款是否到帳。', badgeClassName: 'bg-amber-100 text-amber-700', code: 3 },
-  { value: 'reserved', label: '已預定', description: '已核對收到訂金，距離入住日還早。', badgeClassName: 'bg-purple-100 text-purple-700', code: 4 },
-  { value: 'awaiting_balance', label: '待收尾款', description: '已收訂金、未收尾款，距離入住日剩 3 天內。', badgeClassName: 'bg-orange-100 text-orange-700', code: 5 },
-  { value: 'awaiting_checkin', label: '待入住', description: '已收尾款，等待入住日到來。', badgeClassName: 'bg-sky-100 text-sky-700', code: 6 },
-  { value: 'checked_in', label: '入住中', description: '入住當天，客人正在住宿期間。', badgeClassName: 'bg-teal-100 text-teal-700', code: 7 },
-  { value: 'deposit_processing', label: '押金處理', description: '已退房，押金核對／退還處理中。', badgeClassName: 'bg-indigo-100 text-indigo-700', code: 8 },
-  { value: 'completed', label: '已處理', description: '押金已處理完畢，訂單結案。', badgeClassName: 'bg-green-100 text-green-700', code: 9 },
-  { value: 'cancelled', label: '取消訂單', description: '客戶取消訂單，且沒有已收款項需要退還。', badgeClassName: 'bg-red-50 text-red-500', code: 20 },
-  { value: 'awaiting_refund', label: '待退款', description: '客戶取消訂單，款項尚未退回。', badgeClassName: 'bg-red-100 text-red-600', code: 21 },
-  { value: 'refunded', label: '已退款', description: '客戶取消訂單，款項已經匯還給客戶。', badgeClassName: 'bg-gray-200 text-gray-600', code: 22 },
+  { value: 'inquiring', label: '待報價', description: '客戶資訊都收集了，AI 尚未算出報價。', badgeClassName: 'bg-gray-100 text-gray-600', rowClassName: 'bg-slate-50 border-l-slate-300', code: 1 },
+  { value: 'awaiting_deposit', label: '待預定', description: 'AI 已算出報價並送出，等待客戶回覆是否要預訂。', badgeClassName: 'bg-yellow-100 text-yellow-700', rowClassName: 'bg-yellow-50 border-l-yellow-400', code: 2 },
+  { value: 'awaiting_confirmation', label: '待確認', description: '客戶已回覆確認要預訂，等待客服核對匯款是否到帳。', badgeClassName: 'bg-amber-100 text-amber-700', rowClassName: 'bg-red-50 border-l-red-400', code: 3 },
+  { value: 'reserved', label: '已預定', description: '已核對收到訂金，距離入住日還早。', badgeClassName: 'bg-purple-100 text-purple-700', rowClassName: 'bg-purple-50 border-l-purple-400', code: 4 },
+  { value: 'awaiting_balance', label: '待收尾款', description: '已收訂金、未收尾款，距離入住日剩 3 天內。', badgeClassName: 'bg-orange-100 text-orange-700', rowClassName: 'bg-orange-50 border-l-orange-400', code: 5 },
+  { value: 'awaiting_checkin', label: '待入住', description: '已收尾款，等待入住日到來。', badgeClassName: 'bg-sky-100 text-sky-700', rowClassName: 'bg-sky-50 border-l-sky-400', code: 6 },
+  { value: 'checked_in', label: '入住中', description: '入住當天，客人正在住宿期間。', badgeClassName: 'bg-teal-100 text-teal-700', rowClassName: 'bg-teal-50 border-l-teal-400', code: 7 },
+  { value: 'deposit_processing', label: '押金處理', description: '已退房，押金核對／退還處理中。', badgeClassName: 'bg-indigo-100 text-indigo-700', rowClassName: 'bg-indigo-50 border-l-indigo-400', code: 8 },
+  { value: 'completed', label: '已處理', description: '押金已處理完畢，訂單結案。', badgeClassName: 'bg-green-100 text-green-700', rowClassName: 'bg-gray-50 border-l-gray-300', code: 9 },
+  { value: 'cancelled', label: '取消訂單', description: '客戶取消訂單，且沒有已收款項需要退還。', badgeClassName: 'bg-red-50 text-red-500', rowClassName: 'bg-gray-100 border-l-gray-400', code: 20 },
+  { value: 'awaiting_refund', label: '待退款', description: '客戶取消訂單，款項尚未退回。', badgeClassName: 'bg-red-100 text-red-600', rowClassName: 'bg-rose-100 border-l-rose-500', code: 21 },
+  { value: 'refunded', label: '已退款', description: '客戶取消訂單，款項已經匯還給客戶。', badgeClassName: 'bg-gray-200 text-gray-600', rowClassName: 'bg-gray-100 border-l-gray-300', code: 22 },
 ];
 
 // 系統專用狀態：不開放管理員在「訂單管理」下拉選單手動選這些狀態，只由系統自動寫入/清除。
@@ -52,6 +57,8 @@ export const SYSTEM_ONLY_STATUSES: BookingStatusOption[] = [
     label: '待人工確認',
     description: '系統偵測到入住日期/房型跟其他訂單重疊，需要人工核實實際空房狀況。',
     badgeClassName: 'bg-red-100 text-red-700',
+    // 比「待確認」的淡紅更深一階：這是系統攔下來的異常，要比常態的人工關卡更跳出來。
+    rowClassName: 'bg-red-100 border-l-red-500',
     code: 0,
   },
   {
@@ -62,6 +69,7 @@ export const SYSTEM_ONLY_STATUSES: BookingStatusOption[] = [
     label: '外部平台已訂',
     description: '從第三方平台（Airbnb／Booking.com／Agoda／Trip）iCal 同步匯入的既有訂單，僅用來佔用日期避免雙重預訂，異動請回到來源平台操作。',
     badgeClassName: 'bg-slate-100 text-slate-600',
+    rowClassName: 'bg-slate-100 border-l-slate-400',
     code: 0,
   },
 ];
@@ -78,6 +86,11 @@ export function bookingStatusDescription(status?: string | null): string {
 
 export function bookingStatusBadgeClass(status?: string | null): string {
   return ALL_BOOKING_STATUSES.find((s) => s.value === status)?.badgeClassName || 'bg-gray-100 text-gray-600';
+}
+
+/** 訂單清單整列的淡色底色＋左側色條。認不得的狀態退回白底無色條，不要亂上色誤導。 */
+export function bookingStatusRowClass(status?: string | null): string {
+  return ALL_BOOKING_STATUSES.find((s) => s.value === status)?.rowClassName || 'bg-white border-l-transparent';
 }
 
 export function bookingStatusCode(status?: string | null): number | null {
