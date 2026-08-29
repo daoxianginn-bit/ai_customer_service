@@ -193,9 +193,13 @@ export default function SystemSettings() {
               設定好之後不用手動訂閱，排程跑過就能在 Google 日曆上看到最新狀況。
             </p>
             <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
-              一次性設定步驟：(1) 到 Google Cloud Console 建立一個服務帳號、下載金鑰（JSON），貼到下方「服務帳號金鑰」欄位。
-              (2) 打開目標 Google 行事曆的設定，把它「分享」給金鑰裡 <code className="font-mono">client_email</code> 那組信箱，權限選「可以變更活動」。
-              (3) 到「排程管理」新增一筆「行事曆整合同步」排程。金鑰內容等同密碼，請勿外流。
+              一次性設定步驟：(1) 到 Google Cloud Console 的「API 和服務」啟用 <strong>Google Calendar API</strong>。
+              (2) 建立一個服務帳號、下載金鑰（JSON），貼到下方「服務帳號金鑰」欄位。
+              (3) 打開目標 Google 行事曆的設定，把它「分享」給金鑰裡 <code className="font-mono">client_email</code> 那組信箱，權限選「可以變更活動」。
+              (4) 到「排程管理」新增一筆「行事曆整合同步」排程。金鑰內容等同密碼，請勿外流。
+              <br />
+              第 (1) 步漏掉的話，前面都設定對了同步一樣會失敗，錯誤訊息是 <code className="font-mono">403 SERVICE_DISABLED</code>；
+              第 (3) 步權限只給「查看」的話會是 <code className="font-mono">403 forbidden</code>，寫不進去。
             </p>
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Google 行事曆 ID</label>

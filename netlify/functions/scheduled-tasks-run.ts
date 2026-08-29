@@ -1036,8 +1036,11 @@ async function syncOneOtaChannel(channel: any): Promise<{ summary: string; confl
 // events API」，Node 內建的 crypto 就做得到 RS256 簽章，跟這個專案一貫「小範圍需求手刻，
 // 不為了一兩個功能多背一個大套件」的原則一致（ICS 解析器、iCal 產生器都是同樣的考量）。
 //
-// 服務帳號要先被管理員手動「分享」到目標 Google 行事曆（在金鑰的 client_email 那組信箱，
-// 權限設「可以變更活動」），這是一次性的設定步驟，沒辦法用程式自動做，需要在後台文案裡說清楚。
+// 兩個一次性設定步驟，都沒辦法用程式自動做，需要在後台文案裡說清楚（見「基本設定 → 行事曆設定」）：
+//   1. 服務帳號所屬的 Google Cloud 專案要啟用 Google Calendar API，否則換到的 token 打 events
+//      API 會被擋，回 403 SERVICE_DISABLED——最容易漏的一步，因為金鑰本身拿得到、看起來都對。
+//   2. 服務帳號要被管理員手動「分享」到目標 Google 行事曆（在金鑰的 client_email 那組信箱，
+//      權限設「可以變更活動」；只給「查看」會在寫入時被擋）。
 // ========================================================================
 
 function base64url(input: Buffer | string): string {
