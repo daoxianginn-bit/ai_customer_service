@@ -56,15 +56,46 @@ PUBLIC_SITE_URL = https://your-site.netlify.app
 
 1. 建立專案 → **APIs & Services → Credentials → Create Credentials → OAuth client ID**
 2. Application type 選 **Web application**
-3. **Authorized redirect URIs** 填入（注意是 Supabase 的網址，不是你的網站）：
+3. **Authorized redirect URIs** 填入 **Supabase 的網址**（不是你自己的網站，原因見下方說明）：
    ```
    https://<你的專案代號>.supabase.co/auth/v1/callback
    ```
+   > 專案代號在 Supabase 後台 **Settings → API → Project URL** 可以看到，
+   > 把那個網址後面接上 `/auth/v1/callback` 就是要填的內容。
 4. 建立後取得 **Client ID** 與 **Client Secret**
 
 ### 2. Supabase 後台
 
 **Authentication → Providers → Google** → 開啟，貼上 Client ID 與 Client Secret → Save。
+
+### 為什麼 Google 那格要填 Supabase 的網址？
+
+這裡有**兩個都叫 redirect 的設定**，很容易搞混。先看 Google 登入實際的流程：
+
+```
+① 使用者在你的網站點「使用 Google 登入」
+      ↓
+② 瀏覽器跳到 Google 登入畫面
+      ↓
+③ 使用者同意授權
+      ↓
+④ Google 把結果送回 ★Supabase★      ← Google 的 Authorized redirect URIs
+      ↓
+⑤ Supabase 驗證完，把使用者送回 ★你的網站★  ← Supabase 的 Redirect URLs
+      ↓
+⑥ 使用者回到你的網站，已登入
+```
+
+關鍵在第 ④ 步：Google **不會**直接把結果送回你的網站，而是送給 Supabase——
+因為持有 Client Secret、負責跟 Google 交換憑證的是 Supabase，不是瀏覽器裡的前端程式碼
+（Secret 放前端等於公開）。所以 Google 那邊登記的接收位址是 Supabase 的。
+
+| 設定位置 | 欄位名稱 | 填誰的網址 | 對應步驟 |
+|---|---|---|---|
+| Google Cloud Console | Authorized redirect URIs | **Supabase 的** | ④ |
+| Supabase 後台 | Redirect URLs（本文第一節） | **你的網站的** | ⑤ |
+
+兩個都要設定，缺一個登入就會在對應的那一步失敗。
 
 ---
 
