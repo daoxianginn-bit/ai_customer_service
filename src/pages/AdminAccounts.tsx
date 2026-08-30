@@ -4,7 +4,7 @@ import {
   MenuItem, Stack, TextField, Tooltip, Typography, IconButton,
 } from '@mui/material';
 import { useSnackbar } from 'notistack';
-import { UserCog, UserPlus, Trash2, Ban, CheckCircle2, ShieldOff, ShieldCheck } from 'lucide-react';
+import { UserCog, UserPlus, Trash2, Ban, CheckCircle2, ShieldOff, ShieldCheck, Copy, Check } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../lib/AuthContext';
 import {
@@ -66,7 +66,10 @@ export default function AdminAccounts() {
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteRole, setInviteRole] = useState<AdminRole>('staff');
   const [inviting, setInviting] = useState(false);
-  const [inviteResult, setInviteResult] = useState<{ email: string; mailSent: boolean; mailError: string | null } | null>(null);
+  const [inviteResult, setInviteResult] = useState<
+    { email: string; mailSent: boolean; mailError: string | null; inviteUrl: string } | null
+  >(null);
+  const [linkCopied, setLinkCopied] = useState(false);
 
   const fetchAll = useCallback(async () => {
     setLoading(true);
@@ -216,7 +219,13 @@ export default function AdminAccounts() {
         method: 'POST',
         body: JSON.stringify({ email: inviteEmail.trim(), role: inviteRole }),
       });
-      setInviteResult({ email: result.email, mailSent: result.mailSent, mailError: result.mailError });
+      setInviteResult({
+        email: result.email,
+        mailSent: result.mailSent,
+        mailError: result.mailError,
+        inviteUrl: result.inviteUrl,
+      });
+      setLinkCopied(false);
       setInviteEmail('');
       fetchAll();
     } catch (err: any) {
@@ -411,6 +420,37 @@ export default function AdminAccounts() {
                 {!inviteResult.mailSent && inviteResult.mailError && (
                   <Typography variant="caption" color="text.secondary">技術原因：{inviteResult.mailError}</Typography>
                 )}
+
+                {/* 信件可能寄不到、或被 Supabase 的 Site URL 設定改寫成錯誤網址，
+                    所以把連結直接給管理員，可以改用 LINE 等方式傳給對方。 */}
+                <Box>
+                  <Typography variant="caption" color="text.secondary">
+                    邀請連結（可直接複製傳給對方，24 小時內有效）：
+                  </Typography>
+                  <Stack direction="row" spacing={1} alignItems="flex-start" sx={{ mt: 0.5 }}>
+                    <Box
+                      sx={{
+                        flex: 1, fontFamily: 'monospace', fontSize: 11, lineHeight: 1.5,
+                        bgcolor: 'action.hover', px: 1.5, py: 1, borderRadius: 1,
+                        wordBreak: 'break-all', maxHeight: 88, overflow: 'auto',
+                      }}
+                    >
+                      {inviteResult.inviteUrl}
+                    </Box>
+                    <Button
+                      size="small" variant="outlined"
+                      startIcon={linkCopied ? <Check size={14} /> : <Copy size={14} />}
+                      onClick={async () => {
+                        await navigator.clipboard.writeText(inviteResult.inviteUrl);
+                        setLinkCopied(true);
+                        setTimeout(() => setLinkCopied(false), 1500);
+                      }}
+                    >
+                      {linkCopied ? '已複製' : '複製'}
+                    </Button>
+                  </Stack>
+                </Box>
+
                 <Typography variant="caption" color="text.secondary">
                   對方完成 Google 登入後，還需要綁定 Google Authenticator 才能開始使用系統。
                 </Typography>

@@ -50,6 +50,7 @@ const rawHandler: Handler = async (event) => {
   }
 
   const roleLabel = ROLE_OPTIONS.find((r) => r.value === assignedRole)?.label || assignedRole;
+  const inviteUrl = (t: string) => `${siteUrl}/auth/invite-verify?token=${encodeURIComponent(t)}`;
 
   // 產生高熵邀請 Token（32 bytes）。這是「零公開註冊」的憑據之一，
   // 但真正的把關是下面寫進 admin_invitations 的那筆紀錄——
@@ -79,7 +80,7 @@ const rawHandler: Handler = async (event) => {
   // 寄出邀請信。對方點連結時 Supabase 會先確認他的 email（這一步讓之後的 Google 身分連結
   // 走在官方支援的路徑上），再帶著我們的 Token 導到邀請確認頁。
   const { error: mailError } = await supabaseAdmin.auth.admin.inviteUserByEmail(normalizedEmail, {
-    redirectTo: `${siteUrl}/auth/invite-verify?token=${encodeURIComponent(token)}`,
+    redirectTo: inviteUrl(token),
     data: {
       invited_role: assignedRole,
       invited_role_label: roleLabel,
@@ -101,6 +102,13 @@ const rawHandler: Handler = async (event) => {
       mailSent,
       mailError: mailError?.message || null,
       expiresAt,
+      // 把連結一併回傳給管理員，讓信寄不出去或被 Supabase 的 Site URL 設定改寫時
+      // 還有一條路可走（自行用 LINE 等方式傳給對方）。
+      //
+      // 這不是把鑰匙交出去：光有這個 Token 進不了系統。接受邀請時真正的把關是
+      // 「Google 回來的 email 是否等於被邀請的 email」，攻擊者拿到連結也得先擁有
+      // 那個 Gmail 帳號才有用。Token 的作用只是讓邀請頁顯示得出邀請內容。
+      inviteUrl: inviteUrl(token),
     }),
   };
 };
