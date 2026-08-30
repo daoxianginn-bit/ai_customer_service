@@ -3,10 +3,12 @@ import { Link } from 'react-router-dom';
 import { Bot, MessageSquare, UserCheck, Activity, Settings, Send, ClipboardList, CalendarDays, Users, BookOpen, Headphones, LayoutDashboard } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { useSettings } from '../lib/useSettings';
-import { PageHeader, Switch } from '../components/ui';
+import { PageHeader } from '../components/ui';
 
+// 這一頁定位是唯讀的狀態儀表板：只呈現目前狀況與快速入口，不放任何會改到資料的控制項。
+// AI 客服開關原本在這裡，已移到「基本設定 → AI 引擎設定」，跟其他 AI 相關設定放在一起。
 export default function Overview() {
-  const { settings, setSettings, loading, saving, handleSave } = useSettings();
+  const { settings, loading } = useSettings();
   const [pendingHandovers, setPendingHandovers] = useState<number | null>(null);
   const [todayConversations, setTodayConversations] = useState<number | null>(null);
   const [todayHandovers, setTodayHandovers] = useState<number | null>(null);
@@ -30,12 +32,6 @@ export default function Overview() {
     setTodayHandovers(handoverCount ?? 0);
   };
 
-  const toggleAiEnabled = async () => {
-    const next = !settings.is_ai_enabled;
-    setSettings({ ...settings, is_ai_enabled: next });
-    await handleSave();
-  };
-
   if (loading) return <div>載入中...</div>;
   if (!settings) return <div>找不到設定檔</div>;
 
@@ -46,10 +42,8 @@ export default function Overview() {
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <div className="bg-white p-6 rounded-xl shadow-sm border flex flex-col gap-2">
           <span className="text-sm text-gray-500 flex items-center gap-1"><Activity className="w-4 h-4" /> AI 客服狀態</span>
-          <div className="flex items-center justify-between">
-            <span className={`text-lg font-bold ${settings.is_ai_enabled ? 'text-green-600' : 'text-gray-400'}`}>{settings.is_ai_enabled ? '啟用中' : '已停用'}</span>
-            <Switch checked={settings.is_ai_enabled} onChange={toggleAiEnabled} disabled={saving} />
-          </div>
+          <span className={`text-lg font-bold ${settings.is_ai_enabled ? 'text-green-600' : 'text-gray-400'}`}>{settings.is_ai_enabled ? '啟用中' : '已停用'}</span>
+          <span className="text-xs text-gray-400">在「基本設定 → AI 引擎設定」調整</span>
         </div>
 
         <div className="bg-white p-6 rounded-xl shadow-sm border flex flex-col gap-2">

@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
-import { Save, Bot, MessageCircle, UserCheck, Clock, SlidersHorizontal, CalendarDays, CheckCircle2, XCircle } from 'lucide-react';
+import { Save, Bot, MessageCircle, UserCheck, Clock, SlidersHorizontal, CalendarDays, CheckCircle2, XCircle, Activity } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { useSettings } from '../lib/useSettings';
-import { PageHeader, Button } from '../components/ui';
+import { PageHeader, Button, Switch } from '../components/ui';
 import LineChannelsPanel from '../components/LineChannelsPanel';
 import NotificationGroupsPanel from '../components/NotificationGroupsPanel';
 import OtaChannelsPanel from '../components/OtaChannelsPanel';
@@ -82,7 +82,30 @@ export default function SystemSettings() {
 
         {tab === 'ai' && (
         <div className="p-6 space-y-6">
-          <div className="grid grid-cols-2 gap-4">
+          {/* AI 客服總開關。原本放在「首頁總覽」，但那頁定位是唯讀的狀態儀表板，
+              會改到設定的東西一律集中在這裡。 */}
+          <div className="flex items-start justify-between gap-4 p-4 rounded-xl border bg-gray-50">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 flex-wrap">
+                <Activity className="w-4 h-4 text-gray-500 shrink-0" />
+                <h3 className="font-bold text-gray-800">AI 客服狀態</h3>
+                <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${settings.is_ai_enabled ? 'bg-green-100 text-green-700' : 'bg-gray-200 text-gray-600'}`}>
+                  {settings.is_ai_enabled ? '啟用中' : '已停用'}
+                </span>
+              </div>
+              <p className="text-sm text-gray-500 mt-1">
+                停用後，客人傳到 LINE 的訊息不會再由 AI 回覆，訂房流程也不會啟動；
+                「轉真人客服」的關鍵字仍然有效。改完要按右上角「儲存變更」，
+                而且 webhook 有 30 秒的設定快取，最慢半分鐘後生效。
+              </p>
+            </div>
+            <Switch
+              checked={settings.is_ai_enabled}
+              onChange={() => setSettings({ ...settings, is_ai_enabled: !settings.is_ai_enabled })}
+            />
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <button onClick={() => setSettings({ ...settings, active_ai: 'gpt' })} className={`p-6 rounded-xl border-2 transition-all flex items-center gap-4 ${settings.active_ai === 'gpt' ? 'border-green-500 bg-green-50' : 'border-gray-200 bg-white hover:border-gray-300'}`}>
               <div className={`p-3 rounded-lg ${settings.active_ai === 'gpt' ? 'bg-green-600 text-white' : 'bg-gray-100 text-gray-500'}`}><Bot className="w-6 h-6" /></div>
               <div className="text-left"><h3 className="font-bold">OpenAI GPT</h3><p className="text-sm text-gray-500">使用 GPT-5/4 系列模型</p></div>
@@ -95,8 +118,8 @@ export default function SystemSettings() {
 
           <div className="border-t pt-6 space-y-4">
             <h4 className="text-sm font-bold text-gray-600">{settings.active_ai === 'gpt' ? 'OpenAI 設定' : 'Gemini 設定'}</h4>
-            <div className="grid grid-cols-2 gap-6">
-              <div className="col-span-2">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+              <div className="sm:col-span-2">
                 <label className="block text-sm font-medium text-gray-700 mb-1">API Key</label>
                 <input type="password" name={settings.active_ai === 'gpt' ? 'gpt_api_key' : 'gemini_api_key'} value={settings.active_ai === 'gpt' ? (settings.gpt_api_key || '') : (settings.gemini_api_key || '')} onChange={handleChange} className="w-full px-4 py-2 border rounded-lg" placeholder="輸入 API 金鑰" />
               </div>
@@ -104,7 +127,7 @@ export default function SystemSettings() {
                 <label className="block text-sm font-medium text-gray-700 mb-1">模型名稱</label>
                 <input type="text" name={settings.active_ai === 'gpt' ? 'gpt_model_name' : 'gemini_model_name'} value={settings.active_ai === 'gpt' ? (settings.gpt_model_name || '') : (settings.gemini_model_name || '')} onChange={handleChange} className="w-full px-4 py-2 border rounded-lg" placeholder="例如: gpt-4.1-mini, gpt-5.2" />
               </div>
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">Temperature</label>
                   <input type="number" step="0.1" name={settings.active_ai === 'gpt' ? 'gpt_temperature' : 'gemini_temperature'} value={settings.active_ai === 'gpt' ? settings.gpt_temperature : settings.gemini_temperature} onChange={handleChange} className="w-full px-4 py-2 border rounded-lg" />
@@ -116,7 +139,7 @@ export default function SystemSettings() {
               </div>
 
               {settings.active_ai === 'gemini' && settings.gemini_model_name?.includes('gemini-3') && (
-                <div className="col-span-2 p-4 bg-purple-50 rounded-lg border border-purple-100">
+                <div className="sm:col-span-2 p-4 bg-purple-50 rounded-lg border border-purple-100">
                   <label className="block text-sm font-bold text-purple-800 mb-1">Gemini 3 思考程度 (Thinking Level)</label>
                   <select name="gemini_thinking_level" value={settings.gemini_thinking_level || 'high'} onChange={handleChange} className="w-full px-4 py-2 border rounded-lg bg-white">
                     <option value="minimal">Minimal (不思考/極速 - 僅 Flash 支援)</option>
@@ -129,7 +152,7 @@ export default function SystemSettings() {
               )}
 
               {settings.active_ai === 'gpt' && settings.gpt_model_name?.includes('gpt-5') && (
-                <div className="col-span-2 grid grid-cols-2 gap-4 p-4 bg-green-50 rounded-lg border border-green-100">
+                <div className="sm:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-4 p-4 bg-green-50 rounded-lg border border-green-100">
                   <div>
                     <label className="block text-sm font-bold text-green-800 mb-1">推理力道 (Reasoning Effort)</label>
                     <select name="gpt_reasoning_effort" value={settings.gpt_reasoning_effort || 'none'} onChange={handleChange} className="w-full px-4 py-2 border rounded-lg bg-white">
@@ -239,7 +262,7 @@ export default function SystemSettings() {
 
         {tab === 'handover' && (
         <div className="p-6 space-y-6">
-          <div className="grid grid-cols-2 gap-6">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">轉接關鍵字 (逗號隔開)</label>
               <input type="text" name="handover_keywords" value={settings.handover_keywords || ''} onChange={handleChange} className="w-full px-4 py-2 border rounded-lg" />
@@ -257,12 +280,12 @@ export default function SystemSettings() {
               <input type="number" min={1} name="payment_deadline_hours" value={settings.payment_deadline_hours ?? 10} onChange={handleChange} className="w-full px-4 py-2 border rounded-lg" />
               <p className="text-xs text-gray-400 mt-1">顧客送出訂房確認後幾小時內要匯款，逾時由「排程管理」自動取消。</p>
             </div>
-            <div className="col-span-2">
+            <div className="sm:col-span-2">
               <label className="block text-sm font-medium text-gray-700 mb-1">客服專員 LINE IDs (通知用)</label>
               <input type="text" name="agent_user_ids" value={settings.agent_user_ids || ''} onChange={handleChange} placeholder="U123..., U456..." className="w-full px-4 py-2 border rounded-lg" />
               <p className="text-xs text-gray-400 mt-1">用「客戶用」官方帳號推播。訂房流程的各種提醒（撞期、待核對匯款等）都發到這裡。</p>
             </div>
-            <div className="col-span-2">
+            <div className="sm:col-span-2">
               <label className="block text-sm font-medium text-gray-700 mb-1">真人客服通知名單</label>
               <select
                 name="handover_notification_group_id"
