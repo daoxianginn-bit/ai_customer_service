@@ -61,3 +61,19 @@
 .room-calendar .rbc-day-holiday {
   background-color: #fef2f2;
 }
+
+/* ---------- 手機的議程檢視 ---------- */
+/* 手機改用議程檢視（見 RoomCalendar.tsx 的 isMobile）。所有訂單都是整天事件，
+   「時段」欄永遠只寫「整天」，卻在 375px 上吃掉將近四分之一的寬度——
+   把它藏起來，空間讓給真正要看的房客與房型。 */
+@media (max-width: 767.95px) {
+  .room-calendar .rbc-agenda-time-cell,
+  .room-calendar .rbc-agenda-view table thead th:nth-child(2) {
+    display: none;
+  }
+
+  /* 日期欄不要被壓成兩行 */
+  .room-calendar .rbc-agenda-date-cell {
+    white-space: nowrap;
+  }
+}

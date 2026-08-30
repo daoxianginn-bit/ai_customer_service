@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import { DoorOpen, Plus, Pencil, Trash2 } from 'lucide-react';
-import { PageHeader, Button, Modal, ConfirmDialog, EmptyState, Switch } from '../components/ui';
+import { PageHeader, Button, Modal, ConfirmDialog, EmptyState, Switch, ResponsiveTable } from '../components/ui';
 
 interface SpaceRow {
   id: string;
@@ -142,49 +142,41 @@ export default function RoomSpaceManagement() {
       )}
 
       <div className="bg-white rounded-xl shadow-sm border overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-sm">
-            <thead className="bg-gray-50 border-b">
-              <tr className="text-gray-600">
-                <th className="py-3 px-4">類型</th>
-                <th className="py-3 px-4">名稱</th>
-                <th className="py-3 px-4">樓層</th>
-                <th className="py-3 px-4">容納人數</th>
-                <th className="py-3 px-4">組合優先順序</th>
-                <th className="py-3 px-4">設備</th>
-                <th className="py-3 px-4">啟用</th>
-                <th className="py-3 px-4"></th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100">
-              {loading ? (
-                <tr><td colSpan={8} className="py-10 text-center text-gray-400">載入中...</td></tr>
-              ) : rows.length === 0 ? (
-                <tr><td colSpan={8}><EmptyState icon={<DoorOpen className="w-12 h-12 text-gray-200" />} message="尚未設定任何房間或空間，點右上角「新增房間/空間」開始" /></td></tr>
-              ) : (
-                rows.map((row) => (
-                  <tr key={row.id} onClick={() => openEdit(row)} className="hover:bg-green-50 transition-colors cursor-pointer">
-                    <td className="py-3 px-4"><span className="px-2 py-0.5 rounded-full text-xs bg-gray-100 text-gray-600">{row.type || '房間'}</span></td>
-                    <td className="py-3 px-4 font-medium text-gray-800">{row.name}</td>
-                    <td className="py-3 px-4">{row.floor || '-'}</td>
-                    <td className="py-3 px-4">{row.type === '房間' ? row.capacity : '-'}</td>
-                    <td className="py-3 px-4">{row.display_order}</td>
-                    <td className="py-3 px-4 text-gray-500 max-w-xs truncate">{row.equipment || '-'}</td>
-                    <td className="py-3 px-4" onClick={(e) => e.stopPropagation()}>
-                      <Switch checked={row.is_active} onChange={() => toggleActive(row)} />
-                    </td>
-                    <td className="py-3 px-4 text-right">
-                      <div className="flex items-center justify-end gap-1">
-                        <button onClick={(e) => { e.stopPropagation(); openEdit(row); }} className="p-2 hover:bg-gray-100 rounded-lg" title="編輯"><Pencil className="w-4 h-4 text-gray-500" /></button>
-                        <button onClick={(e) => { e.stopPropagation(); setDeleteTarget(row); }} className="p-2 hover:bg-red-50 rounded-lg" title="刪除"><Trash2 className="w-4 h-4 text-red-500" /></button>
-                      </div>
-                    </td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
+        <ResponsiveTable
+          rows={rows}
+          rowKey={(row) => row.id}
+          loading={loading}
+          empty={<EmptyState icon={<DoorOpen className="w-12 h-12 text-gray-200" />} message="尚未設定任何房間或空間，點右上角「新增房間/空間」開始" />}
+          onRowClick={openEdit}
+          // 欄位順序維持原本的表格順序。手機卡片是靠 cardTitle／cardAside 這些旗標挑欄位，
+          // 跟在陣列裡的位置無關，所以不需要為了卡片版面去動桌機的欄序。
+          columns={[
+            {
+              key: 'type', header: '類型',
+              cell: (row) => <span className="px-2 py-0.5 rounded-full text-xs bg-gray-100 text-gray-600">{row.type || '房間'}</span>,
+            },
+            // 名稱當卡片標題、啟用開關貼在右上角：手機上掃過去要先看到「哪一間、開著沒」。
+            { key: 'name', header: '名稱', cardTitle: true, tdClass: 'font-medium text-gray-800', cell: (row) => row.name },
+            { key: 'floor', header: '樓層', cell: (row) => row.floor || '-' },
+            { key: 'capacity', header: '容納人數', cell: (row) => (row.type === '房間' ? row.capacity : '-') },
+            { key: 'display_order', header: '組合優先順序', cell: (row) => row.display_order },
+            { key: 'equipment', header: '設備', tdClass: 'text-gray-500 max-w-xs truncate', cardFullWidth: true, cell: (row) => row.equipment || '-' },
+            {
+              // 撥開關不該順便把編輯視窗打開，所以擋掉冒泡。
+              key: 'is_active', header: '啟用', cardAside: true, stopRowClick: true,
+              cell: (row) => <Switch checked={row.is_active} onChange={() => toggleActive(row)} />,
+            },
+            {
+              key: 'actions', header: '', cardActions: true, thClass: 'w-px', tdClass: 'text-right',
+              cell: (row) => (
+                <div className="flex items-center justify-end gap-1">
+                  <button onClick={(e) => { e.stopPropagation(); openEdit(row); }} className="p-2 hover:bg-gray-100 rounded-lg" title="編輯"><Pencil className="w-4 h-4 text-gray-500" /></button>
+                  <button onClick={(e) => { e.stopPropagation(); setDeleteTarget(row); }} className="p-2 hover:bg-red-50 rounded-lg" title="刪除"><Trash2 className="w-4 h-4 text-red-500" /></button>
+                </div>
+              ),
+            },
+          ]}
+        />
       </div>
 
       <Modal

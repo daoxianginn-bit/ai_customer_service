@@ -8,6 +8,7 @@ import { supabase } from '../lib/supabase';
 import { Box, Paper, Stack, Typography, IconButton, Button, Tooltip, Chip, Dialog, DialogTitle, DialogContent, Alert, CircularProgress } from '@mui/material';
 import { ChevronLeft, ChevronRight, CalendarDays, SlidersHorizontal, X, RefreshCw, Eye } from 'lucide-react';
 import PageHeaderMui from '../components/ui-mui/PageHeaderMui';
+import { useIsMobile } from '../hooks/useIsMobile';
 import { OCCUPYING_STATUSES, UNRESERVED_WITH_DATES_STATUSES, bookingStatusLabel } from '../lib/bookingStatus';
 import DateRangeSettingsModal from '../components/DateRangeSettingsModal';
 import { OtaChannel, otaPlatformLabel, otaChannelExportUrl } from '../lib/otaChannels';
@@ -60,6 +61,10 @@ interface BookingEvent {
 }
 
 export default function RoomCalendar() {
+  // 月檢視在手機上放不下：7 欄擠進 375px，每格只剩 50 出頭，事件色塊會變成看不出是誰的細條。
+  // 改用議程檢視——同樣是「這段期間有誰要來」，但排成一份可以直接讀的清單。
+  const isMobile = useIsMobile();
+
   const [calendarDate, setCalendarDate] = useState(new Date());
   const [events, setEvents] = useState<BookingEvent[]>([]);
   const [dateRanges, setDateRanges] = useState<any[]>([]);
@@ -89,6 +94,8 @@ export default function RoomCalendar() {
 
   useEffect(() => {
     fetchMonthData();
+    // 只在換月份時重抓。fetchMonthData 每次 render 都是新參考，放進依賴會無限重抓。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [year, month]);
 
   useEffect(() => {
@@ -282,12 +289,15 @@ export default function RoomCalendar() {
         icon={<CalendarDays size={26} color="#16a34a" />}
         title="行事曆"
         description="每個色塊是一筆訂單（房客／房型），顏色代表訂單狀態；旺季／連假日期會有標籤，滑鼠移過去可以看詳細說明。點色塊可以查看該筆訂單詳情。"
+        // 手機放不下一整排，讓它自己換行；月份切換自成一組，才不會被拆到兩行去。
         action={
-          <Stack direction="row" spacing={1} alignItems="center">
-            <IconButton onClick={goPrevMonth} size="small" sx={{ border: '1px solid', borderColor: 'divider' }}><ChevronLeft size={18} /></IconButton>
-            <Typography fontWeight={600} sx={{ width: 92, textAlign: 'center' }}>{year}年{month + 1}月</Typography>
-            <IconButton onClick={goNextMonth} size="small" sx={{ border: '1px solid', borderColor: 'divider' }}><ChevronRight size={18} /></IconButton>
-            <Button variant="contained" startIcon={<SlidersHorizontal size={16} />} onClick={() => setDateRangeModalOpen(true)} sx={{ ml: 1 }}>
+          <Stack direction="row" spacing={1} alignItems="center" useFlexGap flexWrap="wrap">
+            <Stack direction="row" spacing={1} alignItems="center">
+              <IconButton onClick={goPrevMonth} size="small" sx={{ border: '1px solid', borderColor: 'divider' }}><ChevronLeft size={18} /></IconButton>
+              <Typography fontWeight={600} sx={{ width: 92, textAlign: 'center' }}>{year}年{month + 1}月</Typography>
+              <IconButton onClick={goNextMonth} size="small" sx={{ border: '1px solid', borderColor: 'divider' }}><ChevronRight size={18} /></IconButton>
+            </Stack>
+            <Button variant="contained" startIcon={<SlidersHorizontal size={16} />} onClick={() => setDateRangeModalOpen(true)}>
               旺季/連假日期設定
             </Button>
             <Tooltip title={syncTaskId ? '手動抓取第三方平台行事曆、同步進系統並推播到 Google 行事曆' : '請先到「排程管理」新增一筆「行事曆整合同步」排程'}>
@@ -330,7 +340,7 @@ export default function RoomCalendar() {
         <Chip label="連假" size="small" sx={{ height: 20, fontSize: '0.65rem', bgcolor: '#fecaca', color: '#991b1b' }} />
       </Stack>
 
-      <Paper variant="outlined" className="room-calendar" sx={{ p: 1.5, height: 720 }}>
+      <Paper variant="outlined" className="room-calendar" sx={{ p: 1.5, height: { xs: 560, md: 720 } }}>
         {loading && <Typography variant="body2" color="text.secondary" align="center" sx={{ py: 0.5 }}>載入中...</Typography>}
         <Calendar
           localizer={localizer}
@@ -338,15 +348,26 @@ export default function RoomCalendar() {
           events={events}
           date={calendarDate}
           onNavigate={setCalendarDate}
-          views={[Views.MONTH]}
-          view={Views.MONTH}
+          views={isMobile ? [Views.AGENDA] : [Views.MONTH]}
+          view={isMobile ? Views.AGENDA : Views.MONTH}
+          // 議程檢視預設只列 30 天，給 31 才會跟上面的月份切換範圍一致——
+          // 不然月底那一兩天會憑空消失。
+          length={31}
           toolbar={false}
           popup
           dayPropGetter={dayPropGetter}
           eventPropGetter={eventPropGetter as any}
           components={{ month: { dateHeader: dateHeaderRenderer as any } }}
           onSelectEvent={(event: any) => setSelectedEvent(event)}
-          messages={{ noEventsInRange: '這段期間沒有訂單', showMore: (total: number) => `還有 ${total} 筆` }}
+          messages={{
+            noEventsInRange: '這段期間沒有訂單',
+            showMore: (total: number) => `還有 ${total} 筆`,
+            // 議程檢視的三個欄位標題與整天標記，預設是英文
+            date: '日期',
+            time: '時段',
+            event: '訂單',
+            allDay: '整天',
+          }}
           style={{ height: '100%' }}
         />
       </Paper>

@@ -11,6 +11,20 @@ import { createTheme } from '@mui/material/styles';
 // 新頁面一律不要自己寫死顏色/字級，改用 theme token，避免又長回各模組各行其道的狀態。
 // ========================================================================
 
+// 對話框改成整頁顯示的門檻。這裡用 600px，跟外殼側欄的 900px、內容表格的 768px 都不同，
+// 三個數字各有各的理由：側欄要讓出 240px 所以最早收；表格對齊 Tailwind 的 md；
+// 對話框則是到了真正的手機寬度才值得整頁，600～768px 的平板上置中卡片仍然好用。
+const dialogFullScreenQuery = '@media (max-width:599.95px)';
+const dialogFullScreen = {
+  margin: 0,
+  width: '100%',
+  maxWidth: '100%',
+  height: '100%',
+  maxHeight: '100%',
+  borderRadius: 0,
+  border: 'none',
+} as const;
+
 // 規範的資訊層級：頁標題 20px、模組標題 16px、表格/內文 14px、輔助字 12px。
 // 基準 fontSize 13 是規範指定值（MUI 會以此換算 rem）。
 export const enterpriseTheme = createTheme({
@@ -81,6 +95,13 @@ export const enterpriseTheme = createTheme({
     MuiDialog: {
       styleOverrides: {
         paper: { border: '1px solid #E5E7EB' },
+        // 手機上把「內容型」對話框撐成整頁。用 maxWidth 產生的 class 來分流：
+        //   sm／md → 幾乎都是表單，留邊界只是把可填的空間變小，整頁最好用
+        //   xs     → 確認提示、單筆詳情這類短內容，維持置中小卡；
+        //            把一句「確定要刪除嗎？」放大成整頁反而像出事了
+        // 寫在 theme 而不是各頁加 fullScreen：一處生效，之後新增的對話框也自動適用。
+        paperWidthSm: { [dialogFullScreenQuery]: dialogFullScreen },
+        paperWidthMd: { [dialogFullScreenQuery]: dialogFullScreen },
       },
     },
   },

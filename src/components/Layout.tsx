@@ -2,15 +2,15 @@ import { useMemo, useState } from 'react';
 import { Link as RouterLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import {
   AppBar, Box, Breadcrumbs, Collapse, Divider, Drawer, IconButton, Link, List, ListItemButton,
-  ListItemIcon, ListItemText, Toolbar, Tooltip, Typography,
+  ListItemIcon, ListItemText, Toolbar, Tooltip, Typography, useMediaQuery,
 } from '@mui/material';
-import { styled, type CSSObject, type Theme } from '@mui/material/styles';
+import { styled, useTheme, type CSSObject, type Theme } from '@mui/material/styles';
 import { useAuth } from '../lib/AuthContext';
 import { canAccessRoute, canWrite, roleLabel } from '../lib/permissions';
 import {
   LayoutDashboard, LogOut, Settings, ClipboardList, Users, UserCog, ChevronDown, Calculator,
   Send, Headphones, MessageSquareText, CalendarDays, BookOpen, Variable, DoorOpen, Shirt,
-  Clock, SlidersHorizontal, PanelLeftClose, PanelLeftOpen, ScrollText, Eye,
+  Clock, SlidersHorizontal, PanelLeftClose, PanelLeftOpen, ScrollText, Eye, Menu as MenuIcon,
 } from 'lucide-react';
 
 // 規範指定的外殼尺寸：左側導航 240px（摺疊 64px）、頂部狀態列 64px。
@@ -131,7 +131,13 @@ export default function Layout() {
   const titleMap = useMemo(buildTitleMap, []);
   const { role, profile, signOut } = useAuth();
 
+  // 手機與桌機用的是兩種不同的側欄：桌機是常駐的 MiniDrawer（展開／收合都佔位），
+  // 手機沒有那個寬度可以讓，改成蓋在內容上的 temporary 抽屜，關掉就完全不佔空間。
+  const theme = useTheme();
+  const isMobile = useMediaQuery(theme.breakpoints.down('md'));
+
   const [collapsed, setCollapsed] = useState(false);
+  const [mobileOpen, setMobileOpen] = useState(false);
 
   // 依角色過濾選單：進不去的頁面就不顯示，避免使用者點了才發現被導開。
   // 群組內的子項全被濾掉時整個群組也要拿掉，否則會留下一個點開是空的群組。
@@ -174,23 +180,29 @@ export default function Layout() {
 
   const current = titleMap.get(location.pathname);
 
-  // 收合狀態下只剩圖示，展開群組沒有意義（沒有空間顯示子項文字），改成直接顯示子項圖示。
-  const renderNav = () => (
-    <List sx={{ px: collapsed ? 0.5 : 1, py: 1 }} dense>
+  // 手機抽屜是點完就關的，選單留在原地沒有意義（抽屜已經蓋掉整個畫面）。
+  // 桌機不需要這個行為，但呼叫它也無害，所以不分平台一律掛上去。
+  const closeMobileNav = () => setMobileOpen(false);
+
+  // compact 只有桌機收合側欄會是 true。手機抽屜有完整的 240px，一律用展開樣式——
+  // 一個蓋住整個畫面卻只顯示圖示的抽屜，比不能收合更難用。
+  const renderNav = (compact: boolean) => (
+    <List sx={{ px: compact ? 0.5 : 1, py: 1 }} dense>
       {visibleEntries.map((entry) => {
         if (entry.kind === 'link') {
           const Icon = entry.icon;
           const selected = location.pathname === entry.to;
           return (
-            <Tooltip key={entry.to} title={collapsed ? entry.label : ''} placement="right">
+            <Tooltip key={entry.to} title={compact ? entry.label : ''} placement="right">
               <ListItemButton
                 component={RouterLink}
                 to={entry.to}
                 selected={selected}
-                sx={navItemSx(collapsed)}
+                onClick={closeMobileNav}
+                sx={navItemSx(compact)}
               >
-                <ListItemIcon sx={iconSx(collapsed)}><Icon size={18} /></ListItemIcon>
-                {!collapsed && <ListItemText primary={entry.label} primaryTypographyProps={{ fontSize: 14 }} />}
+                <ListItemIcon sx={iconSx(compact)}><Icon size={18} /></ListItemIcon>
+                {!compact && <ListItemText primary={entry.label} primaryTypographyProps={{ fontSize: 14 }} />}
               </ListItemButton>
             </Tooltip>
           );
@@ -200,10 +212,10 @@ export default function Layout() {
         const isOpen = openGroups.has(entry.key);
         const isActive = groupContainsPath(entry);
 
-        if (collapsed) {
+        if (compact) {
           return entry.children.map(({ to, label, icon: Icon }) => (
             <Tooltip key={to} title={`${entry.label} / ${label}`} placement="right">
-              <ListItemButton component={RouterLink} to={to} selected={location.pathname === to} sx={navItemSx(true)}>
+              <ListItemButton component={RouterLink} to={to} selected={location.pathname === to} onClick={closeMobileNav} sx={navItemSx(true)}>
                 <ListItemIcon sx={iconSx(true)}><Icon size={18} /></ListItemIcon>
               </ListItemButton>
             </Tooltip>
@@ -226,7 +238,7 @@ export default function Layout() {
             <Collapse in={isOpen} unmountOnExit>
               <List dense disablePadding sx={{ ml: 2.5, pl: 1, borderLeft: '1px solid', borderColor: 'divider' }}>
                 {entry.children.map(({ to, label, icon: Icon }) => (
-                  <ListItemButton key={to} component={RouterLink} to={to} selected={location.pathname === to} sx={navItemSx(false)}>
+                  <ListItemButton key={to} component={RouterLink} to={to} selected={location.pathname === to} onClick={closeMobileNav} sx={navItemSx(false)}>
                     <ListItemIcon sx={iconSx(false)}><Icon size={16} /></ListItemIcon>
                     <ListItemText primary={label} primaryTypographyProps={{ fontSize: 13 }} />
                   </ListItemButton>
@@ -253,25 +265,39 @@ export default function Layout() {
           zIndex: (t) => t.zIndex.drawer + 1,
         }}
       >
-        <Toolbar sx={{ minHeight: `${APPBAR_HEIGHT}px !important`, gap: 2 }}>
-          <IconButton onClick={() => setCollapsed((c) => !c)} aria-label={collapsed ? '展開側欄' : '收合側欄'}>
-            {collapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}
-          </IconButton>
+        <Toolbar sx={{ minHeight: `${APPBAR_HEIGHT}px !important`, gap: { xs: 1, md: 2 }, px: { xs: 1.5, md: 3 } }}>
+          {isMobile ? (
+            <IconButton onClick={() => setMobileOpen((o) => !o)} aria-label={mobileOpen ? '關閉選單' : '開啟選單'} edge="start">
+              <MenuIcon size={20} />
+            </IconButton>
+          ) : (
+            <IconButton onClick={() => setCollapsed((c) => !c)} aria-label={collapsed ? '展開側欄' : '收合側欄'}>
+              {collapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}
+            </IconButton>
+          )}
 
-          <Typography variant="h6" sx={{ fontWeight: 700, whiteSpace: 'nowrap' }}>
+          {/* 手機沒有空間同時放系統名稱和麵包屑。系統名稱對每天在用的員工是廢話，
+              「我現在在哪一頁」才是有用的資訊，所以手機只留頁面標題。 */}
+          <Typography variant="h6" sx={{ fontWeight: 700, whiteSpace: 'nowrap', display: { xs: 'none', md: 'block' } }}>
             AI 客服後台
           </Typography>
 
-          {/* 麵包屑：規範要求的第二層導航，讓使用者知道自己在哪一區 */}
-          <Breadcrumbs sx={{ flex: 1, fontSize: 13 }} aria-label="breadcrumb">
-            <Link component={RouterLink} to="/" underline="hover" color="text.secondary">
-              首頁
-            </Link>
-            {current?.group && <Typography color="text.secondary" fontSize={13}>{current.group}</Typography>}
-            {current && location.pathname !== '/' && (
-              <Typography color="text.primary" fontSize={13} fontWeight={600}>{current.label}</Typography>
-            )}
-          </Breadcrumbs>
+          {isMobile ? (
+            <Typography sx={{ flex: 1, fontWeight: 600, fontSize: 15, minWidth: 0 }} noWrap>
+              {current?.label || 'AI 客服後台'}
+            </Typography>
+          ) : (
+            /* 麵包屑：規範要求的第二層導航，讓使用者知道自己在哪一區 */
+            <Breadcrumbs sx={{ flex: 1, fontSize: 13 }} aria-label="breadcrumb">
+              <Link component={RouterLink} to="/" underline="hover" color="text.secondary">
+                首頁
+              </Link>
+              {current?.group && <Typography color="text.secondary" fontSize={13}>{current.group}</Typography>}
+              {current && location.pathname !== '/' && (
+                <Typography color="text.primary" fontSize={13} fontWeight={600}>{current.label}</Typography>
+              )}
+            </Breadcrumbs>
+          )}
 
           {/* 顯示目前登入者與角色：多人共用同一台電腦時，能一眼確認現在是誰在操作 */}
           {profile && (
@@ -293,11 +319,28 @@ export default function Layout() {
         </Toolbar>
       </AppBar>
 
-      <MiniDrawer variant="permanent" open={!collapsed}>
-        <Toolbar sx={{ minHeight: `${APPBAR_HEIGHT}px !important` }} />
-        <Box sx={{ overflowY: 'auto', overflowX: 'hidden', flex: 1 }}>{renderNav()}</Box>
-        <Divider />
-      </MiniDrawer>
+      {/* AppBar 的 zIndex 是 drawer+1，所以抽屜會蓋在內容上、但讓出頂部那條列——
+          漢堡鈕因此一直點得到，開著也能再按一次關掉。 */}
+      {isMobile ? (
+        <Drawer
+          variant="temporary"
+          open={mobileOpen}
+          onClose={closeMobileNav}
+          // 選單每次開關都重建的話，展開群組的動畫會頓一下；keepMounted 讓它只建一次。
+          ModalProps={{ keepMounted: true }}
+          sx={{ '& .MuiDrawer-paper': { width: DRAWER_WIDTH, boxSizing: 'border-box' } }}
+        >
+          <Toolbar sx={{ minHeight: `${APPBAR_HEIGHT}px !important` }} />
+          <Box sx={{ overflowY: 'auto', overflowX: 'hidden', flex: 1 }}>{renderNav(false)}</Box>
+          <Divider />
+        </Drawer>
+      ) : (
+        <MiniDrawer variant="permanent" open={!collapsed}>
+          <Toolbar sx={{ minHeight: `${APPBAR_HEIGHT}px !important` }} />
+          <Box sx={{ overflowY: 'auto', overflowX: 'hidden', flex: 1 }}>{renderNav(collapsed)}</Box>
+          <Divider />
+        </MiniDrawer>
+      )}
 
       {/* 內容區：滿版填滿剩餘寬度。minWidth:0 是必要的——flex 子項預設 min-width:auto，
           內含寬表格時會把整個版面撐開而不是讓表格自己捲動。 */}
@@ -308,16 +351,16 @@ export default function Layout() {
         {!canWrite(role) && (
           <Box sx={{
             display: 'flex', alignItems: 'center', gap: 1,
-            px: 3, py: 1, bgcolor: 'warning.light', color: 'warning.contrastText',
+            px: { xs: 1.5, md: 3 }, py: 1, bgcolor: 'warning.light', color: 'warning.contrastText',
             borderBottom: '1px solid', borderColor: 'divider',
           }}>
-            <Eye size={15} />
+            <Eye size={15} style={{ flexShrink: 0 }} />
             <Typography fontSize={13}>
               目前是唯讀模式，可以查看資料但無法新增或修改。需要調整權限請聯繫管理員。
             </Typography>
           </Box>
         )}
-        <Box sx={{ p: 3, flex: 1 }}>
+        <Box sx={{ p: { xs: 1.5, md: 3 }, flex: 1, minWidth: 0 }}>
           <Outlet />
         </Box>
       </Box>
@@ -325,10 +368,11 @@ export default function Layout() {
   );
 }
 
+// 手機的列高拉到 44px：38px 用滑鼠點很準，用手指點會一直誤觸隔壁項。
 const navItemSx = (collapsed: boolean) => ({
   borderRadius: 1,
   mb: 0.25,
-  minHeight: 38,
+  minHeight: { xs: 44, md: 38 },
   justifyContent: collapsed ? 'center' : 'flex-start',
   px: collapsed ? 1 : 1.5,
   '&.Mui-selected': {

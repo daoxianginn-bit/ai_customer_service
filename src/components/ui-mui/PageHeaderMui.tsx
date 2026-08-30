@@ -12,7 +12,7 @@ export default function PageHeaderMui({ icon, title, description, action }: Page
   return (
     <Paper
       variant="outlined"
-      sx={{ p: 3, display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'flex-start', gap: 2 }}
+      sx={{ p: { xs: 2, md: 3 }, display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'flex-start', gap: 2 }}
     >
       <Box>
         <Stack direction="row" alignItems="center" spacing={1}>

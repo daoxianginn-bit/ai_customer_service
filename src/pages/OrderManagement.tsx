@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import { ClipboardList, Search, RotateCcw, Save, Plus, Trash2, AlertCircle, AlertTriangle, Shirt, RefreshCw, CalendarDays, ListFilter, DoorOpen, UserCheck, CheckCircle2, LogIn, ChevronRight, X } from 'lucide-react';
-import { Button, Modal, StatusBadge, EmptyState, ConfirmDialog } from '../components/ui';
+import { Button, Modal, StatusBadge, EmptyState, ConfirmDialog, FilterBar } from '../components/ui';
 import {
   BOOKING_STATUS_OPTIONS, SYSTEM_ONLY_STATUSES, REQUIRES_REMIT_LAST5_STATUS, REQUIRES_CHECKIN_PASSWORD_STATUS,
   FLOW_STEP_STATUSES, flowStepIndex, bookingStatusLabel, bookingStatusDescription, nextFlowStatus,
@@ -347,6 +347,8 @@ export default function OrderManagement() {
     fetchStatusCounts();
     fetchSummaries();
     runQuery(0);
+    // 查詢函式每次 render 都是新的參考，放進依賴會無限重查。這裡只要掛載時查一次，之後由「查詢」按鈕觸發。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // 每 30 秒自動刷新一次，讓客服不用自己按「查詢」也看得到 LINE 剛進來的新訂單與狀態變化。
@@ -1004,7 +1006,7 @@ export default function OrderManagement() {
         </div>
       </div>
 
-      <div className="bg-white p-4 rounded-xl shadow-sm border space-y-3">
+      <FilterBar activeCount={[keyword, startDate, endDate, status, roomType].filter(Boolean).length}>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
           <div>
             <label className="flex items-center gap-1 text-xs text-gray-500 mb-1"><Search className="w-3.5 h-3.5" />關鍵字搜尋</label>
@@ -1046,7 +1048,7 @@ export default function OrderManagement() {
           <Button variant="secondary" onClick={clearFilters} icon={<RotateCcw className="w-4 h-4" />}>清除條件</Button>
           <Button onClick={() => runQuery(0)} loading={loading} icon={<Search className="w-4 h-4" />}>查詢</Button>
         </div>
-      </div>
+      </FilterBar>
 
       {/* 左邊挑單、右邊看它卡在哪一關。挑單不會直接跳進編輯畫面——大多數時候只是想確認
           「這張現在到哪了」，要真的改資料再按「編輯訂單」進表單。 */}

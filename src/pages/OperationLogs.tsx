@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import { ScrollText, Search, RotateCcw, ListFilter, UserCog, CalendarDays, ArrowRight, AlertTriangle } from 'lucide-react';
-import { PageHeader, Button, EmptyState, Modal } from '../components/ui';
+import { PageHeader, Button, EmptyState, Modal, ResponsiveTable, FilterBar } from '../components/ui';
 import { LOG_FEATURE_OPTIONS, LOG_FUNCTION_NAMES, formatLogValue } from '../lib/operationLog';
 
 const PAGE_SIZE = 30;
@@ -102,6 +102,8 @@ export default function OperationLogs() {
 
   useEffect(() => {
     runQuery(0);
+    // 查詢函式每次 render 都是新的參考，放進依賴會無限重查。這裡只要掛載時查一次，之後由「查詢」按鈕觸發。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const runQuery = async (
@@ -172,7 +174,7 @@ export default function OperationLogs() {
         }
       />
 
-      <div className="bg-white p-4 rounded-xl shadow-sm border space-y-3">
+      <FilterBar activeCount={[keyword, feature, actorType, level, startDate, endDate].filter(Boolean).length}>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3">
           <div>
             <label className="flex items-center gap-1 text-xs text-gray-500 mb-1"><Search className="w-3.5 h-3.5" />關鍵字</label>
@@ -225,79 +227,62 @@ export default function OperationLogs() {
           <Button variant="secondary" onClick={clearFilters} icon={<RotateCcw className="w-4 h-4" />}>清除條件</Button>
           <Button onClick={() => runQuery(0)} loading={loading} icon={<Search className="w-4 h-4" />}>查詢</Button>
         </div>
-      </div>
+      </FilterBar>
 
       <div className="bg-white rounded-xl shadow-sm border overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-sm">
-            <thead className="bg-gray-50 border-b">
-              <tr className="text-gray-600">
-                <th className="py-3 px-4 whitespace-nowrap">更新時間</th>
-                <th className="py-3 px-4 whitespace-nowrap">功能</th>
-                <th className="py-3 px-4 whitespace-nowrap">動作</th>
-                <th className="py-3 px-4 whitespace-nowrap">對象</th>
-                <th className="py-3 px-4 whitespace-nowrap">異動者</th>
-                <th className="py-3 px-4 min-w-[280px]">異動前 → 異動後<span className="ml-2 font-normal text-xs text-gray-400">（點一列看完整內容）</span></th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100">
-              {loading ? (
-                <tr><td colSpan={6} className="py-10 text-center text-gray-400">載入中...</td></tr>
-              ) : rows.length === 0 ? (
-                <tr><td colSpan={6}><EmptyState icon={<ScrollText className="w-12 h-12 text-gray-200" />} message="查無操作紀錄" /></td></tr>
+        <ResponsiveTable
+          rows={rows}
+          rowKey={(row) => row.id}
+          loading={loading}
+          empty={<EmptyState icon={<ScrollText className="w-12 h-12 text-gray-200" />} message="查無操作紀錄" />}
+          onRowClick={setDetail}
+          rowClass={(row) => `align-top ${row.level === 'error' ? 'bg-red-50/40 hover:bg-red-50' : 'hover:bg-gray-50'}`}
+          columns={[
+            { key: 'created_at', header: '更新時間', thClass: 'whitespace-nowrap', tdClass: 'whitespace-nowrap text-gray-500 text-xs', cell: (row) => formatDateTime(row.created_at) },
+            // 手機上一筆紀錄要一眼認出來靠的是「哪個功能、做了什麼」，所以功能當標題、動作徽章貼右上。
+            { key: 'feature', header: '功能', cardTitle: true, thClass: 'whitespace-nowrap', tdClass: 'whitespace-nowrap text-gray-700', cell: (row) => row.feature },
+            {
+              key: 'action', header: '動作', cardAside: true, thClass: 'whitespace-nowrap', tdClass: 'whitespace-nowrap',
+              cell: (row) => (
+                <span
+                  className={`text-xs px-2 py-0.5 rounded-full border ${
+                    row.level === 'error' ? 'bg-red-100 text-red-700 border-red-200' : ACTION_STYLE[row.action] || 'bg-gray-50 text-gray-600 border-gray-200'
+                  }`}
+                >
+                  {row.action}
+                </span>
+              ),
+            },
+            { key: 'target', header: '對象', thClass: 'whitespace-nowrap', tdClass: 'whitespace-nowrap font-mono text-xs text-gray-600', cell: (row) => row.target || '—' },
+            {
+              key: 'actor', header: '異動者', thClass: 'whitespace-nowrap', tdClass: 'whitespace-nowrap',
+              cell: (row) => (row.actor_type === 'system'
+                ? <span className="text-xs px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 border border-slate-200">系統</span>
+                : <span className="text-xs text-gray-700">{row.actor_name}</span>),
+            },
+            {
+              key: 'changes',
+              // 提示詞對表格列與手機卡片都要成立，所以用「點一下」而不是「點一列」。
+              header: <>異動前 → 異動後<span className="ml-2 font-normal text-xs text-gray-400">（點一下看完整內容）</span></>,
+              thClass: 'min-w-[280px]', cardFullWidth: true,
+              cell: (row) => (row.level === 'error' ? (
+                <div className="space-y-1">
+                  {row.status_code != null && (
+                    <span className="inline-flex items-center gap-1 text-xs font-mono px-2 py-0.5 rounded bg-red-100 text-red-800 border border-red-200">
+                      <AlertTriangle className="w-3 h-3" />HTTP {row.status_code}
+                    </span>
+                  )}
+                  {/* 錯誤訊息可能含堆疊，用 pre-wrap 保留換行才看得出是哪一層出錯 */}
+                  <p className="text-xs text-red-800 whitespace-pre-wrap break-all">
+                    {truncate(row.error_message || '（沒有錯誤訊息）', PREVIEW_ERROR_LIMIT)}
+                  </p>
+                </div>
               ) : (
-                rows.map((row) => {
-                  const isError = row.level === 'error';
-                  return (
-                    <tr
-                      key={row.id}
-                      onClick={() => setDetail(row)}
-                      title="點一下看完整的異動前後內容"
-                      className={`align-top cursor-pointer ${isError ? 'bg-red-50/40 hover:bg-red-50' : 'hover:bg-gray-50'}`}
-                    >
-                      <td className="py-3 px-4 whitespace-nowrap text-gray-500 text-xs">{formatDateTime(row.created_at)}</td>
-                      <td className="py-3 px-4 whitespace-nowrap text-gray-700">{row.feature}</td>
-                      <td className="py-3 px-4 whitespace-nowrap">
-                        <span
-                          className={`text-xs px-2 py-0.5 rounded-full border ${
-                            isError ? 'bg-red-100 text-red-700 border-red-200' : ACTION_STYLE[row.action] || 'bg-gray-50 text-gray-600 border-gray-200'
-                          }`}
-                        >
-                          {row.action}
-                        </span>
-                      </td>
-                      <td className="py-3 px-4 whitespace-nowrap font-mono text-xs text-gray-600">{row.target || '—'}</td>
-                      <td className="py-3 px-4 whitespace-nowrap">
-                        {row.actor_type === 'system' ? (
-                          <span className="text-xs px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 border border-slate-200">系統</span>
-                        ) : (
-                          <span className="text-xs text-gray-700">{row.actor_name}</span>
-                        )}
-                      </td>
-                      <td className="py-3 px-4">
-                        {isError ? (
-                          <div className="space-y-1">
-                            {row.status_code != null && (
-                              <span className="inline-flex items-center gap-1 text-xs font-mono px-2 py-0.5 rounded bg-red-100 text-red-800 border border-red-200">
-                                <AlertTriangle className="w-3 h-3" />HTTP {row.status_code}
-                              </span>
-                            )}
-                            {/* 錯誤訊息可能含堆疊，用 pre-wrap 保留換行才看得出是哪一層出錯 */}
-                            <p className="text-xs text-red-800 whitespace-pre-wrap break-all">
-                              {truncate(row.error_message || '（沒有錯誤訊息）', PREVIEW_ERROR_LIMIT)}
-                            </p>
-                          </div>
-                        ) : (
-                          <ChangeTable before={row.before} after={row.after} preview />
-                        )}
-                      </td>
-                    </tr>
-                  );
-                })
-              )}
-            </tbody>
-          </table>
-        </div>
+                <ChangeTable before={row.before} after={row.after} preview />
+              )),
+            },
+          ]}
+        />
         <div className="flex justify-between items-center px-6 py-4 border-t text-sm text-gray-500">
           <button disabled={page === 0 || loading} onClick={() => runQuery(page - 1)} className="px-3 py-1 border rounded-lg disabled:opacity-40">上一頁</button>
           <span>第 {page + 1} 頁</span>

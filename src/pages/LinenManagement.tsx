@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import { Shirt, Plus, Pencil, Trash2, AlertTriangle, BedDouble, BarChart3, RefreshCw, Package } from 'lucide-react';
-import { PageHeader, Button, Modal, ConfirmDialog, EmptyState } from '../components/ui';
+import { PageHeader, Button, Modal, ConfirmDialog, EmptyState, ResponsiveTable } from '../components/ui';
 import {
   LinenItem, RoomLinenDefault, linenItemLabel, currency, nightsBetween, computeUsage, usageTotal,
 } from '../lib/linenCost';
@@ -452,44 +452,36 @@ export default function LinenManagement() {
               <p className="text-sm text-gray-500">會被用掉、需要補貨的消耗品庫存（例如沐浴乳、衛生紙）。</p>
               <Button onClick={openNewConsumable} icon={<Plus className="w-4 h-4" />} className="whitespace-nowrap">新增耗材</Button>
             </div>
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-sm">
-                <thead className="bg-gray-50 border-b text-gray-600">
-                  <tr>
-                    <th className="py-3 px-4">名稱</th>
-                    <th className="py-3 px-4">庫存數量</th>
-                    <th className="py-3 px-4">補貨門檻</th>
-                    <th className="py-3 px-4">適用房型/空間</th>
-                    <th className="py-3 px-4"></th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100">
-                  {consumables.length === 0 ? (
-                    <tr><td colSpan={5}><EmptyState icon={<Package className="w-12 h-12 text-gray-200" />} message="尚未設定任何耗材，點右上角「新增耗材」開始" /></td></tr>
-                  ) : (
-                    consumables.map((row) => (
-                      <tr key={row.id} onClick={() => openEditConsumable(row)} className="hover:bg-green-50 transition-colors cursor-pointer">
-                        <td className="py-3 px-4 font-medium text-gray-800">{row.name}</td>
-                        <td className="py-3 px-4">
-                          <span className={`inline-flex items-center gap-1 ${isLowStock(row) ? 'text-red-600 font-medium' : 'text-gray-700'}`}>
-                            {isLowStock(row) && <AlertTriangle className="w-3.5 h-3.5" />}
-                            {row.stock_quantity} {row.unit}
-                          </span>
-                        </td>
-                        <td className="py-3 px-4 text-gray-500">{row.restock_threshold} {row.unit}</td>
-                        <td className="py-3 px-4 text-gray-500">{consumableSpaceNames(row.id)}</td>
-                        <td className="py-3 px-4 text-right">
-                          <div className="flex items-center justify-end gap-1">
-                            <button onClick={(e) => { e.stopPropagation(); openEditConsumable(row); }} className="p-2 hover:bg-gray-100 rounded-lg" title="編輯"><Pencil className="w-4 h-4 text-gray-500" /></button>
-                            <button onClick={(e) => { e.stopPropagation(); setDeleteConsumableTarget(row); }} className="p-2 hover:bg-red-50 rounded-lg" title="刪除"><Trash2 className="w-4 h-4 text-red-500" /></button>
-                          </div>
-                        </td>
-                      </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
-            </div>
+            <ResponsiveTable
+              rows={consumables}
+              rowKey={(row) => row.id}
+              empty={<EmptyState icon={<Package className="w-12 h-12 text-gray-200" />} message="尚未設定任何耗材，點右上角「新增耗材」開始" />}
+              onRowClick={openEditConsumable}
+              columns={[
+                { key: 'name', header: '名稱', cardTitle: true, tdClass: 'font-medium text-gray-800', cell: (row) => row.name },
+                {
+                  // 低於補貨門檻要一眼看得到，所以手機上讓它跟名稱並排在卡片頂端。
+                  key: 'stock', header: '庫存數量', cardAside: true,
+                  cell: (row) => (
+                    <span className={`inline-flex items-center gap-1 ${isLowStock(row) ? 'text-red-600 font-medium' : 'text-gray-700'}`}>
+                      {isLowStock(row) && <AlertTriangle className="w-3.5 h-3.5" />}
+                      {row.stock_quantity} {row.unit}
+                    </span>
+                  ),
+                },
+                { key: 'threshold', header: '補貨門檻', tdClass: 'text-gray-500', cell: (row) => `${row.restock_threshold} ${row.unit}` },
+                { key: 'spaces', header: '適用房型/空間', tdClass: 'text-gray-500', cardFullWidth: true, cell: (row) => consumableSpaceNames(row.id) },
+                {
+                  key: 'actions', header: '', cardActions: true, tdClass: 'text-right',
+                  cell: (row) => (
+                    <div className="flex items-center justify-end gap-1">
+                      <button onClick={(e) => { e.stopPropagation(); openEditConsumable(row); }} className="p-2 hover:bg-gray-100 rounded-lg" title="編輯"><Pencil className="w-4 h-4 text-gray-500" /></button>
+                      <button onClick={(e) => { e.stopPropagation(); setDeleteConsumableTarget(row); }} className="p-2 hover:bg-red-50 rounded-lg" title="刪除"><Trash2 className="w-4 h-4 text-red-500" /></button>
+                    </div>
+                  ),
+                },
+              ]}
+            />
           </div>
         )}
 
@@ -653,6 +645,8 @@ export default function LinenManagement() {
                 </ReportBlock>
 
                 <ReportBlock title="各品項用量與金額" note="跟洗滌廠對帳單時用這張">
+                  {/* 品項名稱可能很長，手機上讓表格自己捲，不要把整頁撐出橫向捲軸 */}
+                  <div className="overflow-x-auto">
                   <table className="w-full text-left text-sm">
                     <thead className="border-b text-gray-500 text-xs">
                       <tr><th className="py-2">品項</th><th className="py-2 text-right w-24">件數</th><th className="py-2 text-right w-32">金額</th></tr>
@@ -667,6 +661,7 @@ export default function LinenManagement() {
                       ))}
                     </tbody>
                   </table>
+                  </div>
                 </ReportBlock>
 
                 <ReportBlock title="各房間成本" note="一張訂單開多間房時，成本平均分攤到每間房">
@@ -682,22 +677,18 @@ export default function LinenManagement() {
                 </ReportBlock>
 
                 <ReportBlock title="單張訂單成本" note="金額由高到低，前 30 筆">
-                  <table className="w-full text-left text-sm">
-                    <thead className="border-b text-gray-500 text-xs">
-                      <tr><th className="py-2">訂單</th><th className="py-2">住客</th><th className="py-2">入住</th><th className="py-2 text-right w-28">晚數</th><th className="py-2 text-right w-32">布巾成本</th></tr>
-                    </thead>
-                    <tbody className="divide-y divide-gray-100">
-                      {byBooking.slice(0, 30).map((r, i) => (
-                        <tr key={i}>
-                          <td className="py-2 font-mono text-xs text-gray-600">{r.booking?.order_number || '—'}</td>
-                          <td className="py-2 text-gray-700">{r.booking?.name || r.booking?.nickname || '—'}</td>
-                          <td className="py-2 text-gray-600">{r.booking?.checkin_date || '—'}</td>
-                          <td className="py-2 text-right text-gray-600">{nightsBetween(r.booking?.checkin_date, r.booking?.checkout_date) || '—'}</td>
-                          <td className="py-2 text-right text-gray-800">{currency(r.amount)}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                  <ResponsiveTable
+                    rows={byBooking.slice(0, 30)}
+                    rowKey={(r) => r.booking?.id || r.booking?.order_number || String(r.amount)}
+                    columns={[
+                      { key: 'order', header: '訂單', tdClass: 'font-mono text-xs text-gray-600', cell: (r) => r.booking?.order_number || '—' },
+                      { key: 'guest', header: '住客', cardTitle: true, tdClass: 'text-gray-700', cell: (r) => r.booking?.name || r.booking?.nickname || '—' },
+                      { key: 'checkin', header: '入住', tdClass: 'text-gray-600', cell: (r) => r.booking?.checkin_date || '—' },
+                      { key: 'nights', header: '晚數', thClass: 'text-right w-28', tdClass: 'text-right text-gray-600', cell: (r) => nightsBetween(r.booking?.checkin_date, r.booking?.checkout_date) || '—' },
+                      // 這份報表就是在看錢，金額貼在卡片右上角，滑手機時一路掃下去都對得齊。
+                      { key: 'amount', header: '布巾成本', cardAside: true, thClass: 'text-right w-32', tdClass: 'text-right text-gray-800', cell: (r) => currency(r.amount) },
+                    ]}
+                  />
                 </ReportBlock>
               </>
             )}

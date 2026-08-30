@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import { Bot, RefreshCcw, History, ListChecks, MessageSquare, Search, Headphones, Users } from 'lucide-react';
-import { PageHeader, Button, EmptyState, StatusBadge, Pagination } from '../components/ui';
+import { PageHeader, Button, EmptyState, StatusBadge, Pagination, ResponsiveTable } from '../components/ui';
 
 type Tab = 'active' | 'history' | 'conversations';
 
@@ -58,6 +58,8 @@ export default function AiServiceCenter() {
     } else {
       fetchConvUsers(0, userFilter);
     }
+    // 只在切換分頁時重抓。userFilter 是刻意不放的——放了會變成每打一個字就查一次，搜尋由按鈕觸發。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
 
   const fetchHandoverUsers = async () => {
@@ -189,75 +191,43 @@ export default function AiServiceCenter() {
 
       {tab === 'active' && (
         <div className="bg-white rounded-xl shadow-sm border overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="w-full text-left">
-              <thead className="bg-gray-50 border-b">
-                <tr className="text-sm font-semibold text-gray-600">
-                  <th className="py-4 px-6">用戶暱稱</th>
-                  <th className="py-4 px-6">LINE User ID</th>
-                  <th className="py-4 px-6">呼叫時間</th>
-                  <th className="py-4 px-6">操作</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100">
-                {loading ? (
-                  <tr><td colSpan={4} className="py-10 text-center text-gray-400">載入中...</td></tr>
-                ) : users.length === 0 ? (
-                  <tr><td colSpan={4}><EmptyState icon={<Bot className="w-12 h-12 text-gray-200" />} message="目前沒有待處理的真人請求" /></td></tr>
-                ) : (
-                  users.map(user => (
-                    <tr key={user.line_user_id} className="hover:bg-red-50 transition-colors">
-                      <td className="py-4 px-6 font-medium text-gray-800">{user.nickname || '未取得'}</td>
-                      <td className="py-4 px-6 font-mono text-xs text-gray-500">{user.line_user_id}</td>
-                      <td className="py-4 px-6 text-sm text-gray-600">
-                        {new Date(user.last_human_interaction).toLocaleString('zh-TW')}
-                      </td>
-                      <td className="py-4 px-6">
-                        <Button onClick={() => switchToAI(user.line_user_id)}>轉回 AI 接手</Button>
-                      </td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
+          <ResponsiveTable
+            rows={users}
+            rowKey={(user) => user.line_user_id}
+            loading={loading}
+            empty={<EmptyState icon={<Bot className="w-12 h-12 text-gray-200" />} message="目前沒有待處理的真人請求" />}
+            rowClass={() => 'hover:bg-red-50 transition-colors'}
+            columns={[
+              { key: 'nickname', header: '用戶暱稱', cardTitle: true, thClass: 'text-sm font-semibold', tdClass: 'font-medium text-gray-800', cell: (u) => u.nickname || '未取得' },
+              { key: 'line_user_id', header: 'LINE User ID', thClass: 'text-sm font-semibold', tdClass: 'font-mono text-xs text-gray-500', cardFullWidth: true, cell: (u) => u.line_user_id },
+              { key: 'called_at', header: '呼叫時間', thClass: 'text-sm font-semibold', tdClass: 'text-sm text-gray-600', cell: (u) => new Date(u.last_human_interaction).toLocaleString('zh-TW') },
+              {
+                // 「轉回 AI 接手」是這頁唯一的動作，手機上放在卡片底部整條比較好按。
+                key: 'actions', header: '操作', cardActions: true, thClass: 'text-sm font-semibold',
+                cell: (u) => <Button onClick={() => switchToAI(u.line_user_id)}>轉回 AI 接手</Button>,
+              },
+            ]}
+          />
         </div>
       )}
 
       {tab === 'history' && (
         <div className="bg-white rounded-xl shadow-sm border overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="w-full text-left">
-              <thead className="bg-gray-50 border-b">
-                <tr className="text-sm font-semibold text-gray-600">
-                  <th className="py-4 px-6">用戶暱稱</th>
-                  <th className="py-4 px-6">觸發關鍵字</th>
-                  <th className="py-4 px-6">開始時間</th>
-                  <th className="py-4 px-6">結束時間</th>
-                  <th className="py-4 px-6">狀態</th>
-                  <th className="py-4 px-6">處理人</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100">
-                {loading ? (
-                  <tr><td colSpan={6} className="py-10 text-center text-gray-400">載入中...</td></tr>
-                ) : history.length === 0 ? (
-                  <tr><td colSpan={6}><EmptyState icon={<History className="w-12 h-12 text-gray-200" />} message="尚無歷史紀錄" /></td></tr>
-                ) : (
-                  history.map((row) => (
-                    <tr key={row.id} className="hover:bg-gray-50 transition-colors">
-                      <td className="py-4 px-6 font-medium text-gray-800">{row.nickname || '未取得'}</td>
-                      <td className="py-4 px-6 text-sm text-gray-600">{row.triggered_keyword || '-'}</td>
-                      <td className="py-4 px-6 text-sm text-gray-600">{new Date(row.started_at).toLocaleString('zh-TW')}</td>
-                      <td className="py-4 px-6 text-sm text-gray-600">{row.ended_at ? new Date(row.ended_at).toLocaleString('zh-TW') : '-'}</td>
-                      <td className="py-4 px-6"><StatusBadge status={row.status} /></td>
-                      <td className="py-4 px-6 text-sm text-gray-600">{row.resolved_by === 'timeout_auto' ? '自動逾時' : (row.resolved_by || '-')}</td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
+          <ResponsiveTable
+            rows={history}
+            rowKey={(row) => row.id}
+            loading={loading}
+            empty={<EmptyState icon={<History className="w-12 h-12 text-gray-200" />} message="尚無歷史紀錄" />}
+            rowClass={() => 'hover:bg-gray-50 transition-colors'}
+            columns={[
+              { key: 'nickname', header: '用戶暱稱', cardTitle: true, thClass: 'text-sm font-semibold', tdClass: 'font-medium text-gray-800', cell: (row) => row.nickname || '未取得' },
+              { key: 'keyword', header: '觸發關鍵字', thClass: 'text-sm font-semibold', tdClass: 'text-sm text-gray-600', cell: (row) => row.triggered_keyword || '-' },
+              { key: 'started_at', header: '開始時間', thClass: 'text-sm font-semibold', tdClass: 'text-sm text-gray-600', cell: (row) => new Date(row.started_at).toLocaleString('zh-TW') },
+              { key: 'ended_at', header: '結束時間', thClass: 'text-sm font-semibold', tdClass: 'text-sm text-gray-600', cell: (row) => (row.ended_at ? new Date(row.ended_at).toLocaleString('zh-TW') : '-') },
+              { key: 'status', header: '狀態', cardAside: true, thClass: 'text-sm font-semibold', cell: (row) => <StatusBadge status={row.status} /> },
+              { key: 'resolved_by', header: '處理人', thClass: 'text-sm font-semibold', tdClass: 'text-sm text-gray-600', cell: (row) => (row.resolved_by === 'timeout_auto' ? '自動逾時' : (row.resolved_by || '-')) },
+            ]}
+          />
         </div>
       )}
 

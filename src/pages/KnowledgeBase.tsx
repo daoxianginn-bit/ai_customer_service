@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import { Plus, Trash2, Pencil, FileText, File as FileIcon, ClipboardList } from 'lucide-react';
-import { PageHeader, Button, EmptyState, Switch, ConfirmDialog, Modal } from '../components/ui';
+import { PageHeader, Button, EmptyState, Switch, ConfirmDialog, Modal, ResponsiveTable } from '../components/ui';
 
 type KbItem = {
   id: string;
@@ -148,43 +148,28 @@ export default function KnowledgeBase() {
       />
 
       <div className="bg-white rounded-xl shadow-sm border overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full text-left">
-            <thead className="bg-gray-50 border-b">
-              <tr className="text-sm font-semibold text-gray-600">
-                <th className="py-4 px-6">標題</th>
-                <th className="py-4 px-6">類型</th>
-                <th className="py-4 px-6">啟用中</th>
-                <th className="py-4 px-6">建立時間</th>
-                <th className="py-4 px-6">操作</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100">
-              {loading ? (
-                <tr><td colSpan={5} className="py-10 text-center text-gray-400">載入中...</td></tr>
-              ) : items.length === 0 ? (
-                <tr><td colSpan={5}><EmptyState icon={<ClipboardList className="w-12 h-12 text-gray-200" />} message="尚未新增任何知識庫資料" /></td></tr>
-              ) : (
-                items.map((item) => (
-                  <tr key={item.id} className="hover:bg-green-50 transition-colors">
-                    <td className="py-4 px-6 font-medium text-gray-800">{item.title}</td>
-                    <td className="py-4 px-6 text-sm text-gray-500">{item.type === 'text' ? '文字' : `檔案 (${item.file_name})`}</td>
-                    <td className="py-4 px-6">
-                      <Switch checked={item.is_active} onChange={() => toggleActive(item)} />
-                    </td>
-                    <td className="py-4 px-6 text-sm text-gray-500">{new Date(item.created_at).toLocaleString('zh-TW')}</td>
-                    <td className="py-4 px-6">
-                      <div className="flex gap-2">
-                        <button onClick={() => openEditForm(item)} className="p-2 hover:bg-gray-100 rounded-lg" title="編輯"><Pencil className="w-4 h-4 text-gray-500" /></button>
-                        <button onClick={() => setDeleteTarget(item)} className="p-2 hover:bg-red-50 rounded-lg" title="刪除"><Trash2 className="w-4 h-4 text-red-500" /></button>
-                      </div>
-                    </td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
+        <ResponsiveTable
+          rows={items}
+          rowKey={(item) => item.id}
+          loading={loading}
+          empty={<EmptyState icon={<ClipboardList className="w-12 h-12 text-gray-200" />} message="尚未新增任何知識庫資料" />}
+          rowClass={() => 'hover:bg-green-50 transition-colors'}
+          columns={[
+            { key: 'title', header: '標題', cardTitle: true, thClass: 'text-sm font-semibold', tdClass: 'font-medium text-gray-800', cell: (item) => item.title },
+            { key: 'type', header: '類型', thClass: 'text-sm font-semibold', tdClass: 'text-sm text-gray-500', cardFullWidth: true, cell: (item) => (item.type === 'text' ? '文字' : `檔案 (${item.file_name})`) },
+            { key: 'is_active', header: '啟用中', cardAside: true, thClass: 'text-sm font-semibold', cell: (item) => <Switch checked={item.is_active} onChange={() => toggleActive(item)} /> },
+            { key: 'created_at', header: '建立時間', thClass: 'text-sm font-semibold', tdClass: 'text-sm text-gray-500', cell: (item) => new Date(item.created_at).toLocaleString('zh-TW') },
+            {
+              key: 'actions', header: '操作', cardActions: true, thClass: 'text-sm font-semibold',
+              cell: (item) => (
+                <div className="flex gap-2">
+                  <button onClick={() => openEditForm(item)} className="p-2 hover:bg-gray-100 rounded-lg" title="編輯"><Pencil className="w-4 h-4 text-gray-500" /></button>
+                  <button onClick={() => setDeleteTarget(item)} className="p-2 hover:bg-red-50 rounded-lg" title="刪除"><Trash2 className="w-4 h-4 text-red-500" /></button>
+                </div>
+              ),
+            },
+          ]}
+        />
       </div>
 
       <ConfirmDialog

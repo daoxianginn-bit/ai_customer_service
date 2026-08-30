@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import { Users, Search, RotateCcw, MessageSquare, ClipboardList, Copy, RefreshCcw, AlertCircle, Trash2 } from 'lucide-react';
-import { PageHeader, Button, Modal, StatusBadge, EmptyState, Pagination, ConfirmDialog } from '../components/ui';
+import { PageHeader, Button, Modal, StatusBadge, EmptyState, Pagination, ConfirmDialog, ResponsiveTable, FilterBar } from '../components/ui';
 import { DEPOSIT_OR_LATER_STATUSES } from '../lib/bookingStatus';
 import { channelRoleLabel } from '../lib/lineChannels';
 
@@ -143,6 +143,8 @@ export default function CustomerDirectory() {
 
   useEffect(() => {
     if (channelId) runQuery(0);
+    // 只在換頁筆數或官方帳號改變時重查。runQuery 每次 render 都是新參考，放進依賴會無限重查。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pageSize, channelId]);
 
   useEffect(() => {
@@ -178,7 +180,7 @@ export default function CustomerDirectory() {
     }
 
     const userIds = (states || []).map((s: any) => s.line_user_id);
-    let bookingsByUser: Record<string, any[]> = {};
+    const bookingsByUser: Record<string, any[]> = {};
     if (userIds.length) {
       const { data: bookings, error: bookingsError } = await supabase.from('bookings').select('line_user_id, status').in('line_user_id', userIds);
       if (bookingsError) setQueryError(`查詢訂單統計失敗：${bookingsError.message}`);
@@ -332,7 +334,25 @@ export default function CustomerDirectory() {
         </div>
       )}
 
-      <div className="bg-white p-4 rounded-xl shadow-sm border space-y-3">
+      <FilterBar
+        activeCount={[keyword, dateFrom, dateTo, nicknameStatus !== 'all' ? nicknameStatus : ''].filter(Boolean).length}
+        always={(
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs text-gray-400">快速篩選：</span>
+            {quickFilterChips.map((chip) => (
+              <button
+                key={chip.key}
+                onClick={() => applyQuickFilter(chip.key)}
+                className={`px-3 py-1 rounded-full text-xs font-medium border transition-colors ${
+                  activeQuickFilter === chip.key ? 'bg-green-600 text-white border-green-600' : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'
+                }`}
+              >
+                {chip.label}
+              </button>
+            ))}
+          </div>
+        )}
+      >
         <div className="flex flex-wrap gap-3 items-end">
           {/* 官方帳號切換：LINE user ID 各帳號獨立，聯絡人清單一次只能看一個帳號 */}
           <div>
@@ -380,21 +400,7 @@ export default function CustomerDirectory() {
           <Button variant="secondary" onClick={clearFilters} icon={<RotateCcw className="w-4 h-4" />}>清除條件</Button>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="text-xs text-gray-400">快速篩選：</span>
-          {quickFilterChips.map((chip) => (
-            <button
-              key={chip.key}
-              onClick={() => applyQuickFilter(chip.key)}
-              className={`px-3 py-1 rounded-full text-xs font-medium border transition-colors ${
-                activeQuickFilter === chip.key ? 'bg-green-600 text-white border-green-600' : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'
-              }`}
-            >
-              {chip.label}
-            </button>
-          ))}
-        </div>
-      </div>
+      </FilterBar>
 
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-6 items-start">
         <div className="lg:col-span-3 bg-white rounded-xl shadow-sm border overflow-hidden">
@@ -408,58 +414,43 @@ export default function CustomerDirectory() {
             </div>
           </div>
 
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-sm">
-              <thead className="bg-gray-50 border-b">
-                <tr className="text-gray-600">
-                  <th className="py-3 px-4">LINE 暱稱</th>
-                  <th className="py-3 px-4">LINE User ID</th>
-                  <th className="py-3 px-4">最近互動時間</th>
-                  <th className="py-3 px-4">狀態</th>
-                  <th className="py-3 px-4"></th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100">
-                {loading ? (
-                  <tr><td colSpan={5} className="py-10 text-center text-gray-400">載入中...</td></tr>
-                ) : contacts.length === 0 ? (
-                  <tr><td colSpan={5}><EmptyState icon={<Users className="w-12 h-12 text-gray-200" />} message="查無聯絡人" /></td></tr>
-                ) : (
-                  contacts.map((c) => (
-                    <tr
-                      key={c.line_user_id}
-                      onClick={() => selectContact(c.line_user_id)}
-                      className={`cursor-pointer transition-colors ${selectedId === c.line_user_id ? 'bg-green-50' : 'hover:bg-green-50'}`}
-                    >
-                      <td className="py-3 px-4">
-                        <div className="flex items-center gap-2">
-                          <Avatar url={c.avatar_url} />
-                          <div>
-                            <div className="font-medium text-gray-800">{c.nickname || '未取得'}</div>
-                            {!c.nickname && (
-                              <button
-                                onClick={(e) => { e.stopPropagation(); refetchNickname(c.line_user_id); }}
-                                disabled={refreshingIds.has(c.line_user_id)}
-                                className="flex items-center gap-1 text-xs text-green-600 hover:text-green-700 disabled:opacity-50"
-                              >
-                                <RefreshCcw className={`w-3 h-3 ${refreshingIds.has(c.line_user_id) ? 'animate-spin' : ''}`} />
-                                {refreshingIds.has(c.line_user_id) ? '同步中' : '重新整理暱稱'}
-                              </button>
-                            )}
-                            {refreshErrors[c.line_user_id] && <p className="text-xs text-red-500 mt-0.5">{refreshErrors[c.line_user_id]}</p>}
-                          </div>
-                        </div>
-                      </td>
-                      <td className="py-3 px-4 font-mono text-xs text-gray-500">{c.line_user_id}</td>
-                      <td className="py-3 px-4 text-gray-500 whitespace-nowrap">{c.last_message_at ? new Date(c.last_message_at).toLocaleString('zh-TW') : '-'}</td>
-                      <td className="py-3 px-4"><ContactStatusBadge contact={c} /></td>
-                      <td className="py-3 px-4 text-right text-gray-300">›</td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
+          <ResponsiveTable
+            rows={contacts}
+            rowKey={(c) => c.line_user_id}
+            loading={loading}
+            empty={<EmptyState icon={<Users className="w-12 h-12 text-gray-200" />} message="查無聯絡人" />}
+            onRowClick={(c) => selectContact(c.line_user_id)}
+            rowClass={(c) => (selectedId === c.line_user_id ? 'bg-green-50' : 'hover:bg-green-50')}
+            columns={[
+              {
+                key: 'nickname', header: 'LINE 暱稱', cardTitle: true,
+                cell: (c) => (
+                  <div className="flex items-center gap-2">
+                    <Avatar url={c.avatar_url} />
+                    <div>
+                      <div className="font-medium text-gray-800">{c.nickname || '未取得'}</div>
+                      {!c.nickname && (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); refetchNickname(c.line_user_id); }}
+                          disabled={refreshingIds.has(c.line_user_id)}
+                          className="flex items-center gap-1 text-xs text-green-600 hover:text-green-700 disabled:opacity-50"
+                        >
+                          <RefreshCcw className={`w-3 h-3 ${refreshingIds.has(c.line_user_id) ? 'animate-spin' : ''}`} />
+                          {refreshingIds.has(c.line_user_id) ? '同步中' : '重新整理暱稱'}
+                        </button>
+                      )}
+                      {refreshErrors[c.line_user_id] && <p className="text-xs text-red-500 mt-0.5">{refreshErrors[c.line_user_id]}</p>}
+                    </div>
+                  </div>
+                ),
+              },
+              { key: 'line_user_id', header: 'LINE User ID', tdClass: 'font-mono text-xs text-gray-500', cardFullWidth: true, cell: (c) => c.line_user_id },
+              { key: 'last_message_at', header: '最近互動時間', tdClass: 'text-gray-500 whitespace-nowrap', cell: (c) => (c.last_message_at ? new Date(c.last_message_at).toLocaleString('zh-TW') : '-') },
+              { key: 'status', header: '狀態', cardAside: true, cell: (c) => <ContactStatusBadge contact={c} /> },
+              // 「›」只是桌機表格用來暗示可以點的視覺提示，手機卡片整張都能點，不需要它。
+              { key: 'chevron', header: '', tdClass: 'text-right text-gray-300', cardHidden: true, cell: () => '›' },
+            ]}
+          />
 
           <Pagination page={page} hasMore={hasMore} onPrev={() => runQuery(page - 1)} onNext={() => runQuery(page + 1)} />
         </div>

@@ -1,4 +1,5 @@
 import { ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
 import Button from './Button';
 
@@ -26,8 +27,10 @@ export default function ConfirmDialog({
   onCancel,
 }: ConfirmDialogProps) {
   if (!open) return null;
-  return (
-    <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-50">
+  // 跟 Modal 同樣的理由：portal 到 body 才不會被有 transform 的祖先困住定位，
+  // z 值要高過外殼 AppBar 的 1201。確認框內容短，維持置中小卡，不做整頁。
+  return createPortal(
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-[1300]">
       <div className="bg-white rounded-xl shadow-xl w-full max-w-md">
         <div className="flex justify-between items-center p-6 border-b">
           <h3 className="text-lg font-bold text-gray-800">{title}</h3>
@@ -43,6 +46,7 @@ export default function ConfirmDialog({
           </Button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

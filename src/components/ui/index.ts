@@ -7,3 +7,6 @@ export { default as ConfirmDialog } from './ConfirmDialog';
 export { default as EmptyState } from './EmptyState';
 export { default as Switch } from './Switch';
 export { default as Pagination } from './Pagination';
+export { default as ResponsiveTable } from './ResponsiveTable';
+export type { ResponsiveColumn } from './ResponsiveTable';
+export { default as FilterBar } from './FilterBar';
