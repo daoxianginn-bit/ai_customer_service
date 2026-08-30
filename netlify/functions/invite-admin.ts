@@ -1,5 +1,6 @@
 import { Handler } from '@netlify/functions';
 import { createClient } from '@supabase/supabase-js';
+import crypto from 'crypto';
 import { withErrorLogging } from '../../src/lib/operationLog';
 import { requireRole } from '../../src/lib/requireRole';
 import { ROLE_OPTIONS } from '../../src/lib/permissions';
@@ -10,13 +11,10 @@ const supabaseAdmin = createClient(
 );
 
 const VALID_ROLES = ['admin', 'staff', 'viewer'];
+const INVITE_TTL_HOURS = 24;
 
-// 邀請信裡「接受邀請」按鈕要導回哪個網址。
-// 不指定的話 Supabase 會退回專案設定的 Site URL，而那個預設值是 http://localhost:3000——
-// 信寄出去對方點了只會連到自己電腦上不存在的網站，這就是邀請信網址錯誤的原因。
-//
-// 取值順序：自訂環境變數 → Netlify 自動注入的站台網址 → 發出請求的來源網域。
-// 最後一項是保險：本機用 netlify dev 測試時前兩個都沒有值。
+// 邀請信裡的連結要導回哪個網址。不指定的話 Supabase 會退回專案設定的 Site URL，
+// 而那個預設值是 http://localhost:3000——信寄出去對方點了只會連到自己電腦上不存在的網站。
 function resolveSiteUrl(event: any): string {
   const fromEnv = process.env.PUBLIC_SITE_URL || process.env.URL || process.env.DEPLOY_PRIME_URL;
   if (fromEnv) return fromEnv.replace(/\/$/, '');
@@ -25,61 +23,86 @@ function resolveSiteUrl(event: any): string {
   return '';
 }
 
+/** 邀請 Token 只把雜湊存進資料庫，原文只出現在寄出的連結裡。 */
+export function hashInviteToken(token: string): string {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
 const rawHandler: Handler = async (event) => {
   if (event.httpMethod !== 'POST') return { statusCode: 405, body: 'Method Not Allowed' };
 
-  // 只有管理員能邀請新帳號。少了這道檢查，任何登入者（含唯讀角色）都能自己邀一個
-  // 新帳號進來，等於權限系統形同虛設——這是最典型的提權漏洞。
+  // 只有管理員能發邀請。少了這道檢查，任何登入者都能自己邀一個管理員帳號進來。
   const guard = await requireRole(supabaseAdmin, event as any, ['admin']);
   if ('error' in guard) return guard.error;
 
   const { email, role } = JSON.parse(event.body || '{}');
-  if (!email || typeof email !== 'string') return { statusCode: 400, body: 'Email is required' };
+  if (!email || typeof email !== 'string') return { statusCode: 400, body: '請輸入 Email' };
+  const normalizedEmail = email.trim().toLowerCase();
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(normalizedEmail)) return { statusCode: 400, body: 'Email 格式不正確' };
   const assignedRole = VALID_ROLES.includes(role) ? role : 'staff';
 
   const siteUrl = resolveSiteUrl(event);
   if (!siteUrl) {
     return {
       statusCode: 500,
-      body: '無法判斷網站網址，邀請信的連結會指向錯誤位置。請在 Netlify 環境變數新增 PUBLIC_SITE_URL（例如 https://your-site.netlify.app）後再試一次。',
+      body: '無法判斷網站網址，邀請信的連結會指向錯誤位置。請在 Netlify 環境變數新增 PUBLIC_SITE_URL 後再試一次。',
     };
   }
 
   const roleLabel = ROLE_OPTIONS.find((r) => r.value === assignedRole)?.label || assignedRole;
 
-  const { data, error } = await supabaseAdmin.auth.admin.inviteUserByEmail(email, {
-    // 導到專門的「設定密碼」頁而不是首頁：被邀請的人此時還沒有密碼，
-    // 直接丟到首頁他會登入成功卻永遠不知道密碼是什麼，下次就進不來了。
-    // 用路徑（而不是網址裡的 type 參數）來表達意圖，因為 supabase-js 會在建立 session 後
-    // 把網址上的 #access_token=... 整段清掉，路徑才是穩定讀得到的訊號。
-    redirectTo: `${siteUrl}/set-password`,
-    // 寫進使用者的 metadata，讓 Supabase 的信件樣板可以用 {{ .Data.xxx }} 取用，
-    // 把「誰邀請你、你是什麼角色」寫進信裡，而不是一封每個人都一樣的空泛通知。
+  // 產生高熵邀請 Token（32 bytes）。這是「零公開註冊」的憑據之一，
+  // 但真正的把關是下面寫進 admin_invitations 的那筆紀錄——
+  // 接受邀請時是用「Google 回來的 email 是否對得上有效邀請」來判斷，
+  // 不是只看 Token。這樣即使對方沒收到信、直接去登入頁用 Google 登入也能成立，
+  // 不會因為信件被擋掉就完全卡死。
+  const token = crypto.randomBytes(32).toString('base64url');
+  const expiresAt = new Date(Date.now() + INVITE_TTL_HOURS * 60 * 60 * 1000).toISOString();
+
+  // 同一個 email 若有還沒使用的舊邀請，先作廢再開新的，避免舊連結仍然有效。
+  await supabaseAdmin
+    .from('admin_invitations')
+    .update({ revoked_at: new Date().toISOString() })
+    .ilike('email', normalizedEmail)
+    .is('accepted_at', null)
+    .is('revoked_at', null);
+
+  const { error: inviteError } = await supabaseAdmin.from('admin_invitations').insert({
+    email: normalizedEmail,
+    role: assignedRole,
+    token_hash: hashInviteToken(token),
+    expires_at: expiresAt,
+    invited_by: guard.user.id,
+  });
+  if (inviteError) return { statusCode: 500, body: `建立邀請失敗：${inviteError.message}` };
+
+  // 寄出邀請信。對方點連結時 Supabase 會先確認他的 email（這一步讓之後的 Google 身分連結
+  // 走在官方支援的路徑上），再帶著我們的 Token 導到邀請確認頁。
+  const { error: mailError } = await supabaseAdmin.auth.admin.inviteUserByEmail(normalizedEmail, {
+    redirectTo: `${siteUrl}/auth/invite-verify?token=${encodeURIComponent(token)}`,
     data: {
       invited_role: assignedRole,
       invited_role_label: roleLabel,
       invited_by: guard.user.email || '',
     },
   });
-  if (error) return { statusCode: 500, body: error.message };
 
-  // 由管理員主動邀請的帳號視同已核准（是管理員自己指名要加的人），直接給定角色，
-  // 對方設完密碼就能直接使用，不用再走一次核准流程。
-  // 觸發器已經在 auth.users 建立時插好 profile，這裡只是把它更新成已核准＋指定角色。
-  if (data.user?.id) {
-    await supabaseAdmin.from('admin_profiles').upsert({
-      id: data.user.id,
-      email: data.user.email,
+  // 帳號已經存在時 inviteUserByEmail 會失敗（例如重寄邀請給曾經被邀過的人）。
+  // 這不算失敗：邀請紀錄已經建立，對方直接到登入頁用 Google 登入一樣會被放行，
+  // 所以回報成功但告知管理員信沒有寄出，請自行通知對方。
+  const mailSent = !mailError;
+
+  return {
+    statusCode: 200,
+    body: JSON.stringify({
+      success: true,
+      email: normalizedEmail,
       role: assignedRole,
-      status: 'approved',
-      approved_at: new Date().toISOString(),
-      approved_by: guard.user.id,
-      updated_at: new Date().toISOString(),
-    }, { onConflict: 'id' });
-  }
-
-  return { statusCode: 200, body: JSON.stringify({ success: true, id: data.user?.id, email: data.user?.email, role: assignedRole }) };
+      mailSent,
+      mailError: mailError?.message || null,
+      expiresAt,
+    }),
+  };
 };
 
-// 4XX/5XX 與未攔截的例外統一寫進「操作紀錄」，不然出錯時只剩 Netlify 的 function log 可查。
 export const handler: Handler = withErrorLogging(supabaseAdmin, 'invite-admin', rawHandler);

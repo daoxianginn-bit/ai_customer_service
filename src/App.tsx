@@ -2,13 +2,16 @@ import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-route
 import type { ReactNode } from 'react';
 import { ThemeProvider } from '@mui/material/styles';
 import CssBaseline from '@mui/material/CssBaseline';
+import { Box, CircularProgress, Stack, Typography } from '@mui/material';
 import { SnackbarProvider } from 'notistack';
 import { enterpriseTheme } from './muiTheme';
 import ConfirmDialogProvider from './components/ui-mui/ConfirmDialogProvider';
 import { AuthProvider, useAuth } from './lib/AuthContext';
 import { canAccessRoute, defaultRouteFor } from './lib/permissions';
 import Login from './pages/Login';
-import SetPassword from './pages/SetPassword';
+import InviteVerify from './pages/auth/InviteVerify';
+import Setup2FA from './pages/auth/Setup2FA';
+import Verify2FA from './pages/auth/Verify2FA';
 import Overview from './pages/Overview';
 import SystemSettings from './pages/SystemSettings';
 import KnowledgeBase from './pages/KnowledgeBase';
@@ -30,20 +33,27 @@ import Layout from './components/Layout';
 
 const envMissing = !import.meta.env.VITE_SUPABASE_URL || import.meta.env.VITE_SUPABASE_URL.includes('placeholder');
 
+
+// 半受保護路由：只有處在對應 2FA 階段的人才會被導到這裡（見下方 AppRoutes 的說明）
+const PRE_AUTH_PATHS = ['/auth/setup-2fa', '/auth/verify-2fa'];
+// 完全公開路由：不需要任何 session
+const PUBLIC_PATHS = ['/login', '/auth/invite-verify'];
+
 function FullScreenSpinner({ message }: { message: string }) {
   return (
-    <div className="flex items-center justify-center h-screen bg-white">
-      <div className="flex flex-col items-center gap-4">
-        <div className="w-10 h-10 border-4 border-green-600 border-t-transparent rounded-full animate-spin"></div>
-        <p className="text-gray-500 font-medium">{message}</p>
-      </div>
-    </div>
+    <Box sx={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <Stack spacing={2} alignItems="center">
+        <CircularProgress />
+        <Typography variant="body2" color="text.secondary">{message}</Typography>
+      </Stack>
+    </Box>
   );
 }
 
 /**
- * 路徑層級的權限守衛。沒權限的人直接導回自己進得去的頁面，而不是顯示「無權限」畫面——
- * 選單本來就會依角色隱藏，會走到這裡通常是手動輸入網址或用了舊書籤，靜靜導開比較不擾人。
+ * 路徑層級的角色守衛（只在使用者已經完成 2FA、進到後台之後才會用到）。
+ * 沒權限的人靜靜導回自己進得去的頁面——選單本來就會依角色隱藏，
+ * 會走到這裡通常是手動輸入網址或用了舊書籤。
  *
  * 注意：這只是介面層的引導，不是安全防線。真正擋住資料的是資料庫的 RLS。
  */
@@ -57,21 +67,41 @@ function RequireAccess({ children }: { children: ReactNode }) {
 }
 
 function AppRoutes() {
-  const { session, profile, loading } = useAuth();
+  const { phase } = useAuth();
+  const location = useLocation();
+  const path = location.pathname;
 
-  // session 或 profile 還沒確定時不要渲染路由：這時候還不知道使用者是什麼角色，
-  // 先渲染會閃過一瞬間不該看到的選單，也可能誤把已登入的人導去登入頁。
-  if (loading) return <FullScreenSpinner message="系統載入中..." />;
+  if (phase === 'loading') return <FullScreenSpinner message="系統載入中..." />;
+  if (phase === 'accepting-invite') return <FullScreenSpinner message="確認邀請資格中..." />;
 
-  const authed = !!session && !!profile;
+  // 未登入／被擋下：只能待在公開頁
+  if (phase === 'anonymous' || phase === 'blocked') {
+    if (!PUBLIC_PATHS.includes(path)) return <Navigate to="/login" replace />;
+  }
+
+  // 已通過 Google 但還沒完成 2FA：強制留在對應的 2FA 頁面。
+  // 這是規格「半受保護路由」的實作——除了 2FA 相關頁面，哪裡都去不了，
+  // 也看不到任何後台選單（那些頁面用的是 IsolatedLayout）。
+  if (phase === 'needs-mfa-setup' && path !== '/auth/setup-2fa') {
+    return <Navigate to="/auth/setup-2fa" replace />;
+  }
+  if (phase === 'needs-mfa-verify' && path !== '/auth/verify-2fa') {
+    return <Navigate to="/auth/verify-2fa" replace />;
+  }
+
+  // 已完成 2FA 的人不需要再看到登入頁或 2FA 頁
+  if (phase === 'ready' && (PUBLIC_PATHS.includes(path) || PRE_AUTH_PATHS.includes(path))) {
+    return <Navigate to="/" replace />;
+  }
 
   return (
     <Routes>
-      <Route path="/login" element={!authed ? <Login /> : <Navigate to="/" replace />} />
-      {/* 邀請信／重設密碼信的落地頁。刻意放在登入守衛之外：此時使用者已經拿到 session
-          （所以 authed 會是 true），但他還沒有密碼，必須先設定完才放他進後台。 */}
-      <Route path="/set-password" element={<SetPassword />} />
-      <Route element={authed ? <Layout /> : <Navigate to="/login" replace />}>
+      <Route path="/login" element={<Login />} />
+      <Route path="/auth/invite-verify" element={<InviteVerify />} />
+      <Route path="/auth/setup-2fa" element={<Setup2FA />} />
+      <Route path="/auth/verify-2fa" element={<Verify2FA />} />
+
+      <Route element={<Layout />}>
         <Route path="/" element={<RequireAccess><Overview /></RequireAccess>} />
         <Route path="/ai-service-center" element={<RequireAccess><AiServiceCenter /></RequireAccess>} />
         <Route path="/standard-messages" element={<RequireAccess><StandardMessages /></RequireAccess>} />

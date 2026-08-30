@@ -8,7 +8,13 @@
 // ========================================================================
 
 export type AdminRole = 'admin' | 'staff' | 'viewer';
-export type AccountStatus = 'pending' | 'approved' | 'disabled';
+
+// 帳號狀態機（對應 supabase_schema.sql 第 9 節）：
+//   invited     已建立邀請，對方還沒完成 Google 驗證
+//   pending_mfa 已通過 Google 驗證，但還沒綁定 TOTP（此時 session 是 aal1，讀不到任何業務資料）
+//   active      已綁定並驗證 TOTP，具備完整權限
+//   suspended   停權
+export type AccountStatus = 'invited' | 'pending_mfa' | 'active' | 'suspended';
 
 export const ROLE_OPTIONS: { value: AdminRole; label: string; description: string }[] = [
   {
@@ -29,9 +35,17 @@ export const ROLE_OPTIONS: { value: AdminRole; label: string; description: strin
 ];
 
 export const STATUS_LABELS: Record<AccountStatus, string> = {
-  pending: '待審核',
-  approved: '已啟用',
-  disabled: '已停用',
+  invited: '已邀請',
+  pending_mfa: '待綁定 2FA',
+  active: '已啟用',
+  suspended: '已停權',
+};
+
+export const STATUS_DESCRIPTIONS: Record<AccountStatus, string> = {
+  invited: '邀請已寄出，對方尚未用 Google 完成驗證。',
+  pending_mfa: '已完成 Google 驗證，但還沒綁定 Google Authenticator，尚無法存取任何資料。',
+  active: '已綁定雙因素驗證，可正常使用系統。',
+  suspended: '已停權，無法登入。',
 };
 
 export function roleLabel(role?: string | null): string {

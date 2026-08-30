@@ -1116,71 +1116,113 @@ CREATE INDEX IF NOT EXISTS idx_operation_logs_feature ON public.operation_logs(f
 CREATE INDEX IF NOT EXISTS idx_operation_logs_actor ON public.operation_logs(actor_name);
 
 -- ========================================================================
--- 9. 帳號權限與 RLS
+-- 9. 帳號權限、邀請制註冊與強制 2FA
 --
--- 權限分三種角色，存在 admin_profiles.role：
---   admin  管理員   ：全部資料可讀可寫（含系統設定裡的 API 金鑰、LINE 權杖）
---   staff  客服人員 ：日常營運資料可讀可寫（訂單/客戶/對話/備品），設定類資料唯讀，
---                     完全讀不到 settings / line_channels 等機密表
---   viewer 唯讀     ：全部只能讀，不能寫
+-- 【安全定位】零公開註冊、強制 Google 身分核對、每次登入強制通過 TOTP 雙因素驗證。
 --
--- 這裡的限制是做在資料庫層（RLS），不是只做畫面隱藏。原因：前端用的 anon key 是公開的，
--- 任何登入者都能自己開 devtools 直接呼叫 supabase.from('settings').select('*')。
--- 只在選單隱藏頁面，機密欄位還是會被撈走，所以權限一定要落在這一層才算數。
+-- 【狀態機】admin_profiles.status
+--   invited      已建立邀請，對方尚未完成 Google 驗證
+--   pending_mfa  已通過 Google 驗證且 email 與邀請吻合，但尚未綁定 TOTP
+--   active       已綁定並驗證 TOTP，具備完整存取權
+--   suspended    停權
 --
--- admin_profiles.status 控管「有沒有被核准」：
---   pending  已註冊、還沒被核准（登入會被前端擋下並登出）
---   approved 已核准，依 role 取得對應權限
---   disabled 已停用（等同 pending，但語意是「曾經核准過、後來收回」）
--- 未核准的人 current_admin_role() 回傳 NULL，所有 RLS 判斷都會是 false，
--- 就算繞過前端直接打 API 也讀不到任何一張表。
+-- 【角色】admin_profiles.role：admin 全部／staff 日常營運／viewer 唯讀
+--
+-- 【為什麼 2FA 的關卡做在 RLS，而不是只做在 API】
+-- 前端用的 anon key 是公開的，任何登入者都能自己開 devtools 直接打 supabase.from(...)。
+-- 規格書把 2FA 關卡放在 API 層（發不發正式 Token），但那擋不住直接打資料庫的人。
+-- 這裡改成資料庫層強制：所有資料表都要求 JWT 的 aal = 'aal2'（Supabase 用來表示
+-- 「這個 session 已經通過第二因素驗證」的等級）。沒過 2FA 的 session 是 aal1，
+-- 連一張表都讀不到——這比規格要求更嚴，且無法從前端繞過。
+--
+-- 對應規格書的 Token 職責隔離：
+--   Pre-Auth Token（僅能呼叫 2FA 相關 API）→ Supabase 的 aal1 session
+--   正式 Access Token                      → Supabase 的 aal2 session
 -- ========================================================================
 
 -- 9.1 admin_profiles 擴充成完整的帳號權限表
--- role 的欄位預設值從建表時的 'admin' 改成 'staff'：萬一日後有程式沒指定 role 就插入資料，
+-- role 的欄位預設值改成 'staff'：萬一日後有程式沒指定 role 就插入資料，
 -- 失誤的方向應該是「權限太小」而不是「意外給了最高權限」（最小權限原則）。
--- 這只影響「沒指定 role」的插入，既有資料列不會被改動。
 ALTER TABLE public.admin_profiles ALTER COLUMN role SET DEFAULT 'staff';
 ALTER TABLE public.admin_profiles ADD COLUMN IF NOT EXISTS email TEXT;
-ALTER TABLE public.admin_profiles ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pending';
+ALTER TABLE public.admin_profiles ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'invited';
 ALTER TABLE public.admin_profiles ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ;
 ALTER TABLE public.admin_profiles ADD COLUMN IF NOT EXISTS approved_by UUID;
+ALTER TABLE public.admin_profiles ADD COLUMN IF NOT EXISTS mfa_enrolled_at TIMESTAMPTZ;
 ALTER TABLE public.admin_profiles ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now();
 
--- 先把既有資料正規化，再套用 CHECK，避免既有列違反新限制導致整份腳本失敗
+-- 舊狀態值搬遷到新的狀態機。必須在套用新 CHECK 之前做完，否則既有列會違反新限制。
+--   approved → pending_mfa：這批人已經是合法使用者，但都還沒綁過 2FA，
+--              下次登入會被強制導去綁定頁，綁完才變 active。不是直接給 active，
+--              否則等於讓既有帳號永久跳過 2FA，違背「每次登入皆強制通過」的要求。
+--   pending  → suspended：這是舊版「自助註冊等待審核」留下的帳號。改成純邀請制後
+--              這種來路的帳號不應該自動獲得任何權限，先停權讓管理員自己決定。
+--   disabled → suspended：純改名。
+UPDATE public.admin_profiles SET status = 'pending_mfa' WHERE status = 'approved';
+UPDATE public.admin_profiles SET status = 'suspended'   WHERE status IN ('pending', 'disabled');
 UPDATE public.admin_profiles SET role = 'admin' WHERE role IS NULL OR role NOT IN ('admin', 'staff', 'viewer');
-UPDATE public.admin_profiles SET status = 'approved' WHERE status IS NULL OR status NOT IN ('pending', 'approved', 'disabled');
+UPDATE public.admin_profiles SET status = 'suspended'
+  WHERE status IS NULL OR status NOT IN ('invited', 'pending_mfa', 'active', 'suspended');
 
 ALTER TABLE public.admin_profiles DROP CONSTRAINT IF EXISTS admin_profiles_role_check;
 ALTER TABLE public.admin_profiles ADD CONSTRAINT admin_profiles_role_check CHECK (role IN ('admin', 'staff', 'viewer'));
 ALTER TABLE public.admin_profiles DROP CONSTRAINT IF EXISTS admin_profiles_status_check;
-ALTER TABLE public.admin_profiles ADD CONSTRAINT admin_profiles_status_check CHECK (status IN ('pending', 'approved', 'disabled'));
+ALTER TABLE public.admin_profiles ADD CONSTRAINT admin_profiles_status_check
+  CHECK (status IN ('invited', 'pending_mfa', 'active', 'suspended'));
 
--- 9.2 既有使用者一律補成「已核准的管理員」，避免導入權限系統後把現有的人鎖在門外。
--- ON CONFLICT DO NOTHING：已經有 profile 的人（含之後由觸發器建立的待審核帳號）不會被動到。
+-- 9.2 既有使用者補上 profile，避免導入權限系統後把現有的人鎖在門外。
+-- 他們一律是 pending_mfa（不是 active）：下次登入要先綁 2FA 才能繼續使用。
 INSERT INTO public.admin_profiles (id, email, display_name, role, status, approved_at)
 SELECT u.id,
        u.email,
        COALESCE(u.raw_user_meta_data->>'full_name', u.raw_user_meta_data->>'name', u.email),
        'admin',
-       'approved',
+       'pending_mfa',
        now()
 FROM auth.users u
 ON CONFLICT (id) DO NOTHING;
 
--- 補正上一版就已經有 profile、但欄位是這次才新增（status 預設 pending）的既有使用者。
--- 條件「完全沒有任何已核准帳號」只有第一次升級時成立，之後重跑不會誤放行待審核的人。
-DO $$
-BEGIN
-  IF NOT EXISTS (SELECT 1 FROM public.admin_profiles WHERE status = 'approved') THEN
-    UPDATE public.admin_profiles SET status = 'approved', role = 'admin', approved_at = COALESCE(approved_at, now());
-  END IF;
-END $$;
+-- 9.3 邀請名單。這是「零公開註冊」的把關依據：Google 登入回來的 email
+-- 必須在這張表裡找得到有效且未使用的邀請，否則一律拒絕。
+--
+-- token 只存雜湊不存原文：邀請連結寄出後，只有收信人手上有原文。
+-- 就算資料庫外洩，攻擊者也無法反推出可用的邀請連結。
+CREATE TABLE IF NOT EXISTS public.admin_invitations (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    email TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'staff' CHECK (role IN ('admin', 'staff', 'viewer')),
+    token_hash TEXT NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL,
+    invited_by UUID,
+    accepted_at TIMESTAMPTZ,
+    accepted_user_id UUID,
+    revoked_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_admin_invitations_token ON public.admin_invitations(token_hash);
+CREATE INDEX IF NOT EXISTS idx_admin_invitations_email ON public.admin_invitations(lower(email));
 
--- 9.3 新使用者註冊（含 Google 登入第一次進來）自動建立 profile。
--- 系統還沒有任何管理員時，第一個登入的人自動成為已核准的管理員（bootstrap，
--- 否則全新專案會變成「所有人都待審核、但沒有人有權限審核」的死結）；
--- 之後註冊的人一律 pending，要由管理員在「帳號管理」核准。
+-- 9.4 2FA 驗證失敗計數（規格書的速率限制：連續錯 5 次鎖 15 分鐘）。
+--
+-- 規格書寫用 Redis，本專案沒有 Redis，改用資料表達成同樣效果。
+-- 誠實說明其侷限：實際的 TOTP 驗證是前端直接打 Supabase 的 MFA API，我們的後端不在中間，
+-- 所以這張表擋的是「透過本系統介面」的連續嘗試。真正對抗暴力破解的最後防線是
+-- Supabase 自己對 MFA 驗證的內建速率限制，那一層無法從前端繞過。
+CREATE TABLE IF NOT EXISTS public.mfa_login_attempts (
+    user_id UUID PRIMARY KEY,
+    failed_count INTEGER NOT NULL DEFAULT 0,
+    locked_until TIMESTAMPTZ,
+    last_failed_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- 9.5 新使用者建立時自動補 profile。
+-- 純邀請制之下，正常情況都是先有邀請、再有帳號，所以預設狀態是 invited、權限最小。
+-- 真正的角色與放行是在「接受邀請」的後端流程裡依邀請內容寫入的。
+--
+-- 例外：全新專案一個帳號都還沒有時，第一個進來的人自動成為管理員（bootstrap），
+-- 否則會變成「沒有人有權限發出第一張邀請」的死結。注意仍然是 pending_mfa 而不是 active，
+-- 也就是第一個管理員一樣要綁 2FA 才能使用系統。
 CREATE OR REPLACE FUNCTION public.handle_new_user()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -1188,20 +1230,18 @@ SECURITY DEFINER
 SET search_path = public
 AS $handle_new_user$
 DECLARE
-  has_admin BOOLEAN;
+  has_any_account BOOLEAN;
 BEGIN
-  SELECT EXISTS (
-    SELECT 1 FROM public.admin_profiles WHERE role = 'admin' AND status = 'approved'
-  ) INTO has_admin;
+  SELECT EXISTS (SELECT 1 FROM public.admin_profiles) INTO has_any_account;
 
   INSERT INTO public.admin_profiles (id, email, display_name, role, status, approved_at)
   VALUES (
     NEW.id,
     NEW.email,
     COALESCE(NEW.raw_user_meta_data->>'full_name', NEW.raw_user_meta_data->>'name', NEW.email),
-    CASE WHEN has_admin THEN 'staff' ELSE 'admin' END,
-    CASE WHEN has_admin THEN 'pending' ELSE 'approved' END,
-    CASE WHEN has_admin THEN NULL ELSE now() END
+    CASE WHEN has_any_account THEN 'staff' ELSE 'admin' END,
+    CASE WHEN has_any_account THEN 'invited' ELSE 'pending_mfa' END,
+    CASE WHEN has_any_account THEN NULL ELSE now() END
   )
   ON CONFLICT (id) DO NOTHING;
 
@@ -1214,10 +1254,23 @@ CREATE TRIGGER on_auth_user_created
   AFTER INSERT ON auth.users
   FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
 
--- 9.4 RLS 判斷用的輔助函式。
+-- 9.6 RLS 判斷用的輔助函式。
 -- 一定要 SECURITY DEFINER：這些函式自己要讀 admin_profiles，而 admin_profiles 本身也有 RLS，
 -- 用一般權限執行會變成「查權限要先有權限」的無限遞迴。SECURITY DEFINER 以函式擁有者身分執行、
 -- 繞過 RLS，才能當作判斷依據。SET search_path 是必要的防護，避免被搜尋路徑劫持。
+
+-- 這個 session 有沒有通過第二因素驗證。Supabase 在 JWT 裡用 aal（Authenticator Assurance Level）
+-- 表示：aal1 = 只通過密碼/OAuth，aal2 = 另外通過了 TOTP。
+CREATE OR REPLACE FUNCTION public.is_mfa_verified()
+RETURNS BOOLEAN
+LANGUAGE sql
+STABLE
+AS $is_mfa_verified$
+  SELECT COALESCE(auth.jwt() ->> 'aal', '') = 'aal2';
+$is_mfa_verified$;
+
+-- 取得目前使用者的角色。三個條件缺一不可：帳號是 active、而且這次登入已經過 2FA。
+-- 沒過 2FA 就回 NULL，下面所有權限判斷因此全部為 false。
 CREATE OR REPLACE FUNCTION public.current_admin_role()
 RETURNS TEXT
 LANGUAGE sql
@@ -1225,7 +1278,11 @@ STABLE
 SECURITY DEFINER
 SET search_path = public
 AS $current_admin_role$
-  SELECT role FROM public.admin_profiles WHERE id = auth.uid() AND status = 'approved';
+  SELECT p.role
+  FROM public.admin_profiles p
+  WHERE p.id = auth.uid()
+    AND p.status = 'active'
+    AND public.is_mfa_verified();
 $current_admin_role$;
 
 CREATE OR REPLACE FUNCTION public.is_admin()
@@ -1249,7 +1306,7 @@ AS $can_operate$
   SELECT COALESCE(public.current_admin_role() IN ('admin', 'staff'), false);
 $can_operate$;
 
--- 可以讀取：任何已核准的帳號（含唯讀）
+-- 可以讀取：任何已啟用且已通過 2FA 的帳號（含唯讀）
 CREATE OR REPLACE FUNCTION public.can_view()
 RETURNS BOOLEAN
 LANGUAGE sql
@@ -1260,20 +1317,22 @@ AS $can_view$
   SELECT public.current_admin_role() IS NOT NULL;
 $can_view$;
 
--- 9.5 依分層套用 RLS 政策。
--- 用迴圈而不是逐表手寫 CREATE POLICY：37 張表逐條寫容易漏掉一張（漏掉的那張就是資料外洩的破口），
+-- 9.7 依分層套用 RLS 政策。
+-- 用迴圈而不是逐表手寫 CREATE POLICY：近 40 張表逐條寫容易漏掉一張（漏掉的那張就是資料外洩的破口），
 -- 也方便之後新增表格時只要加進下面的分類清單即可。
 -- 每次執行都先把該表所有既有政策清掉再重建，所以可以重複執行，
--- 也會確實移除舊版「只要登入就全部可讀寫」的政策——PostgreSQL 的 permissive 政策是 OR 關係，
+-- 也會確實移除舊版政策——PostgreSQL 的 permissive 政策是 OR 關係，
 -- 舊政策只要留著一條，新的限制就完全失效。
 DO $rls$
 DECLARE
   tbl text;
   pol record;
   -- 機密／系統控制：只有管理員能碰。settings 與 line_channels 存著 API 金鑰與 LINE 權杖；
-  -- scheduled_tasks 能觸發系統動作；operation_logs 是稽核軌跡；processed_events 是內部去重表。
+  -- scheduled_tasks 能觸發系統動作；operation_logs 是稽核軌跡；processed_events 是內部去重表；
+  -- admin_invitations 是邀請名單（能改就等於能自己邀自己進來）。
   admin_only text[] := ARRAY[
-    'settings', 'line_channels', 'scheduled_tasks', 'operation_logs', 'processed_events'
+    'settings', 'line_channels', 'scheduled_tasks', 'operation_logs', 'processed_events',
+    'admin_invitations'
   ];
   -- 設定類：管理員可改，客服/唯讀只能看（客服需要看得到房型與價格才能回答客人）
   config_tables text[] := ARRAY[
@@ -1292,7 +1351,8 @@ DECLARE
   ];
   every_table text[];
 BEGIN
-  every_table := admin_only || config_tables || operational_tables || ARRAY['admin_profiles'];
+  every_table := admin_only || config_tables || operational_tables
+                 || ARRAY['admin_profiles', 'mfa_login_attempts'];
 
   FOREACH tbl IN ARRAY every_table LOOP
     IF to_regclass('public.' || quote_ident(tbl)) IS NULL THEN
@@ -1330,12 +1390,18 @@ BEGIN
 END
 $rls$;
 
--- admin_profiles 要單獨處理：每個人都必須讀得到「自己那一列」，前端才知道自己是什麼角色、
--- 有沒有被核准（待審核的人也要讀得到，否則畫面無從判斷該顯示什麼）。其餘一律只有管理員能碰。
+-- admin_profiles 要單獨處理，而且「讀自己那一列」刻意不要求 aal2：
+-- 使用者剛通過 Google 驗證、還沒綁 2FA 時是 aal1，前端必須讀得到自己的 status
+-- 才知道該把他導去綁定頁還是驗證頁。如果這條也要求 aal2，會變成
+-- 「要先過 2FA 才能知道自己需不需要過 2FA」的死結。
+-- 這一列只包含自己的角色與狀態，不含任何業務資料，讀得到不構成風險。
 DROP POLICY IF EXISTS "read_own_profile" ON public.admin_profiles;
 CREATE POLICY "read_own_profile" ON public.admin_profiles FOR SELECT USING (id = auth.uid());
 DROP POLICY IF EXISTS "admin_manage_profiles" ON public.admin_profiles;
 CREATE POLICY "admin_manage_profiles" ON public.admin_profiles FOR ALL USING (public.is_admin()) WITH CHECK (public.is_admin());
+
+-- mfa_login_attempts 只由後端以 service role 讀寫，前端完全不需要碰。
+-- 不建立任何政策＝除了 service role 之外誰都存取不到（RLS 預設拒絕）。
 
 -- 10. 初始資料
 INSERT INTO public.settings (id) SELECT gen_random_uuid() WHERE NOT EXISTS (SELECT 1 FROM public.settings);

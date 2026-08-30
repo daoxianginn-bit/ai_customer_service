@@ -16,6 +16,29 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 
 export type AdminRole = 'admin' | 'staff' | 'viewer';
 
+/**
+ * 從 Supabase 的 access token 取出 aal（Authenticator Assurance Level）宣告。
+ * aal1＝只通過密碼/OAuth，aal2＝另外通過了 TOTP。
+ * 呼叫端必須先用 getUser() 驗過簽章再用這個函式，否則等於相信未驗證的輸入。
+ */
+export function getAalFromToken(token: string): string | null {
+  try {
+    const payload = token.split('.')[1];
+    if (!payload) return null;
+    // 用 atob 而不是 Buffer：這個檔案位於 src/ 之下會被前端的 tsconfig 一起檢查，
+    // 那裡沒有 Node 的型別。atob 在 Node 16+ 與瀏覽器都是全域可用的。
+    const binary = atob(payload.replace(/-/g, '+').replace(/_/g, '/'));
+    // JWT 內容可能含非 ASCII 字元（例如中文姓名），atob 出來是 binary string，
+    // 要先轉回 UTF-8 才能安全 JSON.parse，否則有中文的權杖會解析失敗而被誤判成無效。
+    const json = decodeURIComponent(
+      binary.split('').map((c) => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2)).join('')
+    );
+    return JSON.parse(json).aal ?? null;
+  } catch {
+    return null;
+  }
+}
+
 interface GuardOk {
   user: { id: string; email?: string | null };
   role: AdminRole;
@@ -37,6 +60,15 @@ export async function requireRole(
   const { data: { user }, error: authError } = await supabaseAdmin.auth.getUser(token);
   if (authError || !user) return { error: { statusCode: 401, body: '登入已過期，請重新登入' } };
 
+  // 必須是已通過第二因素驗證的 session（aal2）。
+  // getUser() 只驗證權杖有效、不會回報 aal，所以直接讀 JWT 裡的 aal 宣告——
+  // 上一行已經驗過簽章，這裡解出來的內容可以信任。
+  // 少了這道檢查，只過了 Google 但還沒輸入 TOTP 的 session（aal1）就能呼叫這些
+  // 繞過 RLS 的高權限函式，等於留了一條跳過 2FA 的後門。
+  if (getAalFromToken(token) !== 'aal2') {
+    return { error: { statusCode: 403, body: '需要完成雙因素驗證才能執行這個操作' } };
+  }
+
   const { data: profile, error: profileError } = await supabaseAdmin
     .from('admin_profiles')
     .select('role, status')
@@ -44,9 +76,12 @@ export async function requireRole(
     .maybeSingle();
 
   if (profileError) return { error: { statusCode: 500, body: `讀取帳號權限失敗：${profileError.message}` } };
-  // 沒有 profile 代表這個帳號還沒被權限系統納管，一律當作未核准處理，不給任何權限。
+  // 沒有 profile 代表這個帳號還沒被權限系統納管，一律當作未開通處理，不給任何權限。
   if (!profile) return { error: { statusCode: 403, body: '您的帳號尚未開通，請聯繫管理員' } };
-  if (profile.status !== 'approved') return { error: { statusCode: 403, body: '您的帳號尚未開通或已被停用，請聯繫管理員' } };
+  if (profile.status === 'pending_mfa') {
+    return { error: { statusCode: 403, body: '請先完成雙因素驗證綁定' } };
+  }
+  if (profile.status !== 'active') return { error: { statusCode: 403, body: '您的帳號尚未開通或已被停權，請聯繫管理員' } };
   if (!allowed.includes(profile.role as AdminRole)) {
     return { error: { statusCode: 403, body: '權限不足，這個操作僅限管理員' } };
   }

@@ -37,9 +37,9 @@ const rawHandler: Handler = async (event) => {
       last_sign_in_at: u.last_sign_in_at,
       invited: !u.last_sign_in_at,
       // 還沒有 profile 的帳號（例如權限系統上線前就存在、又還沒跑過 schema 的情況）
-      // 一律視為待審核，寧可擋住也不要預設放行。
+      // 一律視為尚未開通，寧可擋住也不要預設放行。
       role: p?.role || 'staff',
-      status: p?.status || 'pending',
+      status: p?.status || 'invited',
       approved_at: p?.approved_at || null,
     };
   });

@@ -4,10 +4,13 @@ import {
   MenuItem, Stack, TextField, Tooltip, Typography, IconButton,
 } from '@mui/material';
 import { useSnackbar } from 'notistack';
-import { UserCog, UserPlus, Trash2, ShieldCheck, Ban, CheckCircle2 } from 'lucide-react';
+import { UserCog, UserPlus, Trash2, Ban, CheckCircle2, ShieldOff, ShieldCheck } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../lib/AuthContext';
-import { ROLE_OPTIONS, STATUS_LABELS, roleLabel, type AdminRole, type AccountStatus } from '../lib/permissions';
+import {
+  ROLE_OPTIONS, STATUS_LABELS, STATUS_DESCRIPTIONS, roleLabel,
+  type AdminRole, type AccountStatus,
+} from '../lib/permissions';
 import {
   PageHeaderMui, FilterPanel, DataTableMui, ResultState, useConfirm, type Column,
 } from '../components/ui-mui';
@@ -26,25 +29,26 @@ async function callFn(path: string, options: RequestInit = {}) {
   const { data: { session } } = await supabase.auth.getSession();
   const res = await fetch(`/.netlify/functions/${path}`, {
     ...options,
-    headers: { ...(options.headers || {}), Authorization: `Bearer ${session?.access_token}` },
+    headers: { 'Content-Type': 'application/json', ...(options.headers || {}), Authorization: `Bearer ${session?.access_token}` },
   });
   const text = await res.text();
   let body: any = {};
   try { body = text ? JSON.parse(text) : {}; } catch { body = { message: text }; }
-  if (!res.ok) throw new Error(body.message || text || '操作失敗');
+  if (!res.ok) throw new Error(body.error || body.message || text || '操作失敗');
   return body;
 }
 
-const STATUS_COLOR: Record<AccountStatus, 'warning' | 'success' | 'default'> = {
-  pending: 'warning',
-  approved: 'success',
-  disabled: 'default',
+const STATUS_COLOR: Record<AccountStatus, 'default' | 'info' | 'warning' | 'success'> = {
+  invited: 'info',
+  pending_mfa: 'warning',
+  active: 'success',
+  suspended: 'default',
 };
 
 export default function AdminAccounts() {
   const { enqueueSnackbar } = useSnackbar();
   const confirm = useConfirm();
-  const { profile: me, refreshProfile } = useAuth();
+  const { profile: me, refresh } = useAuth();
 
   const [rows, setRows] = useState<AccountRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -62,6 +66,7 @@ export default function AdminAccounts() {
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteRole, setInviteRole] = useState<AdminRole>('staff');
   const [inviting, setInviting] = useState(false);
+  const [inviteResult, setInviteResult] = useState<{ email: string; mailSent: boolean; mailError: string | null } | null>(null);
 
   const fetchAll = useCallback(async () => {
     setLoading(true);
@@ -82,27 +87,26 @@ export default function AdminAccounts() {
 
   useEffect(() => { fetchAll(); }, [fetchAll]);
 
-  const approvedAdminCount = useMemo(
-    () => rows.filter((r) => r.role === 'admin' && r.status === 'approved').length,
+  const activeAdminCount = useMemo(
+    () => rows.filter((r) => r.role === 'admin' && r.status === 'active').length,
     [rows]
   );
-  const pendingCount = useMemo(() => rows.filter((r) => r.status === 'pending').length, [rows]);
 
   const visibleRows = useMemo(() => rows.filter((r) => {
     if (applied.status && r.status !== applied.status) return false;
     if (applied.role && r.role !== applied.role) return false;
     return true;
   }).sort((a, b) => {
-    // 待審核的排最前面：這一頁的主要工作就是處理它們，不該讓管理員自己去清單裡找
-    if (a.status === 'pending' && b.status !== 'pending') return -1;
-    if (b.status === 'pending' && a.status !== 'pending') return 1;
-    return (a.email || '').localeCompare(b.email || '');
+    // 尚未完成上線的帳號排前面：這一頁的主要工作就是盯著它們有沒有卡住
+    const rank = (s: AccountStatus) => (s === 'invited' ? 0 : s === 'pending_mfa' ? 1 : s === 'active' ? 2 : 3);
+    const diff = rank(a.status) - rank(b.status);
+    return diff !== 0 ? diff : (a.email || '').localeCompare(b.email || '');
   }), [rows, applied]);
 
-  // 這個帳號是不是「系統最後一個管理員」——是的話不能降級也不能停用/刪除，
-  // 否則會變成沒有人能核准新帳號、也沒有人能改系統設定的死結。
+  // 這個帳號是不是「系統最後一個可用的管理員」——是的話不能降級也不能停權/刪除，
+  // 否則會變成沒有人能發邀請、也沒有人能改系統設定的死結。
   const isLastAdmin = (row: AccountRow) =>
-    row.role === 'admin' && row.status === 'approved' && approvedAdminCount <= 1;
+    row.role === 'admin' && row.status === 'active' && activeAdminCount <= 1;
 
   const patchProfile = async (row: AccountRow, patch: Partial<AccountRow>, successMsg: string) => {
     const { error } = await supabase
@@ -114,17 +118,8 @@ export default function AdminAccounts() {
       return;
     }
     enqueueSnackbar(successMsg, { variant: 'success' });
-    // 改到自己時要一併更新目前 session 的角色，否則畫面上的選單還是舊權限
-    if (row.id === me?.id) await refreshProfile();
+    if (row.id === me?.id) await refresh();
     fetchAll();
-  };
-
-  const handleApprove = async (row: AccountRow) => {
-    await patchProfile(
-      row,
-      { status: 'approved', approved_at: new Date().toISOString(), approved_by: me?.id } as any,
-      `已核准 ${row.email}，角色為「${roleLabel(row.role)}」`
-    );
   };
 
   const handleRoleChange = async (row: AccountRow, nextRole: AdminRole) => {
@@ -140,25 +135,44 @@ export default function AdminAccounts() {
     await patchProfile(row, { role: nextRole }, `${row.email} 的角色已改為「${roleLabel(nextRole)}」`);
   };
 
-  const handleToggleDisabled = async (row: AccountRow) => {
-    const disabling = row.status !== 'disabled';
-    if (disabling) {
-      if (row.id === me?.id) { enqueueSnackbar('不能停用自己的帳號', { variant: 'warning' }); return; }
-      if (row.id === primaryAdminId) { enqueueSnackbar('主帳號不能被停用', { variant: 'warning' }); return; }
-      if (isLastAdmin(row)) { enqueueSnackbar('這是系統唯一的管理員，不能停用', { variant: 'warning' }); return; }
+  const handleToggleSuspend = async (row: AccountRow) => {
+    const suspending = row.status !== 'suspended';
+    if (suspending) {
+      if (row.id === me?.id) { enqueueSnackbar('不能停權自己的帳號', { variant: 'warning' }); return; }
+      if (row.id === primaryAdminId) { enqueueSnackbar('主帳號不能被停權', { variant: 'warning' }); return; }
+      if (isLastAdmin(row)) { enqueueSnackbar('這是系統唯一的管理員，不能停權', { variant: 'warning' }); return; }
       const ok = await confirm({
-        title: `確定要停用 ${row.email} 嗎？`,
-        message: '停用後對方仍可用 Google 登入，但會被系統擋下、進不到後台。之後可以隨時重新啟用。',
-        confirmLabel: '停用',
+        title: `確定要停權 ${row.email} 嗎？`,
+        message: '停權後對方仍可用 Google 登入，但會立刻被系統擋下、進不到後台。之後可以隨時恢復。',
+        confirmLabel: '停權',
         danger: true,
       });
       if (!ok) return;
     }
+    // 恢復時退回 pending_mfa 而不是 active：讓對方重新確認一次 2FA 才放行。
+    // 若他原本就綁好驗證器，登入時會直接走驗證頁，不會被要求重綁。
     await patchProfile(
       row,
-      { status: disabling ? 'disabled' : 'approved' },
-      disabling ? `已停用 ${row.email}` : `已重新啟用 ${row.email}`
+      { status: suspending ? 'suspended' : 'pending_mfa' },
+      suspending ? `已停權 ${row.email}` : `已恢復 ${row.email}，對方下次登入需通過雙因素驗證`
     );
+  };
+
+  const handleReset2FA = async (row: AccountRow) => {
+    const ok = await confirm({
+      title: `重置 ${row.email} 的雙因素驗證？`,
+      message: '對方目前綁定的驗證器會被解除，下次登入時必須重新掃描 QR Code 綁定。適用於對方遺失手機的情況。',
+      confirmLabel: '重置 2FA',
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await callFn('mfa', { method: 'POST', body: JSON.stringify({ action: 'reset', userId: row.id }) });
+      enqueueSnackbar(`已重置 ${row.email} 的雙因素驗證`, { variant: 'success' });
+      fetchAll();
+    } catch (err: any) {
+      enqueueSnackbar(`重置失敗：${err.message}`, { variant: 'error' });
+    }
   };
 
   const handleDelete = async (row: AccountRow) => {
@@ -167,7 +181,7 @@ export default function AdminAccounts() {
     if (isLastAdmin(row)) { enqueueSnackbar('這是系統唯一的管理員，不能移除', { variant: 'warning' }); return; }
     const ok = await confirm({
       title: `確定要移除 ${row.email} 嗎？`,
-      message: '帳號會被永久刪除，無法復原。如果只是暫時不讓對方使用，建議改用「停用」。',
+      message: '帳號會被永久刪除，無法復原。如果只是暫時不讓對方使用，建議改用「停權」。',
       confirmLabel: '永久移除',
       danger: true,
     });
@@ -196,14 +210,14 @@ export default function AdminAccounts() {
   const handleInvite = async () => {
     if (!inviteEmail.trim()) { enqueueSnackbar('請輸入 Email', { variant: 'warning' }); return; }
     setInviting(true);
+    setInviteResult(null);
     try {
-      await callFn('invite-admin', {
+      const result = await callFn('invite-admin', {
         method: 'POST',
         body: JSON.stringify({ email: inviteEmail.trim(), role: inviteRole }),
       });
-      enqueueSnackbar('邀請信已寄出，對方設定密碼後即可直接登入', { variant: 'success' });
+      setInviteResult({ email: result.email, mailSent: result.mailSent, mailError: result.mailError });
       setInviteEmail('');
-      setInviteOpen(false);
       fetchAll();
     } catch (err: any) {
       enqueueSnackbar(`邀請失敗：${err.message}`, { variant: 'error' });
@@ -234,22 +248,17 @@ export default function AdminAccounts() {
       header: '角色',
       width: 150,
       render: (r) => {
-        const locked = r.id === me?.id || (isLastAdmin(r));
+        const locked = r.id === me?.id || isLastAdmin(r);
         return (
           <Tooltip title={locked ? (r.id === me?.id ? '不能變更自己的角色' : '系統唯一的管理員，不能降級') : ''}>
             <span>
               <TextField
-                select
-                size="small"
-                value={r.role}
-                disabled={locked}
+                select size="small" value={r.role} disabled={locked}
                 onChange={(e) => handleRoleChange(r, e.target.value as AdminRole)}
                 onClick={(e) => e.stopPropagation()}
                 sx={{ width: 130 }}
               >
-                {ROLE_OPTIONS.map((o) => (
-                  <MenuItem key={o.value} value={o.value}>{o.label}</MenuItem>
-                ))}
+                {ROLE_OPTIONS.map((o) => <MenuItem key={o.value} value={o.value}>{o.label}</MenuItem>)}
               </TextField>
             </span>
           </Tooltip>
@@ -259,8 +268,12 @@ export default function AdminAccounts() {
     {
       key: 'status',
       header: '狀態',
-      width: 100,
-      render: (r) => <Chip label={STATUS_LABELS[r.status]} size="small" color={STATUS_COLOR[r.status]} />,
+      width: 120,
+      render: (r) => (
+        <Tooltip title={STATUS_DESCRIPTIONS[r.status]}>
+          <Chip label={STATUS_LABELS[r.status]} size="small" color={STATUS_COLOR[r.status]} />
+        </Tooltip>
+      ),
     },
     {
       key: 'last_sign_in_at',
@@ -283,22 +296,25 @@ export default function AdminAccounts() {
     );
   }
 
+  const stuckCount = rows.filter((r) => r.status === 'invited' || r.status === 'pending_mfa').length;
+
   return (
     <Stack spacing={2}>
       <PageHeaderMui
         icon={<UserCog size={22} />}
         title="帳號管理"
-        description="核准新申請的帳號、指派角色，或停用不再需要的帳號。同事第一次用 Google 登入後會出現在這裡等待核准。"
+        description="本系統不開放自行註冊。要讓同事使用後台，請在這裡用他的 Google 信箱建立邀請。"
         action={
-          <Button variant="outlined" startIcon={<UserPlus size={16} />} onClick={() => setInviteOpen(true)}>
-            用 Email 邀請
+          <Button variant="contained" startIcon={<UserPlus size={16} />} onClick={() => { setInviteOpen(true); setInviteResult(null); }}>
+            邀請新帳號
           </Button>
         }
       />
 
-      {pendingCount > 0 && (
-        <Alert severity="warning" icon={<ShieldCheck size={18} />}>
-          有 <strong>{pendingCount}</strong> 個帳號正在等待核准。核准前對方無法登入後台。
+      {stuckCount > 0 && (
+        <Alert severity="info">
+          有 <strong>{stuckCount}</strong> 個帳號尚未完成上線（還沒用 Google 登入，或還沒綁定雙因素驗證）。
+          這些帳號目前無法存取任何資料。
         </Alert>
       )}
 
@@ -307,7 +323,7 @@ export default function AdminAccounts() {
           severity="info"
           action={<Button size="small" onClick={claimPrimary} disabled={claiming}>{claiming ? '設定中...' : '將我設為主帳號'}</Button>}
         >
-          目前還沒有設定「主帳號」。主帳號不能被其他管理員停用或移除，建議由老闆本人設定。
+          目前還沒有設定「主帳號」。主帳號不能被其他管理員停權或移除，建議由老闆本人設定。
         </Alert>
       )}
 
@@ -347,33 +363,29 @@ export default function AdminAccounts() {
         emptyMessage={rows.length === 0 ? '尚無任何帳號' : '沒有符合條件的帳號'}
         rowActions={(r) => (
           <Stack direction="row" spacing={0.5}>
-            {r.status === 'pending' && (
-              <Tooltip title="核准這個帳號">
-                <IconButton size="small" color="success" onClick={() => handleApprove(r)}>
-                  <CheckCircle2 size={16} />
+            {r.status === 'active' && (
+              <Tooltip title="重置雙因素驗證（對方遺失手機時使用）">
+                <IconButton size="small" color="warning" onClick={() => handleReset2FA(r)}>
+                  <ShieldOff size={16} />
                 </IconButton>
               </Tooltip>
             )}
-            {r.status !== 'pending' && (
-              <Tooltip title={r.status === 'disabled' ? '重新啟用' : '停用（保留帳號，但不能登入）'}>
-                <span>
-                  <IconButton
-                    size="small"
-                    color={r.status === 'disabled' ? 'success' : 'warning'}
-                    onClick={() => handleToggleDisabled(r)}
-                    disabled={r.status !== 'disabled' && (r.id === me?.id || r.id === primaryAdminId || isLastAdmin(r))}
-                  >
-                    {r.status === 'disabled' ? <CheckCircle2 size={16} /> : <Ban size={16} />}
-                  </IconButton>
-                </span>
-              </Tooltip>
-            )}
-            <Tooltip title="永久移除帳號">
+            <Tooltip title={r.status === 'suspended' ? '恢復帳號' : '停權（保留帳號，但不能登入）'}>
               <span>
                 <IconButton
                   size="small"
-                  color="error"
-                  onClick={() => handleDelete(r)}
+                  color={r.status === 'suspended' ? 'success' : 'warning'}
+                  onClick={() => handleToggleSuspend(r)}
+                  disabled={r.status !== 'suspended' && (r.id === me?.id || r.id === primaryAdminId || isLastAdmin(r))}
+                >
+                  {r.status === 'suspended' ? <CheckCircle2 size={16} /> : <Ban size={16} />}
+                </IconButton>
+              </span>
+            </Tooltip>
+            <Tooltip title="永久移除帳號">
+              <span>
+                <IconButton
+                  size="small" color="error" onClick={() => handleDelete(r)}
                   disabled={r.id === me?.id || r.id === primaryAdminId || isLastAdmin(r)}
                 >
                   <Trash2 size={16} />
@@ -385,32 +397,49 @@ export default function AdminAccounts() {
       />
 
       <Dialog open={inviteOpen} onClose={() => setInviteOpen(false)} maxWidth="xs" fullWidth>
-        <DialogTitle>用 Email 邀請帳號</DialogTitle>
+        <DialogTitle>邀請新帳號</DialogTitle>
         <DialogContent>
           <Stack spacing={2} sx={{ pt: 1 }}>
-            <Alert severity="info">
-              一般情況請直接請同事用 Google 登入，再到這一頁核准即可。
-              這個邀請功能是給「沒有 Google 帳號」或需要保留一組密碼備援帳號時使用，
-              對方會收到設定密碼的信，設定完直接就是已核准狀態。
-            </Alert>
-            <TextField
-              label="Email"
-              type="email"
-              value={inviteEmail}
-              onChange={(e) => setInviteEmail(e.target.value)}
-              placeholder="colleague@example.com"
-              fullWidth
-            />
-            <TextField select label="角色" value={inviteRole} onChange={(e) => setInviteRole(e.target.value as AdminRole)} fullWidth>
-              {ROLE_OPTIONS.map((o) => <MenuItem key={o.value} value={o.value}>{o.label}</MenuItem>)}
-            </TextField>
+            {inviteResult ? (
+              <>
+                <Alert severity={inviteResult.mailSent ? 'success' : 'warning'} icon={<ShieldCheck size={18} />}>
+                  已為 <strong>{inviteResult.email}</strong> 建立邀請。
+                  {inviteResult.mailSent
+                    ? '邀請信已寄出，對方點開信件後用 Google 登入即可。'
+                    : '但邀請信沒有寄出（這個信箱先前已建立過帳號）。請直接請對方到登入頁用 Google 登入，一樣會被放行。'}
+                </Alert>
+                {!inviteResult.mailSent && inviteResult.mailError && (
+                  <Typography variant="caption" color="text.secondary">技術原因：{inviteResult.mailError}</Typography>
+                )}
+                <Typography variant="caption" color="text.secondary">
+                  對方完成 Google 登入後，還需要綁定 Google Authenticator 才能開始使用系統。
+                </Typography>
+              </>
+            ) : (
+              <>
+                <Alert severity="info" sx={{ fontSize: 13 }}>
+                  請填入對方的 <strong>Google 信箱</strong>。登入時系統會核對 Google 帳號的信箱與這裡填的完全一致，
+                  不一致一律拒絕。邀請效期 24 小時。
+                </Alert>
+                <TextField
+                  label="Google 信箱" type="email" value={inviteEmail}
+                  onChange={(e) => setInviteEmail(e.target.value)}
+                  placeholder="colleague@gmail.com" fullWidth autoFocus
+                />
+                <TextField select label="角色" value={inviteRole} onChange={(e) => setInviteRole(e.target.value as AdminRole)} fullWidth>
+                  {ROLE_OPTIONS.map((o) => <MenuItem key={o.value} value={o.value}>{o.label}</MenuItem>)}
+                </TextField>
+              </>
+            )}
           </Stack>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setInviteOpen(false)}>取消</Button>
-          <Button variant="contained" onClick={handleInvite} disabled={inviting}>
-            {inviting ? '寄送中...' : '寄送邀請'}
-          </Button>
+          <Button onClick={() => setInviteOpen(false)}>{inviteResult ? '關閉' : '取消'}</Button>
+          {!inviteResult && (
+            <Button variant="contained" onClick={handleInvite} disabled={inviting}>
+              {inviting ? '建立中...' : '建立邀請並寄信'}
+            </Button>
+          )}
         </DialogActions>
       </Dialog>
     </Stack>
