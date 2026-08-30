@@ -965,6 +965,9 @@ async function syncOneOtaChannel(channel: any): Promise<{ summary: string; confl
           external_raw_payload: ev.raw,
           updated_at: nowIso,
         }).eq('id', existing.id);
+        // 這個計數器原本宣告後就沒再動過，所以同步摘要永遠回報「更新 0 筆」，
+        // 即使真的更新了資料。下面的衝突旗標重寫不算——那每次都會跑，不是資料有變。
+        updated++;
       }
       // 日期沒變也要重驗衝突：擋住它的那筆本地訂單可能是這次同步之後才被取消或新增的。
       const conflictWith = await checkOtaConflict(channel, ev, existing.id);
@@ -1397,7 +1400,7 @@ export async function runTaskNow(event: any, taskId: string) {
   return { statusCode: 200, body: JSON.stringify(result) };
 }
 
-const rawHandler: Handler = async (event) => {
+const rawHandler: Handler = async (_event) => {
   const { data: settings } = await supabase.from('settings').select('*').single();
   if (!settings) return { statusCode: 200, body: 'settings not found, skipped' };
 

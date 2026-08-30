@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, ReactNode } from 'react';
+import { useEffect, useState, ReactNode } from 'react';
 import { supabase } from '../lib/supabase';
 import { Clock, Plus, Pencil, Trash2, AlertTriangle, CheckCircle2, XCircle, PlayCircle } from 'lucide-react';
 import { PageHeader, Button, Modal, ConfirmDialog, Switch, EmptyState } from '../components/ui';

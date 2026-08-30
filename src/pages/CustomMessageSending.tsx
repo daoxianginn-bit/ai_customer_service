@@ -154,6 +154,8 @@ export default function CustomMessageSending() {
     fetchRoomTypeOptions();
     fetchChannels();
     runQuery();
+    // 查詢函式每次 render 都是新的參考，放進依賴會無限重查。這裡只要掛載時查一次，之後由「查詢」按鈕觸發。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // 頻道清單載入完成、或使用者切換發送帳號時：查那個帳號的額度；不是客戶用帳號的話還要

@@ -256,7 +256,7 @@ async function listOrders(settings: any, filters: OrderFilters): Promise<{ varia
   const linkedRooms = await roomLabelsByBooking(bookings.map((b: any) => b.id));
 
   const userIds = Array.from(new Set(bookings.map((b: any) => b.line_user_id).filter(Boolean)));
-  let customerByUser: Record<string, any> = {};
+  const customerByUser: Record<string, any> = {};
   if (userIds.length) {
     const { data: states } = await supabase.from('user_states').select('line_user_id, nickname, last_message_at, first_message_at, marketing_opt_out').in('line_user_id', userIds);
     for (const s of states || []) customerByUser[s.line_user_id] = s;

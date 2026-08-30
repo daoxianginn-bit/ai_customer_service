@@ -114,7 +114,7 @@ async function handleOtaChannelFeed(token: string) {
   if (channelError) return { statusCode: 500, body: 'Failed to fetch channel' };
   if (!channel) return { statusCode: 401, body: 'Unauthorized' };
 
-  let query = supabase
+  const query = supabase
     .from('bookings')
     .select('id, order_number, checkin_date, checkout_date, whole_house, status, booking_source')
     .in('status', FEED_STATUSES)
