@@ -9,6 +9,7 @@ import { parseIcsEvents } from '../../src/lib/icsParser';
 import { otaPlatformLabel } from '../../src/lib/otaChannels';
 import { classifyOtaEvent } from '../../src/lib/otaEventFilter';
 import { writeOperationLog, withErrorLogging, LOG_FEATURES, SYSTEM_ACTOR } from '../../src/lib/operationLog';
+import { requireRole } from '../../src/lib/requireRole';
 import { processWaitlist } from './line-webhook';
 
 // ========================================================================
@@ -1359,11 +1360,11 @@ function toScheduleConfig(task: any): ScheduleConfig {
 // Netlify 的排程函式，而排程函式不能用 HTTP 叫起來，POST 過來的請求根本進不到這裡。
 // 詳見 run-task-now.ts 的說明。
 export async function runTaskNow(event: any, taskId: string) {
-  const authHeader = event.headers?.['authorization'] || event.headers?.['Authorization'];
-  const token = authHeader?.replace(/^Bearer\s+/i, '');
-  if (!token) return { statusCode: 401, body: JSON.stringify({ error: '未登入' }) };
-  const { data: userData, error: userError } = await supabase.auth.getUser(token);
-  if (userError || !userData?.user) return { statusCode: 401, body: JSON.stringify({ error: '登入已過期，請重新整理頁面' }) };
+  // 限管理員：排程會實際取消訂單、發 LINE 訊息給客人，屬於高風險操作，
+  // 跟「排程管理」頁面本身的權限一致（見 src/lib/permissions.ts）。
+  // 只驗「有沒有登入」不夠——客服/唯讀角色也有有效的登入權杖。
+  const guard = await requireRole(supabase, { headers: event.headers || {} }, ['admin']);
+  if ('error' in guard) return { statusCode: guard.error.statusCode, body: JSON.stringify({ error: guard.error.body }) };
 
   const { data: task, error: taskError } = await supabase.from('scheduled_tasks').select('*').eq('id', taskId).maybeSingle();
   if (taskError) return { statusCode: 500, body: JSON.stringify({ error: taskError.message }) };

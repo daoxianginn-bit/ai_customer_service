@@ -1115,130 +1115,227 @@ CREATE INDEX IF NOT EXISTS idx_operation_logs_created ON public.operation_logs(c
 CREATE INDEX IF NOT EXISTS idx_operation_logs_feature ON public.operation_logs(feature);
 CREATE INDEX IF NOT EXISTS idx_operation_logs_actor ON public.operation_logs(actor_name);
 
--- 9. 啟用 RLS（僅限已登入使用者存取，用 DROP + CREATE 讓整份腳本可重複執行）
-ALTER TABLE public.settings ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.line_channels ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.notification_recipient_groups ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.line_groups ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.line_group_members ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.ota_channels ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.user_states ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.processed_events ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.knowledge_base_items ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.handover_logs ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.operation_logs ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.conversations ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.admin_profiles ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.room_types ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.room_pricing ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.room_extra_person_pricing ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.consumables ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.consumable_spaces ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.whole_house_packages ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.whole_house_package_pricing ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.whole_house_package_rooms ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.whole_house_extra_person_rules ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.special_prices ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.room_capacity_pricing ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.promotions ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.booking_date_ranges ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.custom_message_templates ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.message_variables ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.booking_flows ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.booking_flow_steps ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.bookings ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.booking_room_nights ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.linen_items ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.room_type_linen_defaults ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.booking_rooms ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.booking_linen_usage ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.scheduled_tasks ENABLE ROW LEVEL SECURITY;
+-- ========================================================================
+-- 9. 帳號權限與 RLS
+--
+-- 權限分三種角色，存在 admin_profiles.role：
+--   admin  管理員   ：全部資料可讀可寫（含系統設定裡的 API 金鑰、LINE 權杖）
+--   staff  客服人員 ：日常營運資料可讀可寫（訂單/客戶/對話/備品），設定類資料唯讀，
+--                     完全讀不到 settings / line_channels 等機密表
+--   viewer 唯讀     ：全部只能讀，不能寫
+--
+-- 這裡的限制是做在資料庫層（RLS），不是只做畫面隱藏。原因：前端用的 anon key 是公開的，
+-- 任何登入者都能自己開 devtools 直接呼叫 supabase.from('settings').select('*')。
+-- 只在選單隱藏頁面，機密欄位還是會被撈走，所以權限一定要落在這一層才算數。
+--
+-- admin_profiles.status 控管「有沒有被核准」：
+--   pending  已註冊、還沒被核准（登入會被前端擋下並登出）
+--   approved 已核准，依 role 取得對應權限
+--   disabled 已停用（等同 pending，但語意是「曾經核准過、後來收回」）
+-- 未核准的人 current_admin_role() 回傳 NULL，所有 RLS 判斷都會是 false，
+-- 就算繞過前端直接打 API 也讀不到任何一張表。
+-- ========================================================================
 
-DROP POLICY IF EXISTS "Allow Auth Access" ON public.settings;
-CREATE POLICY "Allow Auth Access" ON public.settings FOR ALL USING (auth.role() = 'authenticated');
-DROP POLICY IF EXISTS "Allow Auth Access States" ON public.user_states;
-CREATE POLICY "Allow Auth Access States" ON public.user_states FOR ALL USING (auth.role() = 'authenticated');
--- line_channels 存的是各官方帳號的 access token / secret，等同密碼。
--- webhook 端一律用 service role key 讀取（略過 RLS），這裡只開放已登入的管理員，
--- 不讓 anon key 讀得到憑證。
-DROP POLICY IF EXISTS "Allow Auth Access Line Channels" ON public.line_channels;
-CREATE POLICY "Allow Auth Access Line Channels" ON public.line_channels FOR ALL USING (auth.role() = 'authenticated');
-DROP POLICY IF EXISTS "Allow Auth Access Notification Groups" ON public.notification_recipient_groups;
-CREATE POLICY "Allow Auth Access Notification Groups" ON public.notification_recipient_groups FOR ALL USING (auth.role() = 'authenticated');
-DROP POLICY IF EXISTS "Allow Auth Access Line Groups" ON public.line_groups;
-CREATE POLICY "Allow Auth Access Line Groups" ON public.line_groups FOR ALL USING (auth.role() = 'authenticated');
-DROP POLICY IF EXISTS "Allow Auth Access Line Group Members" ON public.line_group_members;
-CREATE POLICY "Allow Auth Access Line Group Members" ON public.line_group_members FOR ALL USING (auth.role() = 'authenticated');
--- export_token 等同密碼（外部平台訂閱時無法帶 Authorization 標頭，只能靠網址裡的 token 驗證），
--- 一般前台不能讀到，只有已登入的管理員能在後台看到／管理。
-DROP POLICY IF EXISTS "Allow Auth Access OTA Channels" ON public.ota_channels;
-CREATE POLICY "Allow Auth Access OTA Channels" ON public.ota_channels FOR ALL USING (auth.role() = 'authenticated');
--- processed_events 只有 line-webhook.ts 用 service role key 寫入/查詢（會略過 RLS），
--- 前端從不存取這張表，這裡開 RLS 只是不讓 anon key 直接讀寫，不影響 webhook 運作。
-DROP POLICY IF EXISTS "Allow Auth Access Processed Events" ON public.processed_events;
-CREATE POLICY "Allow Auth Access Processed Events" ON public.processed_events FOR ALL USING (auth.role() = 'authenticated');
-DROP POLICY IF EXISTS "Allow Auth Access KB" ON public.knowledge_base_items;
-CREATE POLICY "Allow Auth Access KB" ON public.knowledge_base_items FOR ALL USING (auth.role() = 'authenticated');
-DROP POLICY IF EXISTS "Allow Auth Access Handover Logs" ON public.handover_logs;
-CREATE POLICY "Allow Auth Access Handover Logs" ON public.handover_logs FOR ALL USING (auth.role() = 'authenticated');
--- 操作紀錄是稽核用的軌跡：登入的管理員可以查、也需要能寫（前端各功能頁在存檔後自己寫一筆）。
--- Netlify functions 用 service role key 寫入系統端的異動，會略過 RLS。
-DROP POLICY IF EXISTS "Allow Auth Access Operation Logs" ON public.operation_logs;
-CREATE POLICY "Allow Auth Access Operation Logs" ON public.operation_logs FOR ALL USING (auth.role() = 'authenticated');
-DROP POLICY IF EXISTS "Allow Auth Access Conversations" ON public.conversations;
-CREATE POLICY "Allow Auth Access Conversations" ON public.conversations FOR ALL USING (auth.role() = 'authenticated');
-DROP POLICY IF EXISTS "Allow Auth Access Profiles" ON public.admin_profiles;
-CREATE POLICY "Allow Auth Access Profiles" ON public.admin_profiles FOR ALL USING (auth.role() = 'authenticated');
-DROP POLICY IF EXISTS "Allow Auth Access Room Types" ON public.room_types;
-CREATE POLICY "Allow Auth Access Room Types" ON public.room_types FOR ALL USING (auth.role() = 'authenticated');
-DROP POLICY IF EXISTS "Allow Auth Access Room Pricing" ON public.room_pricing;
-CREATE POLICY "Allow Auth Access Room Pricing" ON public.room_pricing FOR ALL USING (auth.role() = 'authenticated');
-DROP POLICY IF EXISTS "Allow Auth Access Room Extra Person Pricing" ON public.room_extra_person_pricing;
-CREATE POLICY "Allow Auth Access Room Extra Person Pricing" ON public.room_extra_person_pricing FOR ALL USING (auth.role() = 'authenticated');
-DROP POLICY IF EXISTS "Allow Auth Access Consumables" ON public.consumables;
-CREATE POLICY "Allow Auth Access Consumables" ON public.consumables FOR ALL USING (auth.role() = 'authenticated');
-DROP POLICY IF EXISTS "Allow Auth Access Consumable Spaces" ON public.consumable_spaces;
-CREATE POLICY "Allow Auth Access Consumable Spaces" ON public.consumable_spaces FOR ALL USING (auth.role() = 'authenticated');
-DROP POLICY IF EXISTS "Allow Auth Access WH Packages" ON public.whole_house_packages;
-CREATE POLICY "Allow Auth Access WH Packages" ON public.whole_house_packages FOR ALL USING (auth.role() = 'authenticated');
-DROP POLICY IF EXISTS "Allow Auth Access WH Package Pricing" ON public.whole_house_package_pricing;
-CREATE POLICY "Allow Auth Access WH Package Pricing" ON public.whole_house_package_pricing FOR ALL USING (auth.role() = 'authenticated');
-DROP POLICY IF EXISTS "Allow Auth Access WH Package Rooms" ON public.whole_house_package_rooms;
-CREATE POLICY "Allow Auth Access WH Package Rooms" ON public.whole_house_package_rooms FOR ALL USING (auth.role() = 'authenticated');
-DROP POLICY IF EXISTS "Allow Auth Access WH Extra Person Rules" ON public.whole_house_extra_person_rules;
-CREATE POLICY "Allow Auth Access WH Extra Person Rules" ON public.whole_house_extra_person_rules FOR ALL USING (auth.role() = 'authenticated');
-DROP POLICY IF EXISTS "Allow Auth Access Special Prices" ON public.special_prices;
-CREATE POLICY "Allow Auth Access Special Prices" ON public.special_prices FOR ALL USING (auth.role() = 'authenticated');
-DROP POLICY IF EXISTS "Allow Auth Access Room Capacity Pricing" ON public.room_capacity_pricing;
-CREATE POLICY "Allow Auth Access Room Capacity Pricing" ON public.room_capacity_pricing FOR ALL USING (auth.role() = 'authenticated');
-DROP POLICY IF EXISTS "Allow Auth Access Promotions" ON public.promotions;
-CREATE POLICY "Allow Auth Access Promotions" ON public.promotions FOR ALL USING (auth.role() = 'authenticated');
-DROP POLICY IF EXISTS "Allow Auth Access Booking Date Ranges" ON public.booking_date_ranges;
-CREATE POLICY "Allow Auth Access Booking Date Ranges" ON public.booking_date_ranges FOR ALL USING (auth.role() = 'authenticated');
-DROP POLICY IF EXISTS "Allow Auth Access Custom Message Templates" ON public.custom_message_templates;
-CREATE POLICY "Allow Auth Access Custom Message Templates" ON public.custom_message_templates FOR ALL USING (auth.role() = 'authenticated');
-DROP POLICY IF EXISTS "Allow Auth Access Message Variables" ON public.message_variables;
-CREATE POLICY "Allow Auth Access Message Variables" ON public.message_variables FOR ALL USING (auth.role() = 'authenticated');
-DROP POLICY IF EXISTS "Allow Auth Access Booking Flows" ON public.booking_flows;
-CREATE POLICY "Allow Auth Access Booking Flows" ON public.booking_flows FOR ALL USING (auth.role() = 'authenticated');
-DROP POLICY IF EXISTS "Allow Auth Access Booking Flow Steps" ON public.booking_flow_steps;
-CREATE POLICY "Allow Auth Access Booking Flow Steps" ON public.booking_flow_steps FOR ALL USING (auth.role() = 'authenticated');
-DROP POLICY IF EXISTS "Allow Auth Access Bookings" ON public.bookings;
-CREATE POLICY "Allow Auth Access Bookings" ON public.bookings FOR ALL USING (auth.role() = 'authenticated');
-DROP POLICY IF EXISTS "Allow Auth Access Booking Room Nights" ON public.booking_room_nights;
-CREATE POLICY "Allow Auth Access Booking Room Nights" ON public.booking_room_nights FOR ALL USING (auth.role() = 'authenticated');
-DROP POLICY IF EXISTS "Allow Auth Access Linen Items" ON public.linen_items;
-CREATE POLICY "Allow Auth Access Linen Items" ON public.linen_items FOR ALL USING (auth.role() = 'authenticated');
-DROP POLICY IF EXISTS "Allow Auth Access Room Type Linen Defaults" ON public.room_type_linen_defaults;
-CREATE POLICY "Allow Auth Access Room Type Linen Defaults" ON public.room_type_linen_defaults FOR ALL USING (auth.role() = 'authenticated');
-DROP POLICY IF EXISTS "Allow Auth Access Booking Rooms" ON public.booking_rooms;
-CREATE POLICY "Allow Auth Access Booking Rooms" ON public.booking_rooms FOR ALL USING (auth.role() = 'authenticated');
-DROP POLICY IF EXISTS "Allow Auth Access Booking Linen Usage" ON public.booking_linen_usage;
-CREATE POLICY "Allow Auth Access Booking Linen Usage" ON public.booking_linen_usage FOR ALL USING (auth.role() = 'authenticated');
--- scheduled-tasks-run.ts 用 service role key 讀寫（略過 RLS），這裡開 RLS 只是不讓 anon key 直接存取，
--- 前端排程管理頁的存取要靠已登入的管理員 session。
-DROP POLICY IF EXISTS "Allow Auth Access Scheduled Tasks" ON public.scheduled_tasks;
-CREATE POLICY "Allow Auth Access Scheduled Tasks" ON public.scheduled_tasks FOR ALL USING (auth.role() = 'authenticated');
+-- 9.1 admin_profiles 擴充成完整的帳號權限表
+-- role 的欄位預設值從建表時的 'admin' 改成 'staff'：萬一日後有程式沒指定 role 就插入資料，
+-- 失誤的方向應該是「權限太小」而不是「意外給了最高權限」（最小權限原則）。
+-- 這只影響「沒指定 role」的插入，既有資料列不會被改動。
+ALTER TABLE public.admin_profiles ALTER COLUMN role SET DEFAULT 'staff';
+ALTER TABLE public.admin_profiles ADD COLUMN IF NOT EXISTS email TEXT;
+ALTER TABLE public.admin_profiles ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pending';
+ALTER TABLE public.admin_profiles ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ;
+ALTER TABLE public.admin_profiles ADD COLUMN IF NOT EXISTS approved_by UUID;
+ALTER TABLE public.admin_profiles ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now();
+
+-- 先把既有資料正規化，再套用 CHECK，避免既有列違反新限制導致整份腳本失敗
+UPDATE public.admin_profiles SET role = 'admin' WHERE role IS NULL OR role NOT IN ('admin', 'staff', 'viewer');
+UPDATE public.admin_profiles SET status = 'approved' WHERE status IS NULL OR status NOT IN ('pending', 'approved', 'disabled');
+
+ALTER TABLE public.admin_profiles DROP CONSTRAINT IF EXISTS admin_profiles_role_check;
+ALTER TABLE public.admin_profiles ADD CONSTRAINT admin_profiles_role_check CHECK (role IN ('admin', 'staff', 'viewer'));
+ALTER TABLE public.admin_profiles DROP CONSTRAINT IF EXISTS admin_profiles_status_check;
+ALTER TABLE public.admin_profiles ADD CONSTRAINT admin_profiles_status_check CHECK (status IN ('pending', 'approved', 'disabled'));
+
+-- 9.2 既有使用者一律補成「已核准的管理員」，避免導入權限系統後把現有的人鎖在門外。
+-- ON CONFLICT DO NOTHING：已經有 profile 的人（含之後由觸發器建立的待審核帳號）不會被動到。
+INSERT INTO public.admin_profiles (id, email, display_name, role, status, approved_at)
+SELECT u.id,
+       u.email,
+       COALESCE(u.raw_user_meta_data->>'full_name', u.raw_user_meta_data->>'name', u.email),
+       'admin',
+       'approved',
+       now()
+FROM auth.users u
+ON CONFLICT (id) DO NOTHING;
+
+-- 補正上一版就已經有 profile、但欄位是這次才新增（status 預設 pending）的既有使用者。
+-- 條件「完全沒有任何已核准帳號」只有第一次升級時成立，之後重跑不會誤放行待審核的人。
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM public.admin_profiles WHERE status = 'approved') THEN
+    UPDATE public.admin_profiles SET status = 'approved', role = 'admin', approved_at = COALESCE(approved_at, now());
+  END IF;
+END $$;
+
+-- 9.3 新使用者註冊（含 Google 登入第一次進來）自動建立 profile。
+-- 系統還沒有任何管理員時，第一個登入的人自動成為已核准的管理員（bootstrap，
+-- 否則全新專案會變成「所有人都待審核、但沒有人有權限審核」的死結）；
+-- 之後註冊的人一律 pending，要由管理員在「帳號管理」核准。
+CREATE OR REPLACE FUNCTION public.handle_new_user()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $handle_new_user$
+DECLARE
+  has_admin BOOLEAN;
+BEGIN
+  SELECT EXISTS (
+    SELECT 1 FROM public.admin_profiles WHERE role = 'admin' AND status = 'approved'
+  ) INTO has_admin;
+
+  INSERT INTO public.admin_profiles (id, email, display_name, role, status, approved_at)
+  VALUES (
+    NEW.id,
+    NEW.email,
+    COALESCE(NEW.raw_user_meta_data->>'full_name', NEW.raw_user_meta_data->>'name', NEW.email),
+    CASE WHEN has_admin THEN 'staff' ELSE 'admin' END,
+    CASE WHEN has_admin THEN 'pending' ELSE 'approved' END,
+    CASE WHEN has_admin THEN NULL ELSE now() END
+  )
+  ON CONFLICT (id) DO NOTHING;
+
+  RETURN NEW;
+END;
+$handle_new_user$;
+
+DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
+CREATE TRIGGER on_auth_user_created
+  AFTER INSERT ON auth.users
+  FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
+
+-- 9.4 RLS 判斷用的輔助函式。
+-- 一定要 SECURITY DEFINER：這些函式自己要讀 admin_profiles，而 admin_profiles 本身也有 RLS，
+-- 用一般權限執行會變成「查權限要先有權限」的無限遞迴。SECURITY DEFINER 以函式擁有者身分執行、
+-- 繞過 RLS，才能當作判斷依據。SET search_path 是必要的防護，避免被搜尋路徑劫持。
+CREATE OR REPLACE FUNCTION public.current_admin_role()
+RETURNS TEXT
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $current_admin_role$
+  SELECT role FROM public.admin_profiles WHERE id = auth.uid() AND status = 'approved';
+$current_admin_role$;
+
+CREATE OR REPLACE FUNCTION public.is_admin()
+RETURNS BOOLEAN
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $is_admin$
+  SELECT COALESCE(public.current_admin_role() = 'admin', false);
+$is_admin$;
+
+-- 可以異動營運資料（訂單、客戶、對話、備品）：管理員與客服人員
+CREATE OR REPLACE FUNCTION public.can_operate()
+RETURNS BOOLEAN
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $can_operate$
+  SELECT COALESCE(public.current_admin_role() IN ('admin', 'staff'), false);
+$can_operate$;
+
+-- 可以讀取：任何已核准的帳號（含唯讀）
+CREATE OR REPLACE FUNCTION public.can_view()
+RETURNS BOOLEAN
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $can_view$
+  SELECT public.current_admin_role() IS NOT NULL;
+$can_view$;
+
+-- 9.5 依分層套用 RLS 政策。
+-- 用迴圈而不是逐表手寫 CREATE POLICY：37 張表逐條寫容易漏掉一張（漏掉的那張就是資料外洩的破口），
+-- 也方便之後新增表格時只要加進下面的分類清單即可。
+-- 每次執行都先把該表所有既有政策清掉再重建，所以可以重複執行，
+-- 也會確實移除舊版「只要登入就全部可讀寫」的政策——PostgreSQL 的 permissive 政策是 OR 關係，
+-- 舊政策只要留著一條，新的限制就完全失效。
+DO $rls$
+DECLARE
+  tbl text;
+  pol record;
+  -- 機密／系統控制：只有管理員能碰。settings 與 line_channels 存著 API 金鑰與 LINE 權杖；
+  -- scheduled_tasks 能觸發系統動作；operation_logs 是稽核軌跡；processed_events 是內部去重表。
+  admin_only text[] := ARRAY[
+    'settings', 'line_channels', 'scheduled_tasks', 'operation_logs', 'processed_events'
+  ];
+  -- 設定類：管理員可改，客服/唯讀只能看（客服需要看得到房型與價格才能回答客人）
+  config_tables text[] := ARRAY[
+    'room_types', 'room_pricing', 'room_extra_person_pricing', 'room_capacity_pricing', 'special_prices',
+    'whole_house_packages', 'whole_house_package_pricing', 'whole_house_package_rooms', 'whole_house_extra_person_rules',
+    'promotions', 'booking_date_ranges', 'knowledge_base_items',
+    'booking_flows', 'booking_flow_steps', 'message_variables',
+    'linen_items', 'room_type_linen_defaults', 'ota_channels',
+    'notification_recipient_groups', 'line_groups', 'line_group_members'
+  ];
+  -- 營運類：客服日常要異動的資料，唯讀角色只能看
+  operational_tables text[] := ARRAY[
+    'bookings', 'booking_rooms', 'booking_room_nights', 'booking_linen_usage',
+    'user_states', 'conversations', 'handover_logs',
+    'custom_message_templates', 'consumables', 'consumable_spaces'
+  ];
+  every_table text[];
+BEGIN
+  every_table := admin_only || config_tables || operational_tables || ARRAY['admin_profiles'];
+
+  FOREACH tbl IN ARRAY every_table LOOP
+    IF to_regclass('public.' || quote_ident(tbl)) IS NULL THEN
+      CONTINUE; -- 表格不存在就跳過，讓腳本在不同版本的資料庫上都能跑完
+    END IF;
+
+    FOR pol IN SELECT policyname FROM pg_policies WHERE schemaname = 'public' AND tablename = tbl LOOP
+      EXECUTE format('DROP POLICY IF EXISTS %I ON public.%I', pol.policyname, tbl);
+    END LOOP;
+
+    EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', tbl);
+  END LOOP;
+
+  FOREACH tbl IN ARRAY admin_only LOOP
+    IF to_regclass('public.' || quote_ident(tbl)) IS NULL THEN CONTINUE; END IF;
+    EXECUTE format(
+      'CREATE POLICY "admin_full_access" ON public.%I FOR ALL USING (public.is_admin()) WITH CHECK (public.is_admin())', tbl);
+  END LOOP;
+
+  FOREACH tbl IN ARRAY config_tables LOOP
+    IF to_regclass('public.' || quote_ident(tbl)) IS NULL THEN CONTINUE; END IF;
+    EXECUTE format(
+      'CREATE POLICY "approved_can_read" ON public.%I FOR SELECT USING (public.can_view())', tbl);
+    EXECUTE format(
+      'CREATE POLICY "admin_can_write" ON public.%I FOR ALL USING (public.is_admin()) WITH CHECK (public.is_admin())', tbl);
+  END LOOP;
+
+  FOREACH tbl IN ARRAY operational_tables LOOP
+    IF to_regclass('public.' || quote_ident(tbl)) IS NULL THEN CONTINUE; END IF;
+    EXECUTE format(
+      'CREATE POLICY "approved_can_read" ON public.%I FOR SELECT USING (public.can_view())', tbl);
+    EXECUTE format(
+      'CREATE POLICY "staff_can_write" ON public.%I FOR ALL USING (public.can_operate()) WITH CHECK (public.can_operate())', tbl);
+  END LOOP;
+END
+$rls$;
+
+-- admin_profiles 要單獨處理：每個人都必須讀得到「自己那一列」，前端才知道自己是什麼角色、
+-- 有沒有被核准（待審核的人也要讀得到，否則畫面無從判斷該顯示什麼）。其餘一律只有管理員能碰。
+DROP POLICY IF EXISTS "read_own_profile" ON public.admin_profiles;
+CREATE POLICY "read_own_profile" ON public.admin_profiles FOR SELECT USING (id = auth.uid());
+DROP POLICY IF EXISTS "admin_manage_profiles" ON public.admin_profiles;
+CREATE POLICY "admin_manage_profiles" ON public.admin_profiles FOR ALL USING (public.is_admin()) WITH CHECK (public.is_admin());
 
 -- 10. 初始資料
 INSERT INTO public.settings (id) SELECT gen_random_uuid() WHERE NOT EXISTS (SELECT 1 FROM public.settings);
@@ -1246,14 +1343,17 @@ INSERT INTO public.settings (id) SELECT gen_random_uuid() WHERE NOT EXISTS (SELE
 -- 11. 儲存空間權限 (Storage)：知識庫檔案上傳用
 INSERT INTO storage.buckets (id, name, public) VALUES ('knowledge_base', 'knowledge_base', true) ON CONFLICT (id) DO NOTHING;
 
+-- 讀取維持公開：bucket 本身是 public，AI 讀知識庫檔案時走的是公開網址，不帶登入身分。
 DROP POLICY IF EXISTS "Allow Public Select" ON storage.objects;
 CREATE POLICY "Allow Public Select" ON storage.objects FOR SELECT TO public USING (bucket_id = 'knowledge_base');
+-- 上傳／覆寫／刪除限管理員：知識庫內容會直接影響 AI 對客人的回答，屬於設定類而非日常營運，
+-- 跟 knowledge_base_items 資料表的權限分層保持一致（否則檔案這條路會變成繞過表格權限的破口）。
 DROP POLICY IF EXISTS "Allow Auth Insert" ON storage.objects;
-CREATE POLICY "Allow Auth Insert" ON storage.objects FOR INSERT TO authenticated WITH CHECK (bucket_id = 'knowledge_base');
+CREATE POLICY "Allow Auth Insert" ON storage.objects FOR INSERT TO authenticated WITH CHECK (bucket_id = 'knowledge_base' AND public.is_admin());
 DROP POLICY IF EXISTS "Allow Auth Update" ON storage.objects;
-CREATE POLICY "Allow Auth Update" ON storage.objects FOR UPDATE TO authenticated USING (bucket_id = 'knowledge_base');
+CREATE POLICY "Allow Auth Update" ON storage.objects FOR UPDATE TO authenticated USING (bucket_id = 'knowledge_base' AND public.is_admin());
 DROP POLICY IF EXISTS "Allow Auth Delete" ON storage.objects;
-CREATE POLICY "Allow Auth Delete" ON storage.objects FOR DELETE TO authenticated USING (bucket_id = 'knowledge_base');
+CREATE POLICY "Allow Auth Delete" ON storage.objects FOR DELETE TO authenticated USING (bucket_id = 'knowledge_base' AND public.is_admin());
 
 -- ========================================================================
 -- 12. 既有資料補正

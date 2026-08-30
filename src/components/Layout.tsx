@@ -5,11 +5,12 @@ import {
   ListItemIcon, ListItemText, Toolbar, Tooltip, Typography,
 } from '@mui/material';
 import { styled, type CSSObject, type Theme } from '@mui/material/styles';
-import { supabase } from '../lib/supabase';
+import { useAuth } from '../lib/AuthContext';
+import { canAccessRoute, canWrite, roleLabel } from '../lib/permissions';
 import {
   LayoutDashboard, LogOut, Settings, ClipboardList, Users, UserCog, ChevronDown, Calculator,
   Send, Headphones, MessageSquareText, CalendarDays, BookOpen, Variable, DoorOpen, Shirt,
-  Clock, SlidersHorizontal, PanelLeftClose, PanelLeftOpen, ScrollText,
+  Clock, SlidersHorizontal, PanelLeftClose, PanelLeftOpen, ScrollText, Eye,
 } from 'lucide-react';
 
 // 規範指定的外殼尺寸：左側導航 240px（摺疊 64px）、頂部狀態列 64px。
@@ -128,8 +129,24 @@ export default function Layout() {
   const navigate = useNavigate();
   const location = useLocation();
   const titleMap = useMemo(buildTitleMap, []);
+  const { role, profile, signOut } = useAuth();
 
   const [collapsed, setCollapsed] = useState(false);
+
+  // 依角色過濾選單：進不去的頁面就不顯示，避免使用者點了才發現被導開。
+  // 群組內的子項全被濾掉時整個群組也要拿掉，否則會留下一個點開是空的群組。
+  const visibleEntries = useMemo(() => {
+    const result: NavEntry[] = [];
+    for (const entry of navEntries) {
+      if (entry.kind === 'link') {
+        if (canAccessRoute(role, entry.to)) result.push(entry);
+        continue;
+      }
+      const children = entry.children.filter((c) => canAccessRoute(role, c.to));
+      if (children.length) result.push({ ...entry, children });
+    }
+    return result;
+  }, [role]);
 
   const groupContainsPath = (group: NavGroup) => group.children.some((c) => c.to === location.pathname);
 
@@ -151,7 +168,7 @@ export default function Layout() {
   };
 
   const handleLogout = async () => {
-    await supabase.auth.signOut();
+    await signOut();
     navigate('/login');
   };
 
@@ -160,7 +177,7 @@ export default function Layout() {
   // 收合狀態下只剩圖示，展開群組沒有意義（沒有空間顯示子項文字），改成直接顯示子項圖示。
   const renderNav = () => (
     <List sx={{ px: collapsed ? 0.5 : 1, py: 1 }} dense>
-      {navEntries.map((entry) => {
+      {visibleEntries.map((entry) => {
         if (entry.kind === 'link') {
           const Icon = entry.icon;
           const selected = location.pathname === entry.to;
@@ -256,6 +273,18 @@ export default function Layout() {
             )}
           </Breadcrumbs>
 
+          {/* 顯示目前登入者與角色：多人共用同一台電腦時，能一眼確認現在是誰在操作 */}
+          {profile && (
+            <Box sx={{ textAlign: 'right', display: { xs: 'none', sm: 'block' }, lineHeight: 1.3 }}>
+              <Typography fontSize={13} fontWeight={600} noWrap>
+                {profile.display_name || profile.email}
+              </Typography>
+              <Typography fontSize={11} color="text.secondary" noWrap>
+                {roleLabel(role)}
+              </Typography>
+            </Box>
+          )}
+
           <Tooltip title="登出">
             <IconButton onClick={handleLogout} sx={{ color: 'error.main' }} aria-label="登出">
               <LogOut size={18} />
@@ -274,6 +303,20 @@ export default function Layout() {
           內含寬表格時會把整個版面撐開而不是讓表格自己捲動。 */}
       <Box component="main" sx={{ flexGrow: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
         <Toolbar sx={{ minHeight: `${APPBAR_HEIGHT}px !important` }} />
+        {/* 唯讀角色的畫面上仍然看得到各種編輯按鈕（那些按鈕沒有逐一依角色停用），
+            但實際送出時會被資料庫的 RLS 擋下。先講清楚，使用者才不會以為是系統故障。 */}
+        {!canWrite(role) && (
+          <Box sx={{
+            display: 'flex', alignItems: 'center', gap: 1,
+            px: 3, py: 1, bgcolor: 'warning.light', color: 'warning.contrastText',
+            borderBottom: '1px solid', borderColor: 'divider',
+          }}>
+            <Eye size={15} />
+            <Typography fontSize={13}>
+              目前是唯讀模式，可以查看資料但無法新增或修改。需要調整權限請聯繫管理員。
+            </Typography>
+          </Box>
+        )}
         <Box sx={{ p: 3, flex: 1 }}>
           <Outlet />
         </Box>

@@ -2,6 +2,7 @@ import { Handler } from '@netlify/functions';
 import { createClient } from '@supabase/supabase-js';
 import fetch from 'node-fetch';
 import { withErrorLogging } from '../../src/lib/operationLog';
+import { requireRole } from '../../src/lib/requireRole';
 
 // ========================================================================
 // 即時查詢單一顧客的 LINE 大頭貼與狀態消息（客戶資料頁「LINE 資訊查詢」用）。
@@ -14,11 +15,11 @@ const supabase = createClient(process.env.SUPABASE_URL || '', process.env.SUPABA
 const rawHandler: Handler = async (event) => {
   if (event.httpMethod !== 'POST') return { statusCode: 405, body: 'Method Not Allowed' };
 
-  const authHeader = event.headers['authorization'] || event.headers['Authorization'];
-  const token = authHeader?.replace(/^Bearer\s+/i, '');
-  if (!token) return { statusCode: 401, body: JSON.stringify({ error: '未登入' }) };
-  const { data: userData, error: userError } = await supabase.auth.getUser(token);
-  if (userError || !userData?.user) return { statusCode: 401, body: JSON.stringify({ error: '登入已過期，請重新整理頁面' }) };
+  // 查 LINE 個人資料是「客戶資料」頁的功能，三種角色都用得到，所以放行所有已核准帳號。
+  // 但仍要走 requireRole 而不是只驗登入——待審核／已停用的帳號雖然可能還握有有效的登入權杖，
+  // 也不該讀得到客人的暱稱與大頭貼。
+  const guard = await requireRole(supabase, event as any, ['admin', 'staff', 'viewer']);
+  if ('error' in guard) return { statusCode: guard.error.statusCode, body: JSON.stringify({ error: guard.error.body }) };
 
   let body: any;
   try {

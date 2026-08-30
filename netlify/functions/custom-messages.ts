@@ -5,6 +5,7 @@ import fetch from 'node-fetch';
 import { buildMergeFields, MessageVariable, computeTodayTomorrowFields } from '../../src/lib/messageVariables';
 import { LineChannel } from '../../src/lib/lineChannels';
 import { withErrorLogging } from '../../src/lib/operationLog';
+import { requireRole } from '../../src/lib/requireRole';
 
 // ========================================================================
 // 客製訊息發送（客製訊息發送頁）專用 function：
@@ -25,11 +26,10 @@ const MAX_BATCH_SEND = 50;
 const rawHandler: Handler = async (event) => {
   if (event.httpMethod !== 'POST') return { statusCode: 405, body: 'Method Not Allowed' };
 
-  const authHeader = event.headers['authorization'] || event.headers['Authorization'];
-  const token = authHeader?.replace(/^Bearer\s+/i, '');
-  if (!token) return { statusCode: 401, body: JSON.stringify({ error: '未登入' }) };
-  const { data: userData, error: userError } = await supabase.auth.getUser(token);
-  if (userError || !userData?.user) return { statusCode: 401, body: JSON.stringify({ error: '登入已過期，請重新整理頁面' }) };
+  // 限管理員與客服：會實際發 LINE 訊息給客人並消耗官方帳號的訊息額度，
+  // 唯讀角色不該能觸發。跟「客製訊息發送」頁面的權限一致（見 src/lib/permissions.ts）。
+  const guard = await requireRole(supabase, event as any, ['admin', 'staff']);
+  if ('error' in guard) return { statusCode: guard.error.statusCode, body: JSON.stringify({ error: guard.error.body }) };
 
   let body: any;
   try {
