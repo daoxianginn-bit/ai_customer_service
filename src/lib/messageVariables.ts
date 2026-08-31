@@ -53,6 +53,7 @@ export interface BookingCtx {
   infants?: number | null;
   whole_house?: boolean | null;
   room_type_label?: string | null;
+  guest_notes?: string | null;
   room_amount?: number | null;
   security_deposit?: number | null;
   total_amount?: number | null;
@@ -91,6 +92,7 @@ export const BOOKING_FIELD_OPTIONS: { value: string; label: string }[] = [
   { value: 'adults_kids', label: '大人小孩' },
   { value: 'whole_house', label: '是否包棟' },
   { value: 'room_type_label', label: '房型' },
+  { value: 'guest_notes', label: '顧客備註' },
   { value: 'status', label: '訂單狀態' },
   { value: 'room_amount', label: '房價（不含押金）' },
   { value: 'security_deposit', label: '押金' },
@@ -166,6 +168,7 @@ const FIELD_SECTION: Record<string, string> = {
   adults_kids: VARIABLE_SECTIONS.guest,
   whole_house: VARIABLE_SECTIONS.guest,
   room_type_label: VARIABLE_SECTIONS.guest,
+  guest_notes: VARIABLE_SECTIONS.guest,
   room_amount: VARIABLE_SECTIONS.fee,
   security_deposit: VARIABLE_SECTIONS.fee,
   total_amount: VARIABLE_SECTIONS.fee,
@@ -372,6 +375,7 @@ export function resolveVariable(source: VariableSource, fieldKey: string, ctx: V
       case 'adults_kids': return formatAdultsKids(b.adults, b.kids, b.infants);
       case 'whole_house': return b.whole_house ? '是' : '否';
       case 'room_type_label': return b.room_type_label || (b.whole_house ? '包棟' : '');
+      case 'guest_notes': return b.guest_notes || '';
       case 'status': return bookingStatusLabel(b.status);
       case 'room_amount': return currency(b.room_amount ?? b.total_amount); // 舊訂單沒有 room_amount，退回 total_amount（改版前它存的就是房價）
       case 'security_deposit': return currency(b.security_deposit);

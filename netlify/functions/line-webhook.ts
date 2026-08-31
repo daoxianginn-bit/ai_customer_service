@@ -13,7 +13,7 @@ import {
   computeOrderAmounts,
   computeTodayTomorrowFields,
 } from '../../src/lib/messageVariables';
-import { bookingStatusLabel, OCCUPYING_STATUSES } from '../../src/lib/bookingStatus';
+import { bookingStatusLabel, flowStepIndex, OCCUPYING_STATUSES } from '../../src/lib/bookingStatus';
 import { writeOperationLog, withErrorLogging, LOG_FEATURES, SYSTEM_ACTOR } from '../../src/lib/operationLog';
 import { roomLabel } from '../../src/lib/rooms';
 import { generateOrderNumber } from '../../src/lib/orderNumber';
@@ -1148,10 +1148,23 @@ function scanWholeHouse(message: string): string | undefined {
   return undefined;
 }
 
+// 欄位名稱可能含有正規表示式的特殊字元（例如括號），組 pattern 前先逐字轉義。
+function escapeForRegex(label: string): string {
+  return label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// 從「欄位名稱：內容」這種逐行回答裡取一段自由文字，例如「備註：想烤肉」。
+// 只取到行尾，不會把下一行的答案一起吞進來。沒有標籤可定位就留空再問一次，不要亂猜——
+// 猜錯會把客人問的別的事情存成備註。
+function scanLabelledText(message: string, label: string): string | undefined {
+  const m = message.match(new RegExp(`${escapeForRegex(label)}\\s*[:：]\\s*(.+)`));
+  const value = m?.[1]?.trim();
+  return value || undefined;
+}
+
 // 從「欄位名稱：數字」這種逐行回答裡取值，例如「2人房數：2」。
-// 名稱可能含有正規表示式的特殊字元（例如括號），先逐字轉義再組 pattern。
 function scanLabelledNumber(message: string, label: string): string | undefined {
-  const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const escaped = escapeForRegex(label);
   const m = message.match(new RegExp(`${escaped}\\s*[:：]?\\s*(\\d{1,3})`));
   if (!m) return undefined;
   const n = Number(m[1]);
@@ -1187,10 +1200,20 @@ function extractStepFieldsWithoutAi(userMessage: string, fields: FlowFieldDef[])
     }
   }
 
-  // 自由文字欄位（quote_field 為 null，例如姓名、電話）沒有 AI 可以拆句子，
-  // 只有在整個步驟就問這一個欄位時才能安全地把整句話當答案；問兩個以上就留空再問一次。
+  // 自由文字欄位（quote_field 為 null，例如姓名、電話、備註）沒有 AI 可以拆句子，只有兩種
+  // 情況抓得準：客人照範本寫了「備註：想烤肉」這種標籤（用標籤定位，多少個欄位都認得），
+  // 或整個步驟就只問這一個欄位（整句話就是答案）。兩者都不成立才留空再問一次。
+  //
+  // 標籤這一關以前沒有，於是一個步驟只要同時問了日期/人數又問備註，備註就永遠抓不到，
+  // 下面 continueBookingFlow() 的 missingFields 會一直回「還需要麻煩您補充：備註」，
+  // 客人不管怎麼填都過不了——system 模式的流程等於不能設備註欄位。
   const freeTextFields = fields.filter((f) => !f.quote_field);
-  if (freeTextFields.length === 1 && fields.length === 1 && message.trim()) {
+  for (const f of freeTextFields) {
+    if (result[f.key] !== undefined) continue;
+    const v = scanLabelledText(message, f.label);
+    if (v !== undefined) result[f.key] = v;
+  }
+  if (freeTextFields.length === 1 && fields.length === 1 && message.trim() && result[freeTextFields[0].key] === undefined) {
     result[freeTextFields[0].key] = message.trim();
   }
 
@@ -1235,6 +1258,27 @@ async function renderFlowMessage(
 function pickByLabelHeuristic(collected: Record<string, string>, allFields: FlowFieldDef[], keywords: string[]): string | null {
   const field = allFields.find((f) => keywords.some((k) => f.label.includes(k)));
   return field ? collected[field.key] ?? null : null;
+}
+
+// 姓名／電話已經各自有專屬欄位（見上面的 pickByLabelHeuristic），這個流程裡剩下的自由文字
+// 欄位就是「備註」「特殊需求」這類客人自己打的字。以前它們只進 collected_answers 這包 JSON，
+// 而整個後台從來沒有讀過那一包，等於客人打的備註寫進資料庫就消失了——客人以為講過了，
+// 客服在訂單上一個字也看不到。這裡把它們整理成一段文字寫進 bookings.guest_notes。
+//
+// 不寫進 bookings.notes：那一欄是客服自己打的內部備註，自動流程蓋上去會把人工寫的東西弄不見。
+const GUEST_NOTE_EXCLUDED_LABELS = ['姓名', '名字', '電話', '手機', '聯絡'];
+
+function pickGuestNotes(collected: Record<string, string>, allFields: FlowFieldDef[]): string | null {
+  const noteFields = allFields.filter(
+    (f) => !f.quote_field && !GUEST_NOTE_EXCLUDED_LABELS.some((k) => f.label.includes(k))
+  );
+  const answered = noteFields
+    .map((f) => ({ label: f.label, value: (collected[f.key] ?? '').trim() }))
+    .filter((x) => x.value);
+  if (!answered.length) return null;
+  // 只有一欄就直接存內容——訂單上那一格本來就叫「顧客備註」，再加一次「備註：」是多的。
+  // 兩欄以上才需要標籤，否則客服看到兩段文字分不出哪段是回答哪一題。
+  return answered.length === 1 ? answered[0].value : answered.map((x) => `${x.label}：${x.value}`).join('\n');
 }
 
 async function fetchBookingData() {
@@ -1342,6 +1386,42 @@ async function findWaitlistWatchTarget(
     .limit(1)
     .maybeSingle();
   return data || null;
+}
+
+// 這位客人自己在同一段日期還有沒有別的活訂單。
+//
+// 跟 checkBookingConflict 是兩件事：那個問的是「房間有沒有被別人佔走」，只看鎖房的狀態；
+// 這個問的是「同一個人是不是要重複下訂」，所以連還沒鎖房的待預定也要算——重複下訂的第一個
+// 徵兆就是同一位客人掛著兩張同日期的報價，而報價階段本來就不佔房，房況檢查看不見它。
+//
+// 已經結束的訂單（取消／退款／結案）不算數：那些日期本來就該可以重新訂。
+const LIVE_BOOKING_STATUSES = [
+  'inquiring', 'awaiting_deposit', 'awaiting_confirmation', 'reserved',
+  'awaiting_balance', 'awaiting_checkin', 'checked_in', 'deposit_processing',
+];
+
+async function findOverlappingLiveBooking(
+  lineUserId: string,
+  checkinIso: string,
+  checkoutIso: string,
+  excludeBookingIds: string[]
+): Promise<{ id: string; order_number: string | null; status: string; checkin_date: string; checkout_date: string } | null> {
+  const excluded = excludeBookingIds.filter(Boolean);
+  let query = supabase
+    .from('bookings')
+    .select('id, order_number, status, checkin_date, checkout_date')
+    .eq('channel_id', activeChannelId)
+    .eq('line_user_id', lineUserId)
+    .in('status', LIVE_BOOKING_STATUSES)
+    .lt('checkin_date', checkoutIso)
+    .gt('checkout_date', checkinIso);
+  if (excluded.length) query = query.not('id', 'in', `(${excluded.join(',')})`);
+  const { data } = await query;
+  if (!data || !data.length) return null;
+
+  // 不能只取最新的一筆：客人同時掛著一張舊的「已預定」跟一張新的「待預定」時，該講的是
+  // 已經成立的那一筆（也只有那一筆不能被自動作廢）。所以挑流程走得最遠的，不是最晚建立的。
+  return (data as any[]).reduce((furthest, b) => ((flowStepIndex(b.status) ?? 0) > (flowStepIndex(furthest.status) ?? 0) ? b : furthest));
 }
 
 // 把「客人想要的區間」跟「卡住他的那筆訂單的區間」交集，換成客人看得懂的日期文字，
@@ -1533,6 +1613,49 @@ async function insertNewBooking(fields: Record<string, any>): Promise<any> {
   throw new Error('無法產生不重複的訂單編號，請稍後再試');
 }
 
+// guest_notes 是後來才加到 bookings 的欄位（見 supabase_schema.sql）。schema 還沒更新就先
+// 部署新程式的話，帶著這一欄的 update 會被 PostgREST 整包退回——報價會當場失敗，客人只會收到
+// 一句「試算出了一點狀況」，而且看不出原因。所以只要錯是出在這一欄，就把它拿掉重送一次：
+// 備註這次沒寫進去（log 會提醒去補 schema），至少訂單本身還是成立的。
+async function updateBookingRow(bookingId: string, fields: Record<string, any>) {
+  const first = await supabase.from('bookings').update(fields).eq('id', bookingId).select().maybeSingle();
+  if (!first.error || !('guest_notes' in fields) || !String(first.error.message || '').includes('guest_notes')) return first;
+  console.error('[Booking] bookings.guest_notes 欄位不存在，請執行 supabase_schema.sql 補上；本次略過顧客備註');
+  const { guest_notes: _omitted, ...rest } = fields;
+  return supabase.from('bookings').update(rest).eq('id', bookingId).select().maybeSingle();
+}
+
+// 客人重新觸發訂房流程時，哪些狀態的舊訂單要「接續」而不是另外開一筆新的。
+//
+// inquiring（待報價）：資料還沒收齊，本來就該接續，不然 session 一逾時就會多一筆空白訂單。
+// awaiting_deposit（待預定）：報價已經送出、客人還沒回「是」。以前這個狀態不在名單裡，所以
+//   客人只要再打一次「我要訂房」就會多開一筆，同一個人同一段日期同時掛著兩筆活訂單——而且
+//   待預定不鎖房（見 bookingStatus.ts 的 OCCUPYING_STATUSES），房況檢查也擋不下來，
+//   「訂單自動取消」排程又只清待確認，於是那些多出來的待預定會永遠留在訂單管理裡。
+//   客人重新開始問就是「以新的為準」，接續同一筆重算即可，這也跟 restartQuoteFlow／
+//   tryRequoteFromCompleteInfo 對待舊報價的方式一致（那兩條路是 session 還活著時走的）。
+//
+// 待確認（含）之後的狀態刻意不列入：那些訂單客人已經說要訂、可能已經匯過款，不能被下一次
+// 詢問覆蓋掉，必須另外開一筆（日期真的撞到的話，會由下面 findOverlappingLiveBooking 擋下）。
+const REUSABLE_ON_RESTART_STATUSES = ['inquiring', 'awaiting_deposit'];
+
+// 接續舊訂單重新報價：狀態退回待報價，並且把上一次報價暫時登記的房間放掉。
+// 房間不放掉的話，這筆訂單自己的舊登記會留在 booking_rooms 裡，客服在房況上會看到
+// 一筆已經不算數的佔用。金額欄位不清空——下一次報價成功時會整組覆蓋，中途放棄的話
+// 保留舊金額反而看得出客人上次問到多少錢。
+async function resetBookingForRequote(bookingId: string, flowId: string, collected?: Record<string, string>) {
+  await supabase
+    .from('bookings')
+    .update({
+      flow_id: flowId,
+      status: 'inquiring',
+      ...(collected ? { collected_answers: collected } : {}),
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', bookingId);
+  await saveBookingRooms(bookingId, []);
+}
+
 async function startBookingFlow(
   lineClient: Client,
   lineEvent: any,
@@ -1566,8 +1689,9 @@ async function startBookingFlow(
     .order('created_at', { ascending: false })
     .limit(1)
     .maybeSingle();
-  // quoted（已報價）已併入 inquiring（待報價，見 bookingStatus.ts），所以只需要判斷 inquiring。
-  if (latestBooking && latestBooking.status === 'inquiring') {
+  // 哪些狀態算「同一次詢問的延續」見 REUSABLE_ON_RESTART_STATUSES。
+  // （quoted（已報價）已併入 inquiring，見 bookingStatus.ts，所以名單裡不需要它。）
+  if (latestBooking && REUSABLE_ON_RESTART_STATUSES.includes(latestBooking.status)) {
     bookingId = latestBooking.id;
   }
 
@@ -1580,7 +1704,7 @@ async function startBookingFlow(
     const data = await insertNewBooking({ channel_id: activeChannelId, line_user_id: userId, nickname: resolvedNickname, flow_id: flow.id, status: 'inquiring', collected_answers: {} });
     bookingId = data.id;
   } else {
-    await supabase.from('bookings').update({ flow_id: flow.id, status: 'inquiring' }).eq('id', bookingId);
+    await resetBookingForRequote(bookingId, flow.id);
   }
 
   const firstStep = flow.steps.find((s) => s.step_order === 1);
@@ -1668,9 +1792,9 @@ async function tryStartQuoteFromCompleteInfo(
       .maybeSingle();
 
     let bookingId: string;
-    if (latestBooking && latestBooking.status === 'inquiring') {
+    if (latestBooking && REUSABLE_ON_RESTART_STATUSES.includes(latestBooking.status)) {
       bookingId = latestBooking.id;
-      await supabase.from('bookings').update({ flow_id: flow.id, collected_answers: collected, updated_at: new Date().toISOString() }).eq('id', bookingId);
+      await resetBookingForRequote(bookingId, flow.id, collected);
     } else {
       try {
         const p = await lineClient.getProfile(userId);
@@ -1992,10 +2116,13 @@ async function finishBookingFlow(
   if (!hasAllQuoteFields) {
     const name = pickByLabelHeuristic(collected, allFields, ['姓名', '名字']) || nickname;
     const phone = pickByLabelHeuristic(collected, allFields, ['電話', '手機', '聯絡']);
-    await supabase
-      .from('bookings')
-      .update({ collected_answers: collected, name, phone, updated_at: new Date().toISOString() })
-      .eq('id', bookingId);
+    await updateBookingRow(bookingId, {
+      collected_answers: collected,
+      name,
+      phone,
+      guest_notes: pickGuestNotes(collected, allFields),
+      updated_at: new Date().toISOString(),
+    });
 
     const DEFAULT_INCOMPLETE_MESSAGE = '感謝您提供的資訊！我們已經收到，將由客服人員盡快為您確認詳細報價，謝謝您的耐心等候 🙏';
     const replyText = await renderFlowMessage(flow.incompleteMessage || DEFAULT_INCOMPLETE_MESSAGE, settings, userId, nickname, bookingId);
@@ -2030,6 +2157,59 @@ async function finishBookingFlow(
     await logConversation(userId, nickname, 'outbound', replyText, 'system');
     await keepSessionForRetry();
     return;
+  }
+
+  // 同一位客人、同一段日期，已經有另一筆還活著的訂單。
+  //
+  // 房況檢查（fetchOccupiedRoomIds／checkBookingConflict）擋不下這種情況：待預定不算佔房，
+  // 所以「已經報過一次價、又重新問一次」會安安靜靜地變成兩筆日期重疊的活訂單；就算擋得下來，
+  // 對客人講的也是「已經被別人訂走了、幫您排候補」——那筆其實是他自己的訂單，話講反了。
+  // 所以在算價之前先自己比對一次。
+  //
+  // 候補自動重試（isRetry）不走這一關：那不是客人自己又問了一次，是排程在幫他重算，
+  // 這裡不該對他說話，也不該替他取消任何訂單——要不要放棄候補由 attemptWaitlistRetry 決定。
+  const ownOverlap = isRetry
+    ? null
+    : await findOverlappingLiveBooking(userId, checkinIso, checkoutIso, [bookingId, supersedesBookingId || '']);
+  if (ownOverlap) {
+    if (ownOverlap.status === 'awaiting_deposit') {
+      // 舊的只是一張還沒被接受的報價：沒鎖房也沒收錢，直接作廢讓這次的報價取代它。
+      await saveBookingRooms(ownOverlap.id, []);
+      await supabase.from('bookings').update({ status: 'cancelled', updated_at: new Date().toISOString() }).eq('id', ownOverlap.id);
+      await logSystemOperation({
+        feature: LOG_FEATURES.lineBooking,
+        action: '狀態變更',
+        target: ownOverlap.order_number || ownOverlap.id,
+        before: { 訂單狀態: ownOverlap.status },
+        after: { 訂單狀態: 'cancelled', 說明: '同一位客人重新報價同一段日期，舊的報價自動作廢' },
+      });
+    } else {
+      // 待確認（含）之後：客人已經說要訂、可能已經匯過款。這種訂單不能被自動作廢，也不該再
+      // 開第二筆同日期的單去跟它打架——交給真人處理，並把這次開到一半的空訂單收掉。
+      await supabase.from('bookings').update({ status: 'cancelled', updated_at: new Date().toISOString() }).eq('id', bookingId);
+      await clearBookingSession(userId);
+
+      const replyText =
+        `您在 ${toSlashDate(checkinIso)}~${toSlashDate(checkoutIso)} 已經有一筆訂單了` +
+        `（訂單編號 ${ownOverlap.order_number || '—'}，目前狀態：${bookingStatusLabel(ownOverlap.status)}）🙏\n` +
+        '為了避免重複下訂，這次我們就不另外幫您開新的訂單了。如果要調整這筆訂單的日期或人數，' +
+        '請點選「真人客服」由專人為您處理，我們會盡快與您聯繫。';
+      await sendReply(replyText);
+      await logConversation(userId, nickname, 'outbound', replyText, 'system');
+
+      for (const id of parseCsvKeywords(settings.agent_user_ids)) {
+        try {
+          await lineClient.pushMessage(id, {
+            type: 'text',
+            text:
+              `⚠️ 重複訂房詢問：【${nickname || '匿名用戶'}】${toSlashDate(checkinIso)}~${toSlashDate(checkoutIso)}、${headcount}人，` +
+              `但他已經有訂單 ${ownOverlap.order_number || ownOverlap.id}（${bookingStatusLabel(ownOverlap.status)}）在同一段日期，` +
+              '系統沒有另外開單，請人工確認客人是要改訂單還是要另外加訂。',
+          });
+        } catch {}
+      }
+      return;
+    }
   }
 
   try {
@@ -2172,6 +2352,7 @@ async function finishBookingFlow(
 
     const name = pickByLabelHeuristic(collected, allFields, ['姓名', '名字']) || nickname;
     const phone = pickByLabelHeuristic(collected, allFields, ['電話', '手機', '聯絡']);
+    const guestNotes = pickGuestNotes(collected, allFields);
 
     // 民宿的預設經營方式就是包棟，所以一律寫 true——不論這次開了幾間房。客服如果遇到少數
     // 單賣個別房間的情況，到「訂單管理」把勾選取消即可。
@@ -2191,35 +2372,32 @@ async function finishBookingFlow(
     const amounts = computeOrderAmounts(total, securityDeposit, Number(settings.deposit_percent ?? 0));
 
     // 是否包棟：這欄以前被寫死成 false。它的語意是「押金要用包棟押金，而不是各房押金加總」，
-    const { data: updatedBooking, error: updateError } = await supabase
-      .from('bookings')
-      .update({
-        name,
-        phone,
-        checkin_date: checkinIso,
-        checkout_date: checkoutIso,
-        nights,
-        headcount,
-        whole_house: isWholeHouse,
-        room_amount: amounts.room_amount,
-        security_deposit: amounts.security_deposit,
-        total_amount: amounts.total_amount,
-        deposit: amounts.deposit,
-        room_type_label: roomTypeLabel,
-        // 2026-08 改版：報價算完（AI 卡片送出的當下）狀態就直接進「待預定」，不用等客人回「是」——
-        // 「待預定」現在代表「報價已送出，等客人決定是否要訂」；客人回「是」之後轉成「待確認」
-        // （見 handleBookingConfirmation()），等客服核對匯款。顯式寫出來是為了防呆：萬一這張訂單
-        // 是重新試算（狀態理論上還是 inquiring），也不會不小心被改壞。
-        status: 'awaiting_deposit',
-        collected_answers: collected,
-        // 候補重試成功走到這裡代表已經不再候補了，清掉監看對象，避免留著一個已經沒意義的舊參照。
-        waitlist_blocked_by: null,
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', bookingId)
-      .select()
-      .single();
+    const { data: updatedBooking, error: updateError } = await updateBookingRow(bookingId, {
+      name,
+      phone,
+      guest_notes: guestNotes,
+      checkin_date: checkinIso,
+      checkout_date: checkoutIso,
+      nights,
+      headcount,
+      whole_house: isWholeHouse,
+      room_amount: amounts.room_amount,
+      security_deposit: amounts.security_deposit,
+      total_amount: amounts.total_amount,
+      deposit: amounts.deposit,
+      room_type_label: roomTypeLabel,
+      // 2026-08 改版：報價算完（AI 卡片送出的當下）狀態就直接進「待預定」，不用等客人回「是」——
+      // 「待預定」現在代表「報價已送出，等客人決定是否要訂」；客人回「是」之後轉成「待確認」
+      // （見 handleBookingConfirmation()），等客服核對匯款。顯式寫出來是為了防呆：萬一這張訂單
+      // 是重新試算（狀態理論上還是 inquiring），也不會不小心被改壞。
+      status: 'awaiting_deposit',
+      collected_answers: collected,
+      // 候補重試成功走到這裡代表已經不再候補了，清掉監看對象，避免留著一個已經沒意義的舊參照。
+      waitlist_blocked_by: null,
+      updated_at: new Date().toISOString(),
+    });
     if (updateError) throw updateError;
+    if (!updatedBooking) throw new Error('訂單更新後讀不回內容');
 
     const quoteVariables = await fetchMessageVariables();
     // 優先用流程自己的報價確認訊息；還沒設定（例如剛升級、欄位是 NULL）就退回 settings 的舊值。

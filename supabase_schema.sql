@@ -582,6 +582,12 @@ FROM (VALUES
 WHERE NOT EXISTS (SELECT 1 FROM public.message_variables)
 ON CONFLICT (variable_name) DO NOTHING;
 
+-- [顧客備註] 是後來才加的欄位，上面那段種子只在 message_variables 完全空的時候才會跑，
+-- 既有專案升級時不會補到它，所以這裡單獨補一筆（已經有同名變數就跳過，不覆蓋管理員改過的設定）。
+INSERT INTO public.message_variables (variable_name, source, field_key, display_order)
+VALUES ('顧客備註', 'booking', 'guest_notes', 23)
+ON CONFLICT (variable_name) DO NOTHING;
+
 -- 8.5 動態訂房流程（可新增多組流程，各自有觸發關鍵字與最多 5 個步驟）
 -- 每個步驟送出 message_template 給顧客，等顧客回覆後依 fields 定義擷取 1~3 個答案；
 -- fields 是 JSON 陣列，每筆 { key, label, quote_field }，quote_field 為
@@ -727,6 +733,10 @@ CREATE TABLE IF NOT EXISTS public.bookings (
 ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS order_number TEXT UNIQUE;
 ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS room_type_label TEXT; -- 算完報價時寫入的人類可讀房型摘要（包棟＝「包棟」，個別租房＝房型名稱組合），列表顯示用，不用每次 join booking_room_nights
 ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS notes TEXT; -- 訂單管理頁的管理員備註，系統不會自動寫入
+-- 顧客在 LINE 訂房流程自己填的自由文字欄位（備註、特殊需求……）。
+-- 刻意跟上面的 notes 分開：notes 是客服自己打的內部備註，自動流程寫進去會把人工寫的內容蓋掉。
+-- 寫入時機：算完報價時，以及資料不齊改走人工報價那條路，見 line-webhook.ts 的 pickGuestNotes()。
+ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS guest_notes TEXT;
 ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS remit_last5 TEXT; -- 匯款末5碼，狀態改成「已預定」時訂單管理頁會要求填寫（僅前端表單驗證，不是資料庫層級限制，避免擋到 LINE 自動流程寫入）
 -- 入住密碼／門禁碼，客服手動輸入的明碼（客人到現場要能報這組密碼，所以不能加密存）。
 -- 只有狀態為「待入住」時前端才會開放編輯這個欄位（僅前端表單驗證，不是資料庫層級限制）。

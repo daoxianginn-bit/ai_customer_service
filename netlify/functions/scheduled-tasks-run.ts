@@ -138,7 +138,7 @@ async function notifyCheckoutCompleted(_config: Record<string, any>): Promise<{ 
 
   const { data: completed, error } = await supabase
     .from('bookings')
-    .select('id, order_number, name, nickname, checkin_date, checkout_date, headcount, room_type_label, room_amount, total_amount, status')
+    .select('id, order_number, name, nickname, checkin_date, checkout_date, headcount, room_type_label, room_amount, total_amount, status, guest_notes')
     .lt('checkout_date', todayIso)
     .is('completion_notified_at', null)
     .in('status', OCCUPYING_STATUSES)
@@ -667,7 +667,7 @@ async function depositAwaitingNotice(config: Record<string, any>, settings: any)
   const today = taiwanTodayIso();
   const { data, error } = await supabase
     .from('bookings')
-    .select('id, order_number, name, nickname, line_user_id, checkin_date, checkout_date, total_amount, deposit, status, created_at')
+    .select('id, order_number, name, nickname, line_user_id, checkin_date, checkout_date, total_amount, deposit, status, created_at, guest_notes')
     .eq('status', 'awaiting_deposit')
     .gte('created_at', `${yesterday}T00:00:00+08:00`)
     .lt('created_at', `${today}T00:00:00+08:00`);
@@ -691,7 +691,7 @@ async function depositAwaitingNotice(config: Record<string, any>, settings: any)
 async function awaitingConfirmationNotice(config: Record<string, any>, settings: any): Promise<{ ok: boolean; summary: string }> {
   const { data, error } = await supabase
     .from('bookings')
-    .select('id, order_number, name, nickname, checkin_date, checkout_date, remit_last5')
+    .select('id, order_number, name, nickname, checkin_date, checkout_date, remit_last5, guest_notes')
     .eq('status', 'awaiting_confirmation')
     .order('updated_at');
   if (error) return { ok: false, summary: `查詢失敗：${error.message}` };
@@ -713,7 +713,7 @@ async function awaitingConfirmationNotice(config: Record<string, any>, settings:
   const today = taiwanTodayIso();
   const { data: createdYesterday, error: cyError } = await supabase
     .from('bookings')
-    .select('id, order_number, name, nickname, line_user_id, checkin_date, checkout_date, total_amount, deposit, status, created_at')
+    .select('id, order_number, name, nickname, line_user_id, checkin_date, checkout_date, total_amount, deposit, status, created_at, guest_notes')
     .eq('status', 'awaiting_confirmation')
     .gte('created_at', `${yesterday}T00:00:00+08:00`)
     .lt('created_at', `${today}T00:00:00+08:00`);
@@ -739,7 +739,7 @@ async function checkinNotice(config: Record<string, any>, settings: any): Promis
   const today = taiwanTodayIso();
   const { data, error } = await supabase
     .from('bookings')
-    .select('id, order_number, name, nickname, line_user_id, checkin_date, checkout_date, room_type_label, check_in_password')
+    .select('id, order_number, name, nickname, line_user_id, checkin_date, checkout_date, room_type_label, check_in_password, guest_notes')
     .eq('status', 'awaiting_checkin')
     .eq('checkin_date', today);
   if (error) return { ok: false, summary: `查詢失敗：${error.message}` };
@@ -754,7 +754,7 @@ async function checkinNotice(config: Record<string, any>, settings: any): Promis
 async function depositProcessingNotice(config: Record<string, any>): Promise<{ ok: boolean; summary: string }> {
   const { data, error } = await supabase
     .from('bookings')
-    .select('id, order_number, name, nickname, checkin_date, checkout_date, security_deposit')
+    .select('id, order_number, name, nickname, checkin_date, checkout_date, security_deposit, guest_notes')
     .eq('status', 'deposit_processing')
     .order('checkout_date');
   if (error) return { ok: false, summary: `查詢失敗：${error.message}` };
@@ -775,7 +775,7 @@ async function laundryNotice(config: Record<string, any>): Promise<{ ok: boolean
   const today = taiwanTodayIso();
   const { data, error } = await supabase
     .from('bookings')
-    .select('id, order_number, name, nickname, checkin_date, checkout_date, room_type_label, linen_change_count')
+    .select('id, order_number, name, nickname, checkin_date, checkout_date, room_type_label, linen_change_count, guest_notes')
     .eq('status', 'deposit_processing')
     .eq('checkout_date', today);
   if (error) return { ok: false, summary: `查詢失敗：${error.message}` };

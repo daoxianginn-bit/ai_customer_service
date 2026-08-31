@@ -50,6 +50,7 @@ interface OrderForm {
   remit_last5: string;
   check_in_password: string;
   status: string;
+  guest_notes: string;
   notes: string;
   linen_change_count: string;
 }
@@ -58,7 +59,7 @@ const emptyForm = (): OrderForm => ({
   name: '', nickname: '', line_user_id: '', phone: '',
   checkin_date: '', checkout_date: '', headcount: '', adults: '', kids: '', infants: '',
   whole_house: true, room_type_label: '', room_amount: '', security_deposit: '', total_amount: '', deposit: '', remit_last5: '',
-  check_in_password: '', status: 'inquiring', notes: '', linen_change_count: '1',
+  check_in_password: '', status: 'inquiring', guest_notes: '', notes: '', linen_change_count: '1',
 });
 
 function formatDateTime(iso?: string): string {
@@ -699,6 +700,7 @@ export default function OrderManagement() {
       remit_last5: row.remit_last5 || '',
       check_in_password: row.check_in_password || '',
       status: row.status,
+      guest_notes: row.guest_notes || '',
       notes: row.notes || '',
       linen_change_count: String(row.linen_change_count ?? 1),
     });
@@ -804,6 +806,7 @@ export default function OrderManagement() {
         // 更早的步驟），存檔時一律清空，不要讓舊密碼在不該生效的狀態下還留著造成誤導。
         check_in_password: targetStatus === REQUIRES_CHECKIN_PASSWORD_STATUS ? (form.check_in_password || null) : null,
         status: targetStatus,
+        guest_notes: form.guest_notes || null,
         notes: form.notes || null,
         updated_at: new Date().toISOString(),
       };
@@ -1347,8 +1350,14 @@ export default function OrderManagement() {
               placeholder="入住時用來核對身分的密碼／門禁碼"
             />
           </div>
+          {/* 顧客備註跟內部備註刻意分成兩格：一個是客人自己在 LINE 上打的字（訂房流程自動寫入），
+              一個是客服自己記的事情。合成一格的話，自動流程下一次寫入就會把客服寫的內容蓋掉。 */}
           <div className="col-span-2">
-            <label className="block text-xs text-gray-500 mb-1">備註</label>
+            <label className="block text-xs text-gray-500 mb-1">顧客備註<span className="text-gray-400">（客人在 LINE 訂房流程填寫，可修改）</span></label>
+            <textarea value={form.guest_notes} onChange={(e) => setForm({ ...form, guest_notes: e.target.value })} rows={2} className="w-full px-3 py-2 border rounded-lg" placeholder="例如：想烤肉、需要嬰兒床" />
+          </div>
+          <div className="col-span-2">
+            <label className="block text-xs text-gray-500 mb-1">內部備註</label>
             <textarea value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} rows={3} className="w-full px-3 py-2 border rounded-lg" placeholder="內部備註，客戶不會看到" />
           </div>
         </div>
