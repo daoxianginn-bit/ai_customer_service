@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import { Users, Search, RotateCcw, MessageSquare, ClipboardList, Copy, RefreshCcw, AlertCircle, Trash2 } from 'lucide-react';
 import { PageHeader, Button, Modal, StatusBadge, EmptyState, Pagination, ConfirmDialog, ResponsiveTable, FilterBar } from '../components/ui';
+import { useAuth } from '../lib/AuthContext';
+import { canPurgeCustomerData } from '../lib/permissions';
 import { DEPOSIT_OR_LATER_STATUSES } from '../lib/bookingStatus';
 import { channelRoleLabel } from '../lib/lineChannels';
 
@@ -89,6 +91,7 @@ async function callDeleteCustomerDataFunction(lineUserId: string) {
 }
 
 export default function CustomerDirectory() {
+  const { role } = useAuth();
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [loading, setLoading] = useState(true);
   const [queryError, setQueryError] = useState('');
@@ -514,7 +517,7 @@ export default function CustomerDirectory() {
                   </span>
                 </label>
 
-                {currentUserId && currentUserId === primaryAdminId && (
+                {canPurgeCustomerData(role, currentUserId, primaryAdminId) && (
                   <button
                     onClick={() => setDeleteCustomerTarget(selectedContact)}
                     className="flex items-center gap-1.5 mt-3 text-xs text-red-600 hover:text-red-700"

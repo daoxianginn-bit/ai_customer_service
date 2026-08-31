@@ -34,7 +34,7 @@ export default function DateRangeSettingsModal({ open, onClose, onSaved }: DateR
   const fetchAll = async () => {
     setLoading(true);
     const [{ data: st }, { data: dr }] = await Promise.all([
-      supabase.from('settings').select('id, peak_season_weekday_tier').single(),
+      supabase.from('operational_settings').select('id, peak_season_weekday_tier').single(),
       supabase.from('booking_date_ranges').select('*').order('start_date'),
     ]);
     setSettingsId(st?.id || null);

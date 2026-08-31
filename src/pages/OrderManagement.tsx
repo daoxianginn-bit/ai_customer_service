@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import { ClipboardList, Search, RotateCcw, Save, Plus, Trash2, AlertCircle, AlertTriangle, Shirt, RefreshCw, CalendarDays, ListFilter, DoorOpen, UserCheck, CheckCircle2, LogIn, ChevronRight, X } from 'lucide-react';
 import { Button, Modal, StatusBadge, EmptyState, ConfirmDialog, FilterBar } from '../components/ui';
+import { useAuth } from '../lib/AuthContext';
+import { canDeleteBookings } from '../lib/permissions';
 import {
   BOOKING_STATUS_OPTIONS, SYSTEM_ONLY_STATUSES, REQUIRES_REMIT_LAST5_STATUS, REQUIRES_CHECKIN_PASSWORD_STATUS,
   FLOW_STEP_STATUSES, flowStepIndex, bookingStatusLabel, bookingStatusDescription, nextFlowStatus,
@@ -188,7 +190,8 @@ function OrderDetailPanel({
 }: {
   order: any | null;
   onEdit: () => void;
-  onDelete: () => void;
+  /** 沒有權限刪除時不傳，按鈕就不會出現——而不是給一顆按了必定失敗的鈕。 */
+  onDelete?: () => void;
   onAdvance: (nextStatus: string) => void;
 }) {
   if (!order) {
@@ -272,13 +275,20 @@ function OrderDetailPanel({
 
       <div className="flex gap-2 pt-1">
         <Button onClick={onEdit} icon={<Save className="w-4 h-4" />}>編輯訂單</Button>
-        <Button variant="secondary" onClick={onDelete} icon={<Trash2 className="w-4 h-4" />}>刪除</Button>
+        {onDelete && (
+          <Button variant="secondary" onClick={onDelete} icon={<Trash2 className="w-4 h-4" />}>刪除</Button>
+        )}
       </div>
     </div>
   );
 }
 
 export default function OrderManagement() {
+  // 客服看不到刪除相關的入口。真正的防線是資料庫的 RLS（bookings 的 DELETE 政策），
+  // 這裡只是不要給一顆按了必定失敗的按鈕。取消訂單走狀態機，不受影響。
+  const { role } = useAuth();
+  const canDelete = canDeleteBookings(role);
+
   const [keyword, setKeyword] = useState('');
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
@@ -447,7 +457,7 @@ export default function OrderManagement() {
   };
 
   const fetchMoneyDefaults = async () => {
-    const { data } = await supabase.from('settings').select('whole_house_security_deposit, deposit_percent').single();
+    const { data } = await supabase.from('operational_settings').select('whole_house_security_deposit, deposit_percent').single();
     if (!data) return;
     setMoneyDefaults({
       wholeHouseSecurity: Number(data.whole_house_security_deposit ?? 3000),
@@ -918,10 +928,13 @@ export default function OrderManagement() {
           訂單流程中心
         </h2>
         <div className="flex items-center gap-2">
-          <Button variant={batchMode ? 'primary' : 'secondary'} onClick={toggleBatchMode} icon={<Trash2 className="w-4 h-4" />}>
-            {batchMode ? '結束批次操作' : '批次操作'}
-          </Button>
-          {batchMode && selectedIds.length > 0 && (
+          {/* 「批次操作」目前唯一的用途就是批次刪除，沒有刪除權限的人不需要看到它 */}
+          {canDelete && (
+            <Button variant={batchMode ? 'primary' : 'secondary'} onClick={toggleBatchMode} icon={<Trash2 className="w-4 h-4" />}>
+              {batchMode ? '結束批次操作' : '批次操作'}
+            </Button>
+          )}
+          {canDelete && batchMode && selectedIds.length > 0 && (
             <Button variant="danger" onClick={() => setShowBatchConfirm(true)} icon={<Trash2 className="w-4 h-4" />}>
               刪除選取（{selectedIds.length}）
             </Button>
@@ -1143,7 +1156,7 @@ export default function OrderManagement() {
         <OrderDetailPanel
           order={selectedOrder}
           onEdit={() => selectedOrder && openEdit(selectedOrder)}
-          onDelete={() => selectedOrder && setDeleteTarget(selectedOrder)}
+          onDelete={canDelete ? () => selectedOrder && setDeleteTarget(selectedOrder) : undefined}
           onAdvance={(nextStatus) => selectedOrder && openAdvance(selectedOrder, nextStatus)}
         />
       </div>

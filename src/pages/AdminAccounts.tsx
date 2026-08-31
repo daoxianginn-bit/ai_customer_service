@@ -131,6 +131,12 @@ export default function AdminAccounts() {
       enqueueSnackbar('不能變更自己的角色，請由其他管理員操作', { variant: 'warning' });
       return;
     }
+    // 主帳號一降級就會失去所有特權（is_owner() 要求 is_admin()），而且自己救不回來。
+    // 資料庫的 guard_owner_profile 觸發器才是真正的防線，這裡只是先給看得懂的訊息。
+    if (row.id === primaryAdminId) {
+      enqueueSnackbar('主帳號的角色不能變更', { variant: 'warning' });
+      return;
+    }
     if (isLastAdmin(row) && nextRole !== 'admin') {
       enqueueSnackbar('這是系統唯一的管理員，不能降級', { variant: 'warning' });
       return;
@@ -257,9 +263,9 @@ export default function AdminAccounts() {
       header: '角色',
       width: 150,
       render: (r) => {
-        const locked = r.id === me?.id || isLastAdmin(r);
+        const locked = r.id === me?.id || r.id === primaryAdminId || isLastAdmin(r);
         return (
-          <Tooltip title={locked ? (r.id === me?.id ? '不能變更自己的角色' : '系統唯一的管理員，不能降級') : ''}>
+          <Tooltip title={locked ? (r.id === me?.id ? '不能變更自己的角色' : r.id === primaryAdminId ? '主帳號的角色不能變更' : '系統唯一的管理員，不能降級') : ''}>
             <span>
               <TextField
                 select size="small" value={r.role} disabled={locked}

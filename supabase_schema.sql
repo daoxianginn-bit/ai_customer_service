@@ -1128,6 +1128,24 @@ CREATE INDEX IF NOT EXISTS idx_operation_logs_actor ON public.operation_logs(act
 --
 -- 【角色】admin_profiles.role：admin 全部／staff 日常營運／viewer 唯讀
 --
+-- 【主帳號】settings.primary_admin_id 指到的那位管理員（RLS 用 is_owner() 判斷）。
+-- 權限階層是 owner > admin > staff > viewer，但 owner 刻意不做成 role 的第四個值：
+-- 「有且只有一個主帳號」靠單一指標欄位由結構保證，做成 role 值的話兩個人同時是
+-- owner 只是一次誤操作的距離；而且 role 會出現在邀請帳號的下拉選單裡。
+--
+-- 【刪除權限分三層】營運表的 DELETE 跟 INSERT/UPDATE 分開給，因為客服日常跑的是
+-- 狀態機（客人取消 → status 改成 cancelled，紀錄留著），不是把資料移除：
+--   一般營運表（booking_rooms／布巾用量／耗材／訊息範本…）  can_operate()：編輯訂單時
+--       房間與布巾是「先全刪再插入」重寫的，收緊會讓客服連存檔都失敗
+--   bookings                                              is_admin()：刪掉會 CASCADE 掉
+--       房間、房夜、布巾用量，而且救不回來
+--   user_states／conversations／handover_logs              is_owner()：客戶的身分與對話
+--       足跡，屬於個資刪除請求的層級。前端從來不刪這三張表，收緊不影響任何現有功能；
+--       背景清理程式走 service role，本來就不受 RLS 管
+--
+-- 注意營運表不能用 FOR ALL 寫政策：permissive 政策之間是 OR 關係，只要留著一條
+-- 涵蓋 DELETE 的 can_operate() 政策，上面的分層就完全失效。
+--
 -- 【為什麼 2FA 的關卡做在 RLS，而不是只做在 API】
 -- 前端用的 anon key 是公開的，任何登入者都能自己開 devtools 直接打 supabase.from(...)。
 -- 規格書把 2FA 關卡放在 API 層（發不發正式 Token），但那擋不住直接打資料庫的人。
@@ -1317,6 +1335,113 @@ AS $can_view$
   SELECT public.current_admin_role() IS NOT NULL;
 $can_view$;
 
+-- 主帳號（老闆本人）。刻意不做成 admin_profiles.role 的第四個值，理由有兩個：
+--   1. 「有且只有一個主帳號」是業務上的硬性條件。存成 settings 的單一指標欄位，
+--      這個條件由資料結構本身保證；做成 role 值的話，兩個人同時是 owner 只是一次誤操作的距離。
+--   2. role 會出現在「邀請新帳號」的下拉選單（ROLE_OPTIONS），多一個 owner 選項
+--      等於讓任何管理員都能邀請出第二個老闆。
+-- 權限模型上它仍然是角色階層 owner > admin > staff > viewer，只是儲存方式是指標。
+--
+-- 主帳號必定同時是 admin：這裡一併檢查，避免主帳號被降級成 staff 之後
+-- 還留著只有主帳號能做的權限。
+CREATE OR REPLACE FUNCTION public.is_owner()
+RETURNS BOOLEAN
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $is_owner$
+  SELECT public.is_admin()
+     AND auth.uid() = (SELECT s.primary_admin_id FROM public.settings s LIMIT 1);
+$is_owner$;
+
+-- 主帳號的 user id。單獨抽成函式讓下面的政策與觸發器共用，
+-- 而且 SECURITY DEFINER 可以繞過 settings 表自己的 RLS。
+CREATE OR REPLACE FUNCTION public.owner_id()
+RETURNS UUID
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $owner_id$
+  SELECT s.primary_admin_id FROM public.settings s LIMIT 1;
+$owner_id$;
+
+-- ------------------------------------------------------------------
+-- 主帳號防護。在此之前「主帳號不能被停權／移除」只寫在畫面上：
+--   1. 改角色那條路連畫面都沒擋——任何管理員可以把主帳號改成「唯讀」，
+--      主帳號當場失去所有特權（is_owner() 要求 is_admin()），而且自己救不回來。
+--   2. 停權雖然畫面上擋了，但那是直接打 admin_profiles 的 UPDATE，
+--      繞過畫面就沒有任何阻力。
+--   3. settings 的 RLS 是 admin_full_access，任何管理員都能把 primary_admin_id
+--      直接改成自己，等於自行升級成主帳號。
+-- 這三條都是「畫面擋得住、API 擋不住」，所以防線一律下沉到資料庫。
+-- ------------------------------------------------------------------
+
+-- 觸發器而不是只用 RLS：Netlify function 用 service role 完全繞過 RLS，
+-- 觸發器則是不管誰來、走哪條路都會執行，連我們自己寫錯的後端程式也擋得住。
+CREATE OR REPLACE FUNCTION public.guard_owner_profile()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $guard_owner_profile$
+BEGIN
+  -- 只管主帳號那一列，其他帳號照常放行。
+  -- BEFORE DELETE 一定要回傳 OLD——回傳 NEW（DELETE 時是 NULL）等於取消這次刪除，
+  -- 會變成所有帳號都刪不掉，而且完全沒有錯誤訊息。
+  IF OLD.id IS DISTINCT FROM public.owner_id() THEN
+    IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
+    RETURN NEW;
+  END IF;
+
+  IF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION '主帳號不能被移除。請先在「帳號管理」把主帳號移轉給其他人。';
+  END IF;
+
+  IF NEW.role IS DISTINCT FROM 'admin' THEN
+    RAISE EXCEPTION '主帳號的角色必須維持管理員，不能改成 %。', NEW.role;
+  END IF;
+  IF NEW.status IS DISTINCT FROM 'active' THEN
+    RAISE EXCEPTION '主帳號不能被停權或改成其他狀態。';
+  END IF;
+
+  RETURN NEW;
+END;
+$guard_owner_profile$;
+
+DROP TRIGGER IF EXISTS guard_owner_profile_trg ON public.admin_profiles;
+CREATE TRIGGER guard_owner_profile_trg
+  BEFORE UPDATE OR DELETE ON public.admin_profiles
+  FOR EACH ROW EXECUTE FUNCTION public.guard_owner_profile();
+
+-- primary_admin_id 只有三種合法異動：從無到有（第一次設定）、主帳號本人移轉、
+-- 以及完全不動。其他一律擋下，避免管理員自行升級。
+CREATE OR REPLACE FUNCTION public.guard_primary_admin_id()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $guard_primary_admin_id$
+BEGIN
+  IF NEW.primary_admin_id IS NOT DISTINCT FROM OLD.primary_admin_id THEN
+    RETURN NEW; -- 沒動到這個欄位
+  END IF;
+  IF OLD.primary_admin_id IS NULL THEN
+    RETURN NEW; -- 還沒有主帳號，第一個宣告的人取得（對應「將我設為主帳號」）
+  END IF;
+  IF auth.uid() = OLD.primary_admin_id THEN
+    RETURN NEW; -- 現任主帳號本人移轉
+  END IF;
+  RAISE EXCEPTION '只有現任主帳號本人可以移轉主帳號身分。';
+END;
+$guard_primary_admin_id$;
+
+DROP TRIGGER IF EXISTS guard_primary_admin_id_trg ON public.settings;
+CREATE TRIGGER guard_primary_admin_id_trg
+  BEFORE UPDATE ON public.settings
+  FOR EACH ROW EXECUTE FUNCTION public.guard_primary_admin_id();
+
 -- 9.7 依分層套用 RLS 政策。
 -- 用迴圈而不是逐表手寫 CREATE POLICY：近 40 張表逐條寫容易漏掉一張（漏掉的那張就是資料外洩的破口），
 -- 也方便之後新增表格時只要加進下面的分類清單即可。
@@ -1343,13 +1468,29 @@ DECLARE
     'linen_items', 'room_type_linen_defaults', 'ota_channels',
     'notification_recipient_groups', 'line_groups', 'line_group_members'
   ];
-  -- 營運類：客服日常要異動的資料，唯讀角色只能看
+  -- 營運類：客服日常要異動的資料，唯讀角色只能看。
+  -- 注意 booking_rooms／booking_room_nights／booking_linen_usage 也在這裡：編輯訂單時
+  -- 房間與布巾用量是「先全刪再插入」重寫的（OrderManagement 的 saveLinen），
+  -- 把它們的 DELETE 收緊會讓客服連存檔都失敗。
   operational_tables text[] := ARRAY[
     'bookings', 'booking_rooms', 'booking_room_nights', 'booking_linen_usage',
     'user_states', 'conversations', 'handover_logs',
     'custom_message_templates', 'consumables', 'consumable_spaces'
   ];
+  -- 刪除要另外收緊的表。DELETE 跟 INSERT/UPDATE 分開給：客服日常跑的是狀態機
+  -- （取消訂單是把 status 改成 cancelled），不是把紀錄移除。
+  --
+  -- 只有管理員能刪：訂單。刪掉會連帶 CASCADE 掉房間、房夜、布巾用量，
+  -- 而且是真的消失，不是取消。
+  delete_admin_only text[] := ARRAY['bookings'];
+  -- 只有主帳號能刪：客戶的身分與對話足跡。
+  -- 前端從來不刪這三張表（查證過：0 處），只有背景程式會動它們，
+  -- 而背景程式用 service role、本來就不受 RLS 管，所以收緊不影響任何現有功能。
+  -- 這條是為了讓「只有主帳號能清除客戶資料」真的成立——在此之前那只是
+  -- delete-customer-data function 裡的檢查，任何管理員直接打表格 API 就繞過去了。
+  delete_owner_only text[] := ARRAY['user_states', 'conversations', 'handover_logs'];
   every_table text[];
+  delete_check text;
 BEGIN
   every_table := admin_only || config_tables || operational_tables
                  || ARRAY['admin_profiles', 'mfa_login_attempts'];
@@ -1380,15 +1521,54 @@ BEGIN
       'CREATE POLICY "admin_can_write" ON public.%I FOR ALL USING (public.is_admin()) WITH CHECK (public.is_admin())', tbl);
   END LOOP;
 
+  -- 營運表不能用 FOR ALL：permissive 政策之間是 OR 關係，只要留著一條涵蓋 DELETE 的
+  -- can_operate() 政策，下面依角色收緊的 DELETE 就完全失效。所以動作要逐個寫開。
   FOREACH tbl IN ARRAY operational_tables LOOP
     IF to_regclass('public.' || quote_ident(tbl)) IS NULL THEN CONTINUE; END IF;
     EXECUTE format(
       'CREATE POLICY "approved_can_read" ON public.%I FOR SELECT USING (public.can_view())', tbl);
     EXECUTE format(
-      'CREATE POLICY "staff_can_write" ON public.%I FOR ALL USING (public.can_operate()) WITH CHECK (public.can_operate())', tbl);
+      'CREATE POLICY "staff_can_insert" ON public.%I FOR INSERT WITH CHECK (public.can_operate())', tbl);
+    EXECUTE format(
+      'CREATE POLICY "staff_can_update" ON public.%I FOR UPDATE USING (public.can_operate()) WITH CHECK (public.can_operate())', tbl);
+
+    IF tbl = ANY(delete_owner_only) THEN
+      delete_check := 'public.is_owner()';
+    ELSIF tbl = ANY(delete_admin_only) THEN
+      delete_check := 'public.is_admin()';
+    ELSE
+      delete_check := 'public.can_operate()';
+    END IF;
+    EXECUTE format(
+      'CREATE POLICY "delete_by_role" ON public.%I FOR DELETE USING (%s)', tbl, delete_check);
   END LOOP;
 END
 $rls$;
+
+-- ------------------------------------------------------------------
+-- 營運用設定的唯讀視圖。
+--
+-- settings 整張表是 admin_only（裡面有 OpenAI／Gemini 金鑰與 LINE 權杖），但客服在
+-- 「訂單管理」建立訂單時需要讀得到保證金與訂金比例，在「行事曆」需要讀得到旺季級距。
+-- 在此之前那些查詢對客服一律回空值，程式就靜靜落回寫死的預設（3000 元／30%）——
+-- 老闆改過金額的話，客服開出來的單金額是錯的，而且完全沒有錯誤訊息。
+--
+-- 解法是只把「不敏感的欄位」開一個視圖出來。視圖預設是 security definer，
+-- 讀取時不會套用 settings 自己的 RLS，所以要在 WHERE 自己補上門檻：
+-- can_view() 代表帳號已啟用且本次登入通過 2FA。
+-- 新增欄位到這裡之前請先確認它不是機密——這個視圖所有已登入角色都讀得到。
+-- ------------------------------------------------------------------
+CREATE OR REPLACE VIEW public.operational_settings AS
+  SELECT
+    s.id,
+    s.whole_house_security_deposit,
+    s.deposit_percent,
+    s.peak_season_weekday_tier
+  FROM public.settings s
+  WHERE public.can_view();
+
+REVOKE ALL ON public.operational_settings FROM anon;
+GRANT SELECT ON public.operational_settings TO authenticated;
 
 -- admin_profiles 要單獨處理，而且「讀自己那一列」刻意不要求 aal2：
 -- 使用者剛通過 Google 驗證、還沒綁 2FA 時是 aal1，前端必須讀得到自己的 status

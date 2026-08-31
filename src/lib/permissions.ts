@@ -98,3 +98,27 @@ export function defaultRouteFor(role: AdminRole | null | undefined): string {
 export function canWrite(role: AdminRole | null | undefined): boolean {
   return role === 'admin' || role === 'staff';
 }
+
+/**
+ * 可以永久刪除訂單嗎？（跟 RLS 的 bookings DELETE 政策 is_admin() 對應）
+ *
+ * 刻意跟 canWrite() 分開：客服日常處理的是狀態機——客人取消就把狀態改成「取消訂單」，
+ * 紀錄留著。這裡的刪除是把整筆連同房間、房夜、布巾用量一起消失（CASCADE），
+ * 救不回來，屬於管理員層級的動作。
+ */
+export function canDeleteBookings(role: AdminRole | null | undefined): boolean {
+  return role === 'admin';
+}
+
+/**
+ * 可以清除某位客戶在系統裡的所有資料嗎？只有主帳號。
+ * 主帳號不是 role 的值，是 settings.primary_admin_id 指到的那個人，所以要多帶一個參數。
+ * 跟 RLS 的 is_owner()、以及 delete-customer-data function 裡的檢查對應。
+ */
+export function canPurgeCustomerData(
+  role: AdminRole | null | undefined,
+  currentUserId: string | null | undefined,
+  primaryAdminId: string | null | undefined,
+): boolean {
+  return role === 'admin' && !!currentUserId && currentUserId === primaryAdminId;
+}
