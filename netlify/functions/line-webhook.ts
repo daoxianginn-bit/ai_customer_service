@@ -1886,23 +1886,48 @@ async function continueBookingFlow(
 
   // 系統模式不呼叫 AI，直接用純程式解析顧客回覆（省 token）；AI 模式維持原本的 LLM 擷取。
   const stepUsesSystemMode = flow.replyMode === 'system';
-  const extracted =
-    stepUsesSystemMode
-      ? extractStepFieldsWithoutAi(userMessage, currentStep.fields)
-      : await extractStepFields(settings, userMessage, currentStep.fields).catch((e: any) => {
-          console.error('[Booking] step extraction failed:', e.message);
-          return {} as Record<string, string>;
-        });
+  let extracted: Record<string, string> = {};
+  let usedRuleFallback = false;
+  if (stepUsesSystemMode) {
+    extracted = extractStepFieldsWithoutAi(userMessage, currentStep.fields);
+  } else {
+    try {
+      extracted = await extractStepFields(settings, userMessage, currentStep.fields);
+    } catch (e: any) {
+      // 跟一般對話那邊（handleEvent 的 AI 呼叫）同樣的考量：AI 掛了客服要知道，不能只留在
+      // function log 裡等客人截圖來問才發現。以前這裡只有 console.error，客人會一直被回
+      // 「還需要麻煩您補充：（全部欄位）」，怎麼填都過不了，客服端卻一點動靜都沒有。
+      console.error('[Booking] step extraction failed:', e.message);
+      for (const id of parseCsvKeywords(settings.agent_user_ids)) {
+        try {
+          await lineClient.pushMessage(id, {
+            type: 'text',
+            text: `⚠️ AI 呼叫失敗（訂房流程欄位擷取）：【${nickname || '匿名用戶'}】\n錯誤訊息：${e.message}\n已改用規則解析繼續流程，請檢查 AI 設定。`,
+          });
+        } catch {}
+      }
+    }
 
-  // system 模式「這一步只問一個自由文字欄位，就把整句話當答案」的捷徑（見
-  // extractStepFieldsWithoutAi）沒有任何格式檢查，什麼都會被接受，包含圖文選單按鈕觸發的固定
-  // 文字——會把按鈕文字誤存成姓名/電話等欄位的答案，還悄悄推進到下一步，客人完全看不出哪裡錯了。
+    // AI 一個欄位都沒抓到（呼叫失敗、回了非 JSON、服務中斷）就退回規則解析。客人照範本
+    // 逐行填「入住日期：2/2」這種格式時，規則解析抓得很準，不該因為 AI 出狀況就整個卡住。
+    // 只在「完全沒抓到」時才退回，AI 有抓到任何東西就全信 AI——規則解析對自由句子偶爾會誤判
+    // （例如把「4人房」的 4 當成人數），AI 正常運作時不該被它干擾。
+    if (Object.keys(extracted).length === 0) {
+      extracted = extractStepFieldsWithoutAi(userMessage, currentStep.fields);
+      usedRuleFallback = Object.keys(extracted).length > 0;
+    }
+  }
+
+  // 「這一步只問一個自由文字欄位，就把整句話當答案」的捷徑（見 extractStepFieldsWithoutAi）
+  // 沒有任何格式檢查，什麼都會被接受，包含圖文選單按鈕觸發的固定文字——會把按鈕文字誤存成
+  // 姓名/電話等欄位的答案，還悄悄推進到下一步，客人完全看不出哪裡錯了。
   // 這裡補一道防線：這句話如果剛好對到「別的」流程的觸發字，就不當作這一欄的答案，讓它照下面
   // missingFields 的邏輯判斷要不要顯示別的流程的自動回覆。順便快取起來，missingFields 那邊
-  // 不用再查一次。
+  // 不用再查一次。這個捷徑只有規則解析會走（system 模式或 AI 模式退回規則時），AI 自己抓的
+  // 不套這道。
   let interruptingFlow: FlowDef | undefined;
   const soleFreeTextKey =
-    stepUsesSystemMode && currentStep.fields.length === 1 && !currentStep.fields[0].quote_field
+    (stepUsesSystemMode || usedRuleFallback) && currentStep.fields.length === 1 && !currentStep.fields[0].quote_field
       ? currentStep.fields[0].key
       : null;
   if (soleFreeTextKey && extracted[soleFreeTextKey] !== undefined) {
