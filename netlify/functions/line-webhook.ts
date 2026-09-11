@@ -3657,6 +3657,25 @@ function bookingSummaryBlock(recentBooking: any | null | undefined): string {
   return `這位客人最近一筆詢問／訂單資料（僅供回答問題時參考背景，不代表要重新確認或重新計價）：${parts}\n\n`;
 }
 
+// OpenAI Responses API（GPT-5 系列走這個）的回應裡，文字藏在 output 陣列的 message 項目底下：
+//   { output: [ { type: 'reasoning', ... }, { type: 'message', content: [ { type: 'output_text', text: '...' } ] } ] }
+// 官方 SDK 會另外算一個 output_text 方便取用，但我們是直接 fetch，原始 JSON 沒有這個欄位。
+// 以前寫成 result.output?.text——output 是陣列、.text 永遠 undefined，等於每次都回空字串。
+// 這裡把所有 message 項目裡的 output_text 串起來；有 refusal 的話帶出來，至少錯誤訊息看得懂。
+export function extractResponsesApiText(result: any): string {
+  if (typeof result?.output_text === 'string' && result.output_text.trim()) return result.output_text.trim();
+  const items: any[] = Array.isArray(result?.output) ? result.output : [];
+  const texts: string[] = [];
+  for (const item of items) {
+    if (item?.type !== 'message' || !Array.isArray(item.content)) continue;
+    for (const part of item.content) {
+      if (part?.type === 'output_text' && typeof part.text === 'string') texts.push(part.text);
+      else if (part?.type === 'refusal' && typeof part.refusal === 'string') texts.push(`[refusal] ${part.refusal}`);
+    }
+  }
+  return texts.join('\n').trim();
+}
+
 async function callGPT(
   settings: any,
   currentMessage: string,
@@ -3699,7 +3718,12 @@ async function callGPT(
     });
     const result: any = await res.json();
     if (!res.ok || result.error) throw new Error(result.error?.message || res.statusText);
-    return { text: result.output?.text || '' };
+    const text = extractResponsesApiText(result);
+    // 有回應但抽不出文字，代表回應格式跟預期不同（API 改版、或被安全機制擋下只回 refusal）。
+    // 以前這裡默默回空字串：問答就整則不回、欄位擷取全空、客人被回「全部欄位都要補充」。
+    // 現在當成錯誤丟出去，客服會收到「AI 呼叫失敗」通知、流程退回規則版。
+    if (!text) throw new Error(`Responses API 回應裡沒有文字（status=${result.status || '?'}，output 項目：${(result.output || []).map((o: any) => o.type).join(',') || '無'}）`);
+    return { text };
   }
 
   const openai = new OpenAI({ apiKey: settings.gpt_api_key });
