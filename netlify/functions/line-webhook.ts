@@ -3711,6 +3711,14 @@ async function callGPT(
       reasoning: { effort: settings.gpt_reasoning_effort || 'none' },
       text: { verbosity: settings.gpt_verbosity || 'medium' }
     };
+    // 後台的 Max Tokens 以前只有 chat/completions 那條路有用到，GPT-5 系列這條路直接略過，
+    // 設定頁卻照樣顯示這個欄位。Responses API 對應的參數是 max_output_tokens。
+    // 注意它「包含推理 token」：推理力道開 medium 以上時，推理本身就可能吃掉大半額度，
+    // 剩不到位置給回答（回應 status 會是 incomplete，上面 extractResponsesApiText 拿到空字串
+    // 就會丟錯誤、錯誤訊息帶 status）。設定頁有提示要放寬。
+    // Temperature 刻意不帶：GPT-5 推理模型不接受這個參數，帶了會 400。
+    const maxOutput = Number(settings.gpt_max_tokens);
+    if (Number.isFinite(maxOutput) && maxOutput > 0) body.max_output_tokens = Math.round(maxOutput);
     const res = await fetch('https://api.openai.com/v1/responses', {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${settings.gpt_api_key}`, 'Content-Type': 'application/json' },

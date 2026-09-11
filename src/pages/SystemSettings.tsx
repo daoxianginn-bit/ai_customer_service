@@ -127,16 +127,28 @@ export default function SystemSettings() {
                 <label className="block text-sm font-medium text-gray-700 mb-1">模型名稱</label>
                 <input type="text" name={settings.active_ai === 'gpt' ? 'gpt_model_name' : 'gemini_model_name'} value={settings.active_ai === 'gpt' ? (settings.gpt_model_name || '') : (settings.gemini_model_name || '')} onChange={handleChange} className="w-full px-4 py-2 border rounded-lg" placeholder="例如: gpt-4.1-mini, gpt-5.2" />
               </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Temperature</label>
-                  <input type="number" step="0.1" name={settings.active_ai === 'gpt' ? 'gpt_temperature' : 'gemini_temperature'} value={settings.active_ai === 'gpt' ? settings.gpt_temperature : settings.gemini_temperature} onChange={handleChange} className="w-full px-4 py-2 border rounded-lg" />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Max Tokens</label>
-                  <input type="number" name={settings.active_ai === 'gpt' ? 'gpt_max_tokens' : 'gemini_max_tokens'} value={settings.active_ai === 'gpt' ? settings.gpt_max_tokens : settings.gemini_max_tokens} onChange={handleChange} className="w-full px-4 py-2 border rounded-lg" />
-                </div>
-              </div>
+              {/* GPT-5 系列走 Responses API：Temperature 不適用（推理模型不接受，帶了會被拒），
+                  Max Tokens 有套用但包含推理 token。這裡照實標示，免得使用者調了沒反應以為壞掉。 */}
+              {(() => {
+                const isGpt5 = settings.active_ai === 'gpt' && !!settings.gpt_model_name?.includes('gpt-5');
+                return (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        Temperature{isGpt5 && <span className="ml-2 text-xs font-normal text-gray-400">GPT-5 系列不適用</span>}
+                      </label>
+                      <input type="number" step="0.1" disabled={isGpt5} name={settings.active_ai === 'gpt' ? 'gpt_temperature' : 'gemini_temperature'} value={settings.active_ai === 'gpt' ? settings.gpt_temperature : settings.gemini_temperature} onChange={handleChange} className="w-full px-4 py-2 border rounded-lg disabled:bg-gray-50 disabled:text-gray-400" />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Max Tokens</label>
+                      <input type="number" name={settings.active_ai === 'gpt' ? 'gpt_max_tokens' : 'gemini_max_tokens'} value={settings.active_ai === 'gpt' ? settings.gpt_max_tokens : settings.gemini_max_tokens} onChange={handleChange} className="w-full px-4 py-2 border rounded-lg" />
+                      {isGpt5 && (
+                        <p className="text-xs text-gray-400 mt-1">GPT-5 系列這個上限<strong>包含推理 token</strong>；推理力道設 Medium 以上時建議 2000 以上，否則回答可能被截斷。</p>
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
 
               {settings.active_ai === 'gemini' && settings.gemini_model_name?.includes('gemini-3') && (
                 <div className="sm:col-span-2 p-4 bg-purple-50 rounded-lg border border-purple-100">
