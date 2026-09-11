@@ -97,6 +97,10 @@ CREATE TABLE IF NOT EXISTS public.conversations (
 );
 CREATE INDEX IF NOT EXISTS idx_conversations_user ON public.conversations(line_user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_conversations_created_at ON public.conversations(created_at);
+-- 客人每一則訊息的「處理過程診斷」：bot 走了哪條路（進流程／轉真人／AI 問答／被忽略）、
+-- 從訊息裡擷取到哪些欄位、還缺什麼、AI 回了什麼原文、哪裡出錯。只寫在 inbound 那一列，
+-- 後台對話紀錄展開就能直接看出「bot 為什麼這樣回」，不用再去翻 Netlify 的 function log。
+ALTER TABLE public.conversations ADD COLUMN IF NOT EXISTS meta JSONB;
 
 -- 7. 管理員個人資料（銜接 Supabase Auth 帳號，之後角色權限掛在這）
 CREATE TABLE IF NOT EXISTS public.admin_profiles (

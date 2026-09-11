@@ -1,4 +1,5 @@
 import { Handler } from '@netlify/functions';
+import { AsyncLocalStorage } from 'async_hooks';
 import { Client, validateSignature, WebhookEvent } from '@line/bot-sdk';
 import { createClient } from '@supabase/supabase-js';
 import OpenAI from 'openai';
@@ -61,6 +62,66 @@ export async function flushPendingWrites() {
 // 一定要在 handler 解析出頻道後、開始處理事件前設定。
 let activeChannelId: string | null = null;
 
+// ------------------------------------------------------------------------
+// 每一則客人訊息的「處理過程診斷」（turn trace）
+//
+// 客人一句話進來，bot 可能走十幾條路：被忽略關鍵字擋掉、轉真人、進訂房流程的某一步、
+// 從訊息裡抓欄位、叫 AI 問答……最後回了什麼、或為什麼沒回。以前這些只在 Netlify 的
+// function log 裡，客人截圖來問時根本對不上是哪一次呼叫。現在整個決策過程跟著那則
+// inbound 訊息一起寫進 conversations.meta，後台對話紀錄展開就看得到。
+//
+// 用 AsyncLocalStorage 而不是把 trace 物件一路傳進二十幾個函式：一次 webhook 呼叫會
+// 平行處理多位客人的事件，module 變數會互相污染，AsyncLocalStorage 是 per-async-context
+// 的，每個事件各自一份。
+//
+// inbound 那一列刻意延到整個 turn 結束才寫（見 runTurn），這樣 meta 才是完整的；
+// created_at 用收到訊息當下的時間，排序不會跑到 bot 回覆後面。
+// ------------------------------------------------------------------------
+interface TurnTrace {
+  startedAt: number;
+  steps: string[];
+  data: Record<string, unknown>;
+  errors: string[];
+  inbound: Record<string, unknown> | null;
+}
+const turnTraceStore = new AsyncLocalStorage<TurnTrace>();
+
+function traceStep(message: string) {
+  turnTraceStore.getStore()?.steps.push(message);
+}
+function traceData(key: string, value: unknown) {
+  const t = turnTraceStore.getStore();
+  if (t) t.data[key] = value;
+}
+function traceError(message: string) {
+  turnTraceStore.getStore()?.errors.push(message);
+}
+// AI 原文可能很長（知識庫問答一次幾百字），留頭尾夠判讀就好，別把整篇塞進每一列。
+function clipForTrace(text: string, max = 1500): string {
+  return text.length > max ? `${text.slice(0, max)}…（共 ${text.length} 字，已截斷）` : text;
+}
+
+async function runTurn(fn: () => Promise<void>): Promise<void> {
+  const trace: TurnTrace = { startedAt: Date.now(), steps: [], data: {}, errors: [], inbound: null };
+  try {
+    await turnTraceStore.run(trace, fn);
+  } catch (e: any) {
+    trace.errors.push(`未攔截的例外：${e?.message || e}`);
+    throw e;
+  } finally {
+    if (trace.inbound) {
+      const meta = {
+        elapsed_ms: Date.now() - trace.startedAt,
+        steps: trace.steps,
+        errors: trace.errors,
+        ...trace.data,
+      };
+      const row = { ...trace.inbound, meta: JSON.parse(JSON.stringify(meta)) };
+      deferWrite('conversations.insert(inbound)', () => supabase.from('conversations').insert(row));
+    }
+  }
+}
+
 function logConversation(
   userId: string,
   nickname: string | null,
@@ -69,9 +130,14 @@ function logConversation(
   source: string,
   channelId: string | null = activeChannelId
 ) {
-  deferWrite('conversations.insert', () =>
-    supabase.from('conversations').insert({ channel_id: channelId, line_user_id: userId, nickname, direction, content, source })
-  );
+  const row = { channel_id: channelId, line_user_id: userId, nickname, direction, content, source };
+  const trace = turnTraceStore.getStore();
+  if (direction === 'inbound' && trace) {
+    // 先扣住，等 turn 結束帶著完整的 meta 一起寫（見 runTurn）
+    trace.inbound = { ...row, created_at: new Date().toISOString() };
+    return;
+  }
+  deferWrite('conversations.insert', () => supabase.from('conversations').insert(row));
 }
 
 function parseCsvKeywords(raw: string | null | undefined): string[] {
@@ -208,7 +274,7 @@ const rawHandler: Handler = async (event) => {
   await Promise.allSettled(
     Array.from(eventsByUser.values()).map(async (userEvents) => {
       for (const lineEvent of userEvents) {
-        await processLineEvent(lineEvent, settings, lineClient, channel);
+        await runTurn(() => processLineEvent(lineEvent, settings, lineClient, channel));
       }
     })
   );
@@ -406,6 +472,7 @@ async function processLineEvent(
     // AI，只留一筆對話紀錄。給不該被系統/AI 接住的雜訊訊息用（例如特定貼圖轉出來的固定文字、
     // 測試用字串），跟上面「轉真人客服」的關鍵字用途相反，兩者互相獨立、不要合併判斷。
     if (!isImageMessage && matchKeyword(userMessage, parseCsvKeywords(settings.ai_ignore_keywords))) {
+      traceStep('命中「AI 忽略關鍵字」，整則略過，不回覆');
       return;
     }
 
@@ -413,6 +480,7 @@ async function processLineEvent(
     // 這兩種帳號的用途是「接收訂單完成統計」，對方回一句「已備貨」時我們要收得到，
     // 但不該讓 AI 拿民宿的知識庫去回答廠商，那只會答非所問。
     if (!isFullServiceRole(channel.role)) {
+      traceStep(`頻道角色是「${channelRoleLabel(channel.role)}」，不走訂房流程與知識庫問答，只轉知客服`);
       await handleNonCustomerChannelMessage(lineClient, lineEvent, settings, channel, userId, nickname, userMessage);
       return;
     }
@@ -424,6 +492,7 @@ async function processLineEvent(
 
     if (matchedKeyword) {
       console.log(`[Handover] Triggered by keyword: ${matchedKeyword}`);
+      traceStep(`命中轉真人關鍵字「${matchedKeyword}」，通知客服並回制式訊息`);
       try { const p = await lineClient.getProfile(userId); nickname = p.displayName; } catch (e) {}
 
       // 刻意不設 is_human_mode：顧客喊真人客服只是「請人來看一下」，不代表要把 AI 關掉。
@@ -458,6 +527,7 @@ async function processLineEvent(
       const lastInteraction = new Date(userState.last_human_interaction).getTime();
       const timeoutMs = (settings.handover_timeout_minutes || 30) * 60 * 1000;
       if (new Date().getTime() - lastInteraction < timeoutMs) {
+        traceStep('真人模式進行中，AI 不回覆（只延後逾時計時）');
         // 客人還在互動就延後計時——真人客服是直接在 LINE 官方帳號 App 裡回覆客人，這個系統
         // 看不到真人本人有沒有在處理，只能靠客人是否還在傳訊息判斷「這通還沒結束」。
         await supabase.from('user_states').update({ last_human_interaction: new Date().toISOString() })
@@ -465,6 +535,7 @@ async function processLineEvent(
         return;
       }
 
+      traceStep('真人模式已逾時，自動切回 AI');
       await supabase.from('user_states').update({ is_human_mode: false })
         .eq('channel_id', channel.id).eq('line_user_id', userId);
       await supabase
@@ -492,6 +563,7 @@ async function processLineEvent(
       if (userState?.booking_session) {
         const claimed = await acquireFlowLock(channel.id, userId);
         if (!claimed) {
+          traceStep('上一則訊息還在處理中（流程鎖被占用），請客人稍後再傳');
           const replyText = '不好意思，您上一句話還在為您處理中，麻煩稍等幾秒後再重新傳一次，謝謝您 🙏';
           await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText }).catch(() => {});
           await logConversation(userId, nickname, 'outbound', replyText, 'system');
@@ -505,30 +577,38 @@ async function processLineEvent(
         const existingSession = loadBookingSession(effectiveUserState, settings);
 
         if (existingSession) {
+          traceStep(`有進行中的訂房流程 session（階段 ${existingSession.phase}，第 ${existingSession.stepIndex + 1} 步），交給流程處理`);
           let handled = true;
           try {
             handled = await continueBookingFlow(lineClient, lineEvent, settings, userId, nickname, userMessage, existingSession, isImageMessage);
           } catch (e: any) {
             console.error('[Booking] continue flow failed:', e.message);
+            traceError(`訂房流程處理失敗：${e.message}`);
           }
           // handled=false 代表流程判斷這則訊息不歸它管，直接往下走一般 AI／知識庫問答照實回答。
           // 這裡刻意不再比對觸發關鍵字、也不能掉進下面那段「逾時」判斷——session 明明還活著，
           // 被那段清掉的話顧客之後真的要回答流程時就接不住了。
           if (handled) return;
+          traceStep('流程判斷這則訊息不歸它管，往下交給一般 AI 問答');
         } else {
           const activeFlows = await fetchActiveFlows();
 
           // 先試「整組完整訂房資訊」，再比對觸發關鍵字——順序不能顛倒。客人把表單複製填好貼回來時，
           // 那段文字往往連提示語（含觸發字）都一起貼進去了；先比對關鍵字的話會直接開一個全新流程、
           // 送出第一步的問句，把客人已經填好的答案整組丟掉，等於逼他再一步一步重答一次。
-          if (!isImageMessage && (await tryStartQuoteFromCompleteInfo(lineClient, lineEvent, settings, userId, nickname, userMessage, activeFlows))) return;
+          if (!isImageMessage && (await tryStartQuoteFromCompleteInfo(lineClient, lineEvent, settings, userId, nickname, userMessage, activeFlows))) {
+            traceStep('訊息裡已含整組訂房資訊，跳過逐步問答直接報價');
+            return;
+          }
 
           const matchedFlow = activeFlows.find((f) => matchTriggerRules(userMessage, f.triggerRules));
           if (matchedFlow) {
+            traceStep(`命中流程「${matchedFlow.name}」的觸發規則，開始新流程（${matchedFlow.replyMode === 'system' ? '系統' : 'AI'}模式）`);
             try {
               await startBookingFlow(lineClient, lineEvent, settings, userId, nickname, matchedFlow);
             } catch (e: any) {
               console.error('[Booking] start flow failed:', e.message);
+              traceError(`開始流程失敗：${e.message}`);
             }
             return;
           }
@@ -536,6 +616,7 @@ async function processLineEvent(
           // session 曾經存在、但已經逾時被 loadBookingSession() 判定過期（不是這位客人從沒問過）：
           // 不能悄悄把這句回覆丟給下面的 AI/知識庫，客人會覺得系統在答非所問，要明確告知重新開始。
           if (effectiveUserState?.booking_session) {
+            traceStep('先前的訂房 session 已逾時，清除並請客人重新開始');
             await clearBookingSession(userId);
             const replyText = '不好意思，這次詢問已逾時，請重新輸入一次，謝謝您 🙏';
             await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
@@ -549,12 +630,16 @@ async function processLineEvent(
     }
 
     // 5. 呼叫 AI
-    if (!settings.is_ai_enabled) return;
+    if (!settings.is_ai_enabled) {
+      traceStep('AI 功能已關閉（系統設定），不回覆');
+      return;
+    }
 
     // 圖片走到這裡代表它不屬於任何進行中的訂房流程（例如顧客隔了很久才補傳轉帳截圖、
     // session 已經逾時）。userMessage 只是「[圖片]」這個佔位字串，丟給知識庫問答只會得到
     // 一句莫名其妙的回覆，所以改成轉給真人處理——這種圖十之八九是匯款憑證，不能默默吞掉。
     if (isImageMessage) {
+      traceStep('圖片訊息且不在任何訂房流程中，轉請客服人工確認');
       const replyText = '已收到您傳送的圖片，我們會請專人為您確認，謝謝您的耐心等候 🙏';
       await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
       await logConversation(userId, nickname, 'outbound', replyText, 'system');
@@ -575,14 +660,19 @@ async function processLineEvent(
     ]);
     const kbItems = kbItemsData || [];
 
+    traceStep(`一般 AI 問答（${settings.active_ai === 'gpt' ? 'GPT' : 'Gemini'}，知識庫 ${kbItems.length} 條，帶入近期對話 ${conversationContext.history?.length ?? 0} 則）`);
     let aiResult = '';
+    const aiStartedAt = Date.now();
     try {
       if (settings.active_ai === 'gpt') {
         aiResult = (await callGPT(settings, userMessage, kbItems, undefined, conversationContext.history, conversationContext.recentBooking)).text;
       } else {
         aiResult = await callGemini(settings, userMessage, kbItems, undefined, conversationContext.history, conversationContext.recentBooking);
       }
+      traceData('ai_chat', { provider: settings.active_ai, latency_ms: Date.now() - aiStartedAt, reply: clipForTrace(aiResult) });
     } catch (e: any) {
+      traceData('ai_chat', { provider: settings.active_ai, latency_ms: Date.now() - aiStartedAt, error: e.message });
+      traceError(`AI 呼叫失敗：${e.message}`);
       // 不能把原始錯誤訊息（API 金鑰失效、額度用完…）直接回給客人，客人看了只會一頭霧水；
       // 客服也不會自動知道 AI 掛了，所以額外推播通知，不能只靠客人截圖來問才發現。
       console.error('[AI] call failed:', e.message);
@@ -600,6 +690,7 @@ async function processLineEvent(
     }
   } catch (e: any) {
     console.error(`[Event] Unhandled error processing event ${eventId}:`, e.message);
+    traceError(`處理過程發生未預期的錯誤：${e.message}`);
   }
 }
 
@@ -1030,12 +1121,22 @@ async function extractStepFields(settings: any, userMessage: string, fields: Flo
   const todayIso = new Date().toISOString().slice(0, 10);
   const prompt = buildStepExtractionPrompt(todayIso, fields);
   let raw = '';
-  if (settings.active_ai === 'gpt') {
-    raw = (await callGPT(settings, userMessage, [], prompt)).text;
-  } else {
-    raw = await callGemini(settings, userMessage, [], prompt);
+  const startedAt = Date.now();
+  try {
+    if (settings.active_ai === 'gpt') {
+      raw = (await callGPT(settings, userMessage, [], prompt)).text;
+    } else {
+      raw = await callGemini(settings, userMessage, [], prompt);
+    }
+  } catch (e: any) {
+    traceData('ai_extract', { provider: settings.active_ai, latency_ms: Date.now() - startedAt, error: e.message });
+    throw e;
   }
-  return parseStepExtraction(raw, fields);
+  const parsed = parseStepExtraction(raw, fields);
+  // AI 原文一定要留：「回了非 JSON」跟「JSON 裡欄位名對不上」在結果上都是空物件，
+  // 只看 parsed 分不出來是哪一種，要看原文才知道該修提示詞還是修欄位設定。
+  traceData('ai_extract', { provider: settings.active_ai, latency_ms: Date.now() - startedAt, raw: clipForTrace(raw), parsed });
+  return parsed;
 }
 
 // ------------------------------------------------------------------------
@@ -1866,10 +1967,12 @@ async function continueBookingFlow(
   isImage = false
 ): Promise<boolean> {
   if (session.phase === 'awaiting_confirmation') {
+    traceStep('等待客人確認報價（是／否）');
     await handleBookingConfirmation(lineClient, lineEvent, settings, userId, nickname, userMessage, session);
     return true;
   }
   if (session.phase === 'awaiting_remittance') {
+    traceStep('等待客人回報匯款');
     return handleRemittanceReport(lineClient, lineEvent, settings, userId, nickname, userMessage, session, isImage);
   }
 
@@ -1883,6 +1986,15 @@ async function continueBookingFlow(
     await handoverBrokenFlowSession(lineClient, lineEvent, settings, userId, nickname);
     return true;
   }
+
+  traceData('flow', {
+    name: flow.name,
+    type: flow.flowType,
+    mode: flow.replyMode,
+    step: `${session.stepIndex + 1} / ${flow.steps.length}`,
+    fields: currentStep.fields.map((f) => `${f.label}${f.quote_field ? `（${f.quote_field}）` : ''}`),
+    collected_before: session.collected,
+  });
 
   // 系統模式不呼叫 AI，直接用純程式解析顧客回覆（省 token）；AI 模式維持原本的 LLM 擷取。
   const stepUsesSystemMode = flow.replyMode === 'system';
@@ -1915,8 +2027,10 @@ async function continueBookingFlow(
     if (Object.keys(extracted).length === 0) {
       extracted = extractStepFieldsWithoutAi(userMessage, currentStep.fields);
       usedRuleFallback = Object.keys(extracted).length > 0;
+      traceStep(usedRuleFallback ? 'AI 一個欄位都沒抓到，改用規則解析抓到了' : 'AI 與規則解析都沒抓到任何欄位');
     }
   }
+  if (stepUsesSystemMode) traceStep('系統模式：不呼叫 AI，用規則解析');
 
   // 「這一步只問一個自由文字欄位，就把整句話當答案」的捷徑（見 extractStepFieldsWithoutAi）
   // 沒有任何格式檢查，什麼都會被接受，包含圖文選單按鈕觸發的固定文字——會把按鈕文字誤存成
@@ -1932,7 +2046,10 @@ async function continueBookingFlow(
       : null;
   if (soleFreeTextKey && extracted[soleFreeTextKey] !== undefined) {
     interruptingFlow = (await fetchActiveFlows()).find((f) => f.id !== flow.id && matchTriggerRules(userMessage, f.triggerRules));
-    if (interruptingFlow) delete extracted[soleFreeTextKey];
+    if (interruptingFlow) {
+      traceStep(`整句本來會當成「${currentStep.fields[0].label}」的答案，但它對到流程「${interruptingFlow.name}」的觸發字，不採用`);
+      delete extracted[soleFreeTextKey];
+    }
   }
 
   // 格式不符的欄位當作沒收集到（從 extracted 移除，不會寫進 collected），跟「完全沒提到」
@@ -1951,8 +2068,10 @@ async function continueBookingFlow(
   }
 
   const collected = { ...session.collected, ...extracted };
+  traceData('extracted', extracted);
 
   if (invalidFields.length > 0) {
+    traceStep(`格式錯誤：${invalidFields.map((f) => f.label).join('、')}，請客人重填`);
     await saveBookingSession(userId, { ...session, collected });
     const replyText = `${invalidFields.map((f) => f.label).join('、')}格式錯誤，請重新輸入`;
     await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
@@ -1971,12 +2090,14 @@ async function continueBookingFlow(
     interruptingFlow ??= (await fetchActiveFlows()).find((f) => f.id !== flow.id && matchTriggerRules(userMessage, f.triggerRules));
     const interruptingFirstStep = interruptingFlow?.steps.find((s) => s.step_order === 1);
     if (interruptingFirstStep) {
+      traceStep(`這一步沒抓到欄位，但訊息對到流程「${interruptingFlow!.name}」的觸發字，改顯示那個流程的第一步（不動目前 session）`);
       const replyText = await renderFlowMessage(interruptingFirstStep.message_template, settings, userId, nickname, null);
       await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
       await logConversation(userId, nickname, 'outbound', replyText, 'system');
       return true;
     }
 
+    traceStep(`還缺：${missingFields.map((f) => f.label).join('、')}，再問一次`);
     await saveBookingSession(userId, { ...session, collected });
     const replyText = `還需要麻煩您補充：${missingFields.map((f) => f.label).join('、')}`;
     await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
@@ -1992,6 +2113,7 @@ async function continueBookingFlow(
   const nextStepOrder = session.stepIndex + 2;
   const nextStep = flow.steps.find((s) => s.step_order === nextStepOrder);
   if (nextStep) {
+    traceStep(`這一步欄位齊全，進到第 ${nextStepOrder} 步`);
     await saveBookingSession(userId, { ...session, stepIndex: session.stepIndex + 1, collected });
     const nextMessage = await renderFlowMessage(nextStep.message_template, settings, userId, nickname, session.bookingId);
     await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: nextMessage });
@@ -1999,6 +2121,7 @@ async function continueBookingFlow(
     return true;
   }
 
+  traceStep(`所有步驟完成，進入${flow.flowType === 'collect' ? '收集完成' : flow.flowType === 'query' ? '查詢' : '算價／報價'}階段`);
   if (flow.flowType === 'collect') {
     await finishCollectFlow(lineClient, lineEvent, settings, userId, nickname, flow, collected);
     return true;

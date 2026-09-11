@@ -5,6 +5,16 @@ import { PageHeader, Button, EmptyState, StatusBadge, Pagination, ResponsiveTabl
 
 type Tab = 'active' | 'history' | 'conversations';
 
+// 客人訊息的處理過程診斷，由 line-webhook 寫在 inbound 那一列（見 supabase_schema.sql 的
+// conversations.meta 說明）。steps／errors／elapsed_ms 一定有；其餘鍵值依走到哪條路而定：
+// flow（進了哪個流程哪一步）、extracted（抓到的欄位）、ai_extract／ai_chat（AI 原文與耗時）。
+type TurnMeta = {
+  elapsed_ms: number;
+  steps: string[];
+  errors: string[];
+  [key: string]: unknown;
+};
+
 type ConversationRow = {
   id: string;
   line_user_id: string;
@@ -13,6 +23,7 @@ type ConversationRow = {
   content: string;
   source: string;
   created_at: string;
+  meta?: TurnMeta | null;
 };
 
 type ConvUser = {
@@ -28,6 +39,99 @@ const sourceLabel: Record<string, string> = {
   human_agent: '真人客服',
   system: '系統',
 };
+
+// meta 裡各區塊的中文標題。沒列在這裡的鍵值也會顯示（用原始鍵名），
+// 之後 webhook 多記什麼都不用改這邊。
+const metaSectionLabel: Record<string, string> = {
+  flow: '訂房流程',
+  extracted: '這句抓到的欄位',
+  ai_extract: 'AI 欄位擷取',
+  ai_chat: 'AI 問答',
+};
+
+function MetaValue({ value }: { value: unknown }) {
+  if (value === null || value === undefined || value === '') return <span className="text-gray-400">（空）</span>;
+  if (typeof value === 'string') return <span className="whitespace-pre-wrap break-words">{value}</span>;
+  if (typeof value === 'number' || typeof value === 'boolean') return <span className="font-mono">{String(value)}</span>;
+  if (Array.isArray(value)) {
+    if (value.length === 0) return <span className="text-gray-400">（無）</span>;
+    return <span>{value.map((v) => (typeof v === 'object' ? JSON.stringify(v) : String(v))).join('、')}</span>;
+  }
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length === 0) return <span className="text-gray-400">（無）</span>;
+  return (
+    <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5">
+      {entries.map(([k, v]) => (
+        <div key={k} className="contents">
+          <dt className="text-gray-500 whitespace-nowrap">{k}</dt>
+          <dd className="min-w-0">
+            {/* AI 原文另外用等寬字＋可捲動區塊，長的 JSON 才看得清楚 */}
+            {k === 'raw' || k === 'reply' ? (
+              <pre className="font-mono text-[11px] bg-white border border-gray-200 rounded p-2 max-h-40 overflow-auto whitespace-pre-wrap break-words">{String(v)}</pre>
+            ) : (
+              <MetaValue value={v} />
+            )}
+          </dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+// 客人訊息底下的「處理過程」摺疊區。預設收起，只露出一行摘要（耗時、有沒有錯誤），
+// 點開才看細節——對話紀錄的主角還是對話本身，診斷是要查問題時才需要的。
+function TurnDiagnostics({ meta }: { meta: TurnMeta }) {
+  const [open, setOpen] = useState(false);
+  const hasError = meta.errors?.length > 0;
+  const lastStep = meta.steps?.[meta.steps.length - 1];
+  const otherKeys = Object.keys(meta).filter((k) => !['elapsed_ms', 'steps', 'errors'].includes(k));
+
+  return (
+    <div className={`mt-1 max-w-[85%] text-xs rounded-lg border ${hasError ? 'border-red-200 bg-red-50' : 'border-gray-200 bg-gray-50'}`}>
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className={`w-full text-left px-2.5 py-1.5 flex items-center gap-2 ${hasError ? 'text-red-700' : 'text-gray-600'}`}
+      >
+        <span className="font-medium">{open ? '▾' : '▸'} 處理過程</span>
+        <span className="text-[10px] text-gray-400">{meta.elapsed_ms} ms</span>
+        {hasError && <span className="text-[10px] bg-red-600 text-white px-1.5 rounded">{meta.errors.length} 個錯誤</span>}
+        {!open && lastStep && <span className="truncate text-gray-500 ml-auto">{lastStep}</span>}
+      </button>
+
+      {open && (
+        <div className="px-2.5 pb-2.5 space-y-2 text-gray-700">
+          {hasError && (
+            <div>
+              <p className="font-semibold text-red-700 mb-0.5">錯誤</p>
+              <ul className="list-disc pl-4 text-red-700 space-y-0.5">
+                {meta.errors.map((e, i) => <li key={i} className="break-words">{e}</li>)}
+              </ul>
+            </div>
+          )}
+          <div>
+            <p className="font-semibold mb-0.5">決策過程</p>
+            {meta.steps?.length ? (
+              <ol className="list-decimal pl-4 space-y-0.5">
+                {meta.steps.map((s, i) => <li key={i} className="break-words">{s}</li>)}
+              </ol>
+            ) : (
+              <p className="text-gray-400">（沒有記錄到任何步驟——可能在前置檢查就結束了）</p>
+            )}
+          </div>
+          {otherKeys.map((k) => (
+            <div key={k}>
+              <p className="font-semibold mb-0.5">{metaSectionLabel[k] || k}</p>
+              <div className="bg-white/70 border border-gray-200 rounded p-2">
+                <MetaValue value={meta[k]} />
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 const PAGE_SIZE = 20;
 
@@ -300,13 +404,14 @@ export default function AiServiceCenter() {
                   ) : (
                     <div className="space-y-2 max-h-[60vh] overflow-y-auto">
                       {[...selectedConvMessages].reverse().map((row) => (
-                        <div key={row.id} className={`flex ${row.direction === 'inbound' ? 'justify-start' : 'justify-end'}`}>
+                        <div key={row.id} className={`flex flex-col ${row.direction === 'inbound' ? 'items-start' : 'items-end'}`}>
                           <div className={`max-w-[85%] rounded-2xl px-3 py-2 text-sm ${row.direction === 'inbound' ? 'bg-gray-100 text-gray-800 rounded-bl-sm' : 'bg-green-600 text-white rounded-br-sm'}`}>
                             <p className="whitespace-pre-wrap break-words">{row.content}</p>
                             <p className={`text-[10px] mt-1 flex items-center gap-1 ${row.direction === 'inbound' ? 'text-gray-400' : 'text-green-100'}`}>
                               {sourceLabel[row.source] || row.source} · {new Date(row.created_at).toLocaleString('zh-TW')}
                             </p>
                           </div>
+                          {row.direction === 'inbound' && row.meta && <TurnDiagnostics meta={row.meta} />}
                         </div>
                       ))}
                     </div>
