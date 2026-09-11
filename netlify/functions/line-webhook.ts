@@ -1272,6 +1272,21 @@ function scanLabelledNumber(message: string, label: string): string | undefined 
   return Number.isFinite(n) && n >= 0 ? String(n) : undefined;
 }
 
+// 只剩一個欄位沒答時，客人的整句話能不能直接當那一欄的答案（呼叫端見 continueBookingFlow）。
+// 數字類（人數、房數）：整句就是一個數字，允許尾巴帶「間」「人」這種單位。
+// 自由文字：整句照收。
+// 日期與包棟本來就不靠標籤定位（scanDates／scanWholeHouse 看整句），走到這裡代表真的沒寫，不硬塞。
+function interpretBareAnswer(message: string, field: FlowFieldDef): string | undefined {
+  const trimmed = message.trim();
+  if (!trimmed) return undefined;
+  if (field.quote_field === 'headcount' || field.quote_field === 'room_count') {
+    const m = trimmed.match(/^(\d{1,3})\s*(?:間|人|位|個)?$/);
+    return m ? String(Number(m[1])) : undefined;
+  }
+  if (!field.quote_field) return trimmed;
+  return undefined;
+}
+
 function extractStepFieldsWithoutAi(userMessage: string, fields: FlowFieldDef[]): Record<string, string> {
   const result: Record<string, string> = {};
   const message = userMessage || '';
@@ -1996,6 +2011,24 @@ async function continueBookingFlow(
     collected_before: session.collected,
   });
 
+  // 客人重打這個流程自己的觸發字（卡住了又打一次「我要訂房」）：視為要重新開始。
+  // 以前這裡刻意不管（下面 missingFields 那段的註解寫「比較像是想重新開始，不是這裡要處理的
+  // 情境」），結果就是客人被回「還需要麻煩您補充：雙人房數」——他明明是想重來，bot 卻當成
+  // 他在回答上一題，怎麼打都出不去。
+  // 判斷只看算價類欄位（日期／人數／房數）有沒有內容：客人把範本（含觸發字）填好貼回來時
+  // 也會對到觸發字，但那種抓得到欄位，不能誤判成重來把他填好的東西丟掉。自由文字欄位
+  // 不納入判斷——任何一句話都能當自由文字，納入的話「我要訂房」永遠會被當成備註。
+  // 放在 AI 擷取之前，重來的訊息就不用白花一次 AI 呼叫。
+  if (matchTriggerRules(userMessage, flow.triggerRules)) {
+    const quoteFieldsInStep = currentStep.fields.filter((f) => f.quote_field);
+    const looksLikeAnswer = Object.keys(extractStepFieldsWithoutAi(userMessage, quoteFieldsInStep)).length > 0;
+    if (!looksLikeAnswer) {
+      traceStep(`對到本流程「${flow.name}」的觸發字、又沒有任何算價欄位的內容，視為客人要重新開始`);
+      await startBookingFlow(lineClient, lineEvent, settings, userId, nickname, flow);
+      return true;
+    }
+  }
+
   // 系統模式不呼叫 AI，直接用純程式解析顧客回覆（省 token）；AI 模式維持原本的 LLM 擷取。
   const stepUsesSystemMode = flow.replyMode === 'system';
   let extracted: Record<string, string> = {};
@@ -2032,23 +2065,52 @@ async function continueBookingFlow(
   }
   if (stepUsesSystemMode) traceStep('系統模式：不呼叫 AI，用規則解析');
 
-  // 「這一步只問一個自由文字欄位，就把整句話當答案」的捷徑（見 extractStepFieldsWithoutAi）
-  // 沒有任何格式檢查，什麼都會被接受，包含圖文選單按鈕觸發的固定文字——會把按鈕文字誤存成
-  // 姓名/電話等欄位的答案，還悄悄推進到下一步，客人完全看不出哪裡錯了。
-  // 這裡補一道防線：這句話如果剛好對到「別的」流程的觸發字，就不當作這一欄的答案，讓它照下面
+  // 已經答過的欄位，這一句要明確寫了標籤（「人數：15」）才能覆蓋。沒標籤的猜測不能推翻
+  // 已收集到的答案——scanHeadcount 最後一招是「訊息裡任一個獨立數字就當人數」，於是 bot
+  // 問「還需要麻煩您補充：雙人房數」、客人回「1」，這個 1 會被猜成人數、把原本的 12 蓋掉，
+  // 雙人房數照樣是空的、再問一次，客人怎麼回都出不去（KAI CHE CHANG 卡住的就是這個）。
+  // 擋掉之後 extracted 變空，才輪得到下面「只剩一欄就整句當答案」的捷徑接手。
+  for (const f of currentStep.fields) {
+    if (session.collected[f.key] && extracted[f.key] !== undefined && !userMessage.includes(f.label)) {
+      traceStep(`「${f.label}」已經答過，這句沒有寫標籤，不用猜到的值（${extracted[f.key]}）覆蓋`);
+      delete extracted[f.key];
+    }
+  }
+
+  // 只剩一個欄位沒答、而這句又什麼都沒抓到時，把整句當那一欄的答案。
+  // bot 前一句才問「還需要麻煩您補充：雙人房數」，客人回「1」是最自然的回法；但規則解析對
+  // 房數要靠「雙人房數：1」這種標籤定位，光一個「1」對不到，就會再問一次、無限循環。
+  // AI 模式也套：AI 看到光一個「1」同樣分不出是哪一欄。
+  const stillMissing = currentStep.fields.filter((f) => !session.collected[f.key] && extracted[f.key] === undefined);
+  let bareAnswerField: FlowFieldDef | null = null;
+  if (Object.keys(extracted).length === 0 && stillMissing.length === 1) {
+    const bare = interpretBareAnswer(userMessage, stillMissing[0]);
+    if (bare !== undefined) {
+      bareAnswerField = stillMissing[0];
+      extracted[bareAnswerField.key] = bare;
+      traceStep(`只剩「${bareAnswerField.label}」沒答，把整句當它的答案`);
+    }
+  }
+
+  // 「整句話當成某個自由文字欄位的答案」有兩條路會走到：上面只剩一欄的捷徑，以及
+  // extractStepFieldsWithoutAi 裡「這一步只問一個自由文字欄位」的捷徑。兩者都沒有任何格式
+  // 檢查，什麼都會被接受，包含圖文選單按鈕觸發的固定文字——會把按鈕文字誤存成姓名/電話等
+  // 欄位的答案，還悄悄推進到下一步，客人完全看不出哪裡錯了。
+  // 這裡補一道防線：這句話如果剛好對到「別的」流程的觸發字，就不當作答案，讓它照下面
   // missingFields 的邏輯判斷要不要顯示別的流程的自動回覆。順便快取起來，missingFields 那邊
-  // 不用再查一次。這個捷徑只有規則解析會走（system 模式或 AI 模式退回規則時），AI 自己抓的
-  // 不套這道。
+  // 不用再查一次。（本流程自己的觸發字在最上面已經處理成重新開始了。）
   let interruptingFlow: FlowDef | undefined;
-  const soleFreeTextKey =
-    (stepUsesSystemMode || usedRuleFallback) && currentStep.fields.length === 1 && !currentStep.fields[0].quote_field
-      ? currentStep.fields[0].key
-      : null;
-  if (soleFreeTextKey && extracted[soleFreeTextKey] !== undefined) {
+  const wholeMessageAsAnswerField: FlowFieldDef | null =
+    bareAnswerField && !bareAnswerField.quote_field
+      ? bareAnswerField
+      : (stepUsesSystemMode || usedRuleFallback) && currentStep.fields.length === 1 && !currentStep.fields[0].quote_field
+        ? currentStep.fields[0]
+        : null;
+  if (wholeMessageAsAnswerField && extracted[wholeMessageAsAnswerField.key] !== undefined) {
     interruptingFlow = (await fetchActiveFlows()).find((f) => f.id !== flow.id && matchTriggerRules(userMessage, f.triggerRules));
     if (interruptingFlow) {
-      traceStep(`整句本來會當成「${currentStep.fields[0].label}」的答案，但它對到流程「${interruptingFlow.name}」的觸發字，不採用`);
-      delete extracted[soleFreeTextKey];
+      traceStep(`整句本來會當成「${wholeMessageAsAnswerField.label}」的答案，但它對到流程「${interruptingFlow.name}」的觸發字，不採用`);
+      delete extracted[wholeMessageAsAnswerField.key];
     }
   }
 
@@ -2079,14 +2141,23 @@ async function continueBookingFlow(
     return true;
   }
 
-  const missingFields = currentStep.fields.filter((f) => !collected[f.key]);
+  // 「幾人房要開幾間」是選填的，跟 tryStartQuoteFromCompleteInfo 的判斷一致：客人照範本填、
+  // 把用不到的房型那一行留空是最常見的寫法（12 個人填「四人房數：3」、雙人房留空，意思就是
+  // 不要雙人房）。以前這裡把每個欄位都當必填，同一張範本、同樣留空，沒 session 直接貼過來會過，
+  // 先打「我要訂房」拿到範本再填回來卻卡在「還需要麻煩您補充：雙人房數」。
+  // 下游 toRoomCountRequests() 本來就把沒填跟 0 一視同仁。
+  // 但這一步要至少答了一個欄位才放行——整步只問房數、客人卻答非所問時，還是要再問。
+  const answeredAnyInStep = currentStep.fields.some((f) => collected[f.key]);
+  const missingFields = currentStep.fields.filter(
+    (f) => !collected[f.key] && !(f.quote_field === 'room_count' && answeredAnyInStep)
+  );
   if (missingFields.length > 0) {
     // 跟 awaiting_confirmation／awaiting_remittance 同樣的考量：這一步沒抓到欄位，
     // 也可能是客人點了圖文選單之類的按鈕，剛好對到「別的」流程的觸發字，根本不是在回答
     // 這一題。這時候要讓那個自動回覆正常顯示，不要用「還需要補充」卡住客人、也不要把這次
     // 空的擷取結果存回 session——客人晚一點認真回這一題時，原本收集到的資料還在。
-    // 排除目前這個流程本身：重複打到同一個流程的觸發字比較像是想重新開始，不是這裡要處理的情境。
-    // interruptingFlow 上面可能已經查過（免費文字欄位捷徑那段）就直接沿用，沒有才現查。
+    // 排除目前這個流程本身：重打本流程的觸發字已在這個函式最上面處理成重新開始。
+    // interruptingFlow 上面可能已經查過（整句當答案那段）就直接沿用，沒有才現查。
     interruptingFlow ??= (await fetchActiveFlows()).find((f) => f.id !== flow.id && matchTriggerRules(userMessage, f.triggerRules));
     const interruptingFirstStep = interruptingFlow?.steps.find((s) => s.step_order === 1);
     if (interruptingFirstStep) {
