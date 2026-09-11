@@ -3676,7 +3676,7 @@ export function extractResponsesApiText(result: any): string {
   return texts.join('\n').trim();
 }
 
-async function callGPT(
+export async function callGPT(
   settings: any,
   currentMessage: string,
   kbItems: any[],
@@ -3747,7 +3747,7 @@ async function callGPT(
   return { text: completion.choices[0].message.content || '' };
 }
 
-async function callGemini(
+export async function callGemini(
   settings: any,
   currentMessage: string,
   kbItems: any[],

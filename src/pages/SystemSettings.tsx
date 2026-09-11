@@ -26,8 +26,43 @@ interface NotificationGroupOption {
   channel_id: string;
 }
 
+type AiTestResult =
+  | { ok: true; provider: string; model: string; latency_ms: number; reply: string; structured_ok: boolean }
+  | { ok: false; provider?: string; model?: string; latency_ms?: number; error: string };
+
 export default function SystemSettings() {
   const { settings, setSettings, loading, saving, handleSave, handleChange } = useSettings();
+
+  // 「測試連線」：把畫面上目前填的模型／金鑰送去實際呼叫一次（見 netlify/functions/ai-test.ts）。
+  // 模型名稱是自由輸入，打錯字或這個帳號沒權限用，以前只能等客人來聊才會發現。
+  const [aiTesting, setAiTesting] = useState(false);
+  const [aiTestResult, setAiTestResult] = useState<AiTestResult | null>(null);
+  const runAiTest = async () => {
+    setAiTesting(true);
+    setAiTestResult(null);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const res = await fetch('/.netlify/functions/ai-test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session?.access_token}` },
+        body: JSON.stringify({
+          active_ai: settings.active_ai,
+          gpt_model_name: settings.gpt_model_name, gpt_api_key: settings.gpt_api_key,
+          gpt_reasoning_effort: settings.gpt_reasoning_effort, gpt_verbosity: settings.gpt_verbosity,
+          gpt_max_tokens: settings.gpt_max_tokens, gpt_temperature: settings.gpt_temperature,
+          gemini_model_name: settings.gemini_model_name, gemini_api_key: settings.gemini_api_key,
+          gemini_max_tokens: settings.gemini_max_tokens, gemini_temperature: settings.gemini_temperature,
+          gemini_thinking_level: settings.gemini_thinking_level,
+        }),
+      });
+      const text = await res.text();
+      try { setAiTestResult(JSON.parse(text)); } catch { setAiTestResult({ ok: false, error: text || `HTTP ${res.status}` }); }
+    } catch (e: any) {
+      setAiTestResult({ ok: false, error: e?.message || '連線失敗' });
+    } finally {
+      setAiTesting(false);
+    }
+  };
   const [tab, setTab] = useState<Tab>('ai');
 
   // 「真人客服通知名單」下拉選單的資料。名單跟官方帳號是分開兩張表，要一起查才顯示得出
@@ -125,7 +160,44 @@ export default function SystemSettings() {
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">模型名稱</label>
-                <input type="text" name={settings.active_ai === 'gpt' ? 'gpt_model_name' : 'gemini_model_name'} value={settings.active_ai === 'gpt' ? (settings.gpt_model_name || '') : (settings.gemini_model_name || '')} onChange={handleChange} className="w-full px-4 py-2 border rounded-lg" placeholder="例如: gpt-4.1-mini, gpt-5.2" />
+                <div className="flex gap-2">
+                  <input type="text" name={settings.active_ai === 'gpt' ? 'gpt_model_name' : 'gemini_model_name'} value={settings.active_ai === 'gpt' ? (settings.gpt_model_name || '') : (settings.gemini_model_name || '')} onChange={handleChange} className="flex-1 min-w-0 px-4 py-2 border rounded-lg" placeholder="例如: gpt-4.1-mini, gpt-5.2" />
+                  <button
+                    type="button"
+                    onClick={runAiTest}
+                    disabled={aiTesting}
+                    className="shrink-0 inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                    title="用目前填的模型與金鑰實際呼叫一次，確認能不能用"
+                  >
+                    <Activity className="w-4 h-4" />
+                    {aiTesting ? '測試中…' : '測試連線'}
+                  </button>
+                </div>
+                <p className="text-xs text-gray-400 mt-1">名稱是自由輸入，存檔前可先按「測試連線」確認 OpenAI／Google 認得這個模型、金鑰有效。</p>
+                {aiTestResult && (
+                  aiTestResult.ok ? (
+                    <div className="mt-2 p-3 rounded-lg border border-green-200 bg-green-50 text-sm text-green-800">
+                      <p className="font-semibold flex items-center gap-1.5"><CheckCircle2 className="w-4 h-4" /> 連線成功 · {aiTestResult.model} · {aiTestResult.latency_ms} ms</p>
+                      <p className="text-xs mt-1">
+                        {aiTestResult.structured_ok
+                          ? '模型有照指令輸出 JSON，訂房流程的欄位擷取與意圖判斷可以正常運作。'
+                          : '模型有回應，但沒有照指令輸出 JSON——訂房流程的欄位擷取可能不穩，建議換模型或調低推理力道。'}
+                      </p>
+                      <p className="text-xs mt-1 font-mono text-green-700 break-all">回覆：{aiTestResult.reply}</p>
+                    </div>
+                  ) : (
+                    <div className="mt-2 p-3 rounded-lg border border-red-200 bg-red-50 text-sm text-red-800">
+                      <p className="font-semibold flex items-center gap-1.5"><XCircle className="w-4 h-4" /> 連線失敗{aiTestResult.model ? ` · ${aiTestResult.model}` : ''}</p>
+                      <p className="text-xs mt-1 font-mono break-all">{aiTestResult.error}</p>
+                      <p className="text-xs mt-1">
+                        {/model|does not exist|not found/i.test(aiTestResult.error) ? '通常是模型名稱打錯，或這個帳號沒有該模型的使用權限。到 OpenAI／Google 後台的模型列表確認正確名稱。'
+                          : /api key|incorrect|invalid|401|unauthorized/i.test(aiTestResult.error) ? '通常是 API Key 錯誤或已失效。'
+                          : /quota|rate|429|billing|insufficient/i.test(aiTestResult.error) ? '通常是額度用完或帳單問題。'
+                          : '請看上方原始錯誤訊息。'}
+                      </p>
+                    </div>
+                  )
+                )}
               </div>
               {/* GPT-5 系列走 Responses API：Temperature 不適用（推理模型不接受，帶了會被拒），
                   Max Tokens 有套用但包含推理 token。這裡照實標示，免得使用者調了沒反應以為壞掉。 */}
