@@ -717,6 +717,16 @@ export default function StandardMessages() {
 
                 {/* ② 收集客戶資訊 */}
                 <Stage index={2} title="收集客戶資訊" icon={<MessageSquareText className="w-4 h-4" />}>
+                  {(editing ? draft!.flow_type : current.flow_type) === 'quote' && (
+                    // 報價流程的步驟不是關卡：客人在任何時候給了哪個欄位就填哪個（整張表一次貼、
+                    // 只答一半、先問問題再補都可以），系統只會問還缺的。步驟問句的用途是「這一組
+                    // 欄位都還沒答時，用這段話問」。這段說明放在編輯與檢視都看得到的位置。
+                    <p className="text-xs text-blue-700 bg-blue-50 border border-blue-100 rounded-lg px-3 py-2 mb-3 leading-relaxed">
+                      報價流程的步驟<strong>不是關卡</strong>：客人不論哪一步都可以一次給多個欄位、只答一部分、或先問別的問題再回來補，
+                      系統只會追問還缺的<strong>入住日期、退房日期、人數</strong>；房數留空代表不需要。
+                      每個步驟的訊息會在「那一組欄位都還沒有答案」時送出。
+                    </p>
+                  )}
                   {editing ? (
                     <div className="space-y-3">
                       {draft!.steps.map((step, si) => (

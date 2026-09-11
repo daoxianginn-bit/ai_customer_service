@@ -24,6 +24,12 @@ import {
 } from '../../src/lib/roomSelection';
 import { computeUsage, normalizeChangeCount } from '../../src/lib/linenCost';
 import { LineChannel, isFullServiceRole, channelRoleLabel } from '../../src/lib/lineChannels';
+import {
+  buildIntentPrompt, parseIntentResponse, classifyByRules,
+  isYesAnswer, isNoAnswer, isRestartCommand, interpretBareAnswer,
+  missingEssentialFields, QUOTE_ESSENTIAL_FIELDS,
+  type BookingPhase, type IntentContext, type IntentResult,
+} from '../../src/lib/bookingIntent';
 
 const supabase = createClient(
   process.env.SUPABASE_URL || '',
@@ -83,6 +89,9 @@ interface TurnTrace {
   data: Record<string, unknown>;
   errors: string[];
   inbound: Record<string, unknown> | null;
+  // 訂房流程把這句交給一般 AI 問答時，要 AI 答完補在後面的提醒（例如「報價仍在等您確認」）。
+  // 放在 turn context 而不是用回傳值一路傳，是因為中間隔了三層函式。
+  reminder: string | null;
 }
 const turnTraceStore = new AsyncLocalStorage<TurnTrace>();
 
@@ -96,13 +105,23 @@ function traceData(key: string, value: unknown) {
 function traceError(message: string) {
   turnTraceStore.getStore()?.errors.push(message);
 }
+function setTurnReminder(text: string) {
+  const t = turnTraceStore.getStore();
+  if (t) t.reminder = text;
+}
+function takeTurnReminder(): string | null {
+  const t = turnTraceStore.getStore();
+  const r = t?.reminder ?? null;
+  if (t) t.reminder = null;
+  return r;
+}
 // AI 原文可能很長（知識庫問答一次幾百字），留頭尾夠判讀就好，別把整篇塞進每一列。
 function clipForTrace(text: string, max = 1500): string {
   return text.length > max ? `${text.slice(0, max)}…（共 ${text.length} 字，已截斷）` : text;
 }
 
 async function runTurn(fn: () => Promise<void>): Promise<void> {
-  const trace: TurnTrace = { startedAt: Date.now(), steps: [], data: {}, errors: [], inbound: null };
+  const trace: TurnTrace = { startedAt: Date.now(), steps: [], data: {}, errors: [], inbound: null, reminder: null };
   try {
     await turnTraceStore.run(trace, fn);
   } catch (e: any) {
@@ -554,10 +573,6 @@ async function processLineEvent(
     // 「其他問題」之類剛好也對到某個流程觸發字的自動回覆圖文選單，就會被悄悄開一個全新的空白
     // session，把已經收集好的資訊整個蓋掉——客人會看到報價卡片後面立刻接一句「還需要補充」，
     // 而且怎麼回「是」都卡在同一句，因為當下其實是在回答一個他根本不知道自己開啟的新流程。
-    // 客人在等報價確認時問了別的問題、由下面的一般 AI 問答回答：答完要補一句提醒，
-    // 不然他可能以為問完就沒事了，報價一直懸在那裡等他回是/否。
-    let remindPendingQuote = false;
-
     if (settings.is_ai_enabled) {
       // 只有「這位客人本來就有 booking_session」才需要搶鎖——全新客人的第一句話不可能跟自己
       // 的舊 session 競爭。搶到鎖時一併換成當下重新讀到的最新一份 user_states，不能沿用呼叫端
@@ -594,7 +609,6 @@ async function processLineEvent(
           // 被那段清掉的話顧客之後真的要回答流程時就接不住了。
           if (handled) return;
           traceStep('流程判斷這則訊息不歸它管，往下交給一般 AI 問答');
-          remindPendingQuote = existingSession.phase === 'awaiting_confirmation';
         } else {
           const activeFlows = await fetchActiveFlows();
 
@@ -689,9 +703,10 @@ async function processLineEvent(
       }
     }
 
-    if (aiResult && remindPendingQuote) {
-      aiResult += '\n\n📋 您的報價仍在等待確認：回覆「是」訂房、「否」取消，或「修改」重新填寫訂房資訊。';
-    }
+    // 訂房流程把這句交過來時留下的提醒（「報價仍在等您確認」之類）：AI 答完接在後面，
+    // 不然客人問完早餐可能以為就沒事了，報價一直懸著。
+    const reminder = takeTurnReminder();
+    if (aiResult && reminder) aiResult += `\n\n${reminder}`;
 
     if (aiResult) {
       await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: aiResult });
@@ -787,7 +802,12 @@ async function handleNonCustomerChannelMessage(
 // 訂房紀錄一律以 Supabase `bookings` 表為唯一來源（原本另外鏡射一份到 Google「報價」試算表，該功能已移除）。
 // ========================================================================
 
-const BOOKING_SESSION_TTL_MS = 30 * 60 * 1000; // in_flow／awaiting_confirmation：30 分鐘沒有新回覆，視為放棄這次詢問
+// 收集中／待確認的 session 存活時間。以前是 30 分鐘：客人問完問題去吃個飯回來說「是」就被回
+// 「已逾時」，等於「取不到資料」——他的訂單明明還在。現在每句話都先分意圖，長一點的 session
+// 不會造成誤判（客人隔天回來說「我要訂房」是重來、問「有早餐嗎」是問題，都分得出來），
+// 所以拉長到夠客人想一想、問一問再決定的長度。
+const IN_FLOW_SESSION_TTL_MS = 6 * 60 * 60 * 1000;
+const AWAITING_CONFIRMATION_TTL_MS = 24 * 60 * 60 * 1000;
 // awaiting_remittance 的存活時間要蓋過匯款截止時間（settings.payment_deadline_hours，見 computePaymentDeadline()），
 // 不然設定的小時數一拉長，session 會比匯款期限還早過期。多留 24 小時當緩衝，客人晚點才回也還接得住。
 const REMITTANCE_SESSION_BUFFER_MS = 24 * 60 * 60 * 1000;
@@ -851,7 +871,8 @@ function normalizeFieldValue(valueType: FlowFieldDef['value_type'], raw: string)
 }
 
 function bookingSessionTtlMs(phase: BookingSession['phase'], settings: any): number {
-  if (phase !== 'awaiting_remittance') return BOOKING_SESSION_TTL_MS;
+  if (phase === 'in_flow') return IN_FLOW_SESSION_TTL_MS;
+  if (phase === 'awaiting_confirmation') return AWAITING_CONFIRMATION_TTL_MS;
   const hours = Number(settings?.payment_deadline_hours) > 0 ? Number(settings.payment_deadline_hours) : 10;
   return hours * 60 * 60 * 1000 + REMITTANCE_SESSION_BUFFER_MS;
 }
@@ -1281,21 +1302,6 @@ function scanLabelledNumber(message: string, label: string): string | undefined 
   return Number.isFinite(n) && n >= 0 ? String(n) : undefined;
 }
 
-// 只剩一個欄位沒答時，客人的整句話能不能直接當那一欄的答案（呼叫端見 continueBookingFlow）。
-// 數字類（人數、房數）：整句就是一個數字，允許尾巴帶「間」「人」這種單位。
-// 自由文字：整句照收。
-// 日期與包棟本來就不靠標籤定位（scanDates／scanWholeHouse 看整句），走到這裡代表真的沒寫，不硬塞。
-function interpretBareAnswer(message: string, field: FlowFieldDef): string | undefined {
-  const trimmed = message.trim();
-  if (!trimmed) return undefined;
-  if (field.quote_field === 'headcount' || field.quote_field === 'room_count') {
-    const m = trimmed.match(/^(\d{1,3})\s*(?:間|人|位|個)?$/);
-    return m ? String(Number(m[1])) : undefined;
-  }
-  if (!field.quote_field) return trimmed;
-  return undefined;
-}
-
 function extractStepFieldsWithoutAi(userMessage: string, fields: FlowFieldDef[]): Record<string, string> {
   const result: Record<string, string> = {};
   const message = userMessage || '';
@@ -1623,8 +1629,6 @@ async function checkBookingConflict(
 // 這張訂單開了哪幾間房
 // 報價的三要素。少了任何一個都算不出價格，所以是必填；其餘算價欄位（幾人房要開幾間、
 // 是否包棟）都是選填，客人沒填就由系統決定。
-const QUOTE_ESSENTIAL_FIELDS = ['checkin_date', 'checkout_date', 'headcount'];
-
 // 純粹決定「開哪幾間」，完全不碰價格——價格已經由 bookingEngine 算完。
 // 這份紀錄有三個用途：預訂單訊息列出房型、布巾洗滌成本、房況/檔期衝突。
 // ------------------------------------------------------------------------
@@ -1758,7 +1762,7 @@ async function updateBookingRow(bookingId: string, fields: Record<string, any>) 
 //   待預定不鎖房（見 bookingStatus.ts 的 OCCUPYING_STATUSES），房況檢查也擋不下來，
 //   「訂單自動取消」排程又只清待確認，於是那些多出來的待預定會永遠留在訂單管理裡。
 //   客人重新開始問就是「以新的為準」，接續同一筆重算即可，這也跟 restartQuoteFlow／
-//   tryRequoteFromCompleteInfo 對待舊報價的方式一致（那兩條路是 session 還活著時走的）。
+//   requoteWithCollected 對待舊報價的方式一致（那兩條路是 session 還活著時走的）。
 //
 // 待確認（含）之後的狀態刻意不列入：那些訂單客人已經說要訂、可能已經匯過款，不能被下一次
 // 詢問覆蓋掉，必須另外開一筆（日期真的撞到的話，會由下面 findOverlappingLiveBooking 擋下）。
@@ -1884,12 +1888,29 @@ async function tryStartQuoteFromCompleteInfo(
     // 只有三要素是必填。「幾人房要開幾間」是選填的——範本自己就寫「沒提到就是 null」，
     // 客人照標準格式送出但把房數那一行留空是很常見的，以前這裡要求「每個算價欄位都要有值」，
     // 於是整則訊息不被當成訂房資訊、掉去問 AI，客人收到一句「這個問題我不清楚」。
-    const requiredFields = quoteFields.filter((f) => QUOTE_ESSENTIAL_FIELDS.includes(f.quote_field as string));
+    const requiredFields = quoteFields.filter((f) => (QUOTE_ESSENTIAL_FIELDS as readonly string[]).includes(f.quote_field as string));
 
     // 便宜的前置關卡：先用純程式擷取（不花 token）。沒有這一關的話，每一則沒有 session 的
     // 閒聊都會多打一次 AI 擷取，等於所有非流程訊息的 AI 成本都翻倍。
     const gate = normalizeInto(extractStepFieldsWithoutAi(userMessage, quoteFields), quoteFields);
-    if (requiredFields.some((f) => gate[f.key] === undefined)) continue;
+    const missingRequired = requiredFields.filter((f) => gate[f.key] === undefined);
+
+    // 三要素沒齊、但至少抓到兩個訂房欄位（例如「我想訂 2/2 到 2/4」有兩個日期、「2/2 12個人」
+    // 有日期＋人數）：這幾乎一定是在訂房，不是閒聊。以前這種訊息會掉去一般 AI 問答，AI 只能
+    // 泛泛回一句、訂房流程根本沒開始。現在直接開流程、把抓到的先填進去、只問缺的那幾個——
+    // 客人不用先打觸發字才能訂房。只抓到一個欄位（「2/2 有房嗎」）仍交給 AI 問答，那更像在
+    // 問空房，AI 回答時會帶入近期訂單脈絡，不硬開流程。
+    if (missingRequired.length > 0) {
+      if (Object.keys(gate).length < 2) continue;
+      traceStep(`沒有 session、訊息含 ${Object.keys(gate).length} 個訂房欄位但三要素未齊，開流程「${flow.name}」預填後只問缺的`);
+      const partialBookingId = await reuseOrCreateInquiryBooking(lineClient, userId, nickname, flow, gate);
+      if (!partialBookingId) return false;
+      await saveBookingSession(userId, { flowId: flow.id, stepIndex: 0, collected: gate, bookingId: partialBookingId, phase: 'in_flow', quote: null });
+      const replyText = `還需要麻煩您補充：${missingRequired.map((f) => f.label).join('、')}`;
+      await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
+      await logConversation(userId, nickname, 'outbound', replyText, 'system');
+      return true;
+    }
 
     // 過了關卡才值得問 AI。AI 模式再擷取一次是為了把備註這類自由文字欄位也帶出來；
     // 擷取失敗或結果反而不完整時退回關卡的結果——算價要用的欄位本來就已經齊了，
@@ -1904,49 +1925,60 @@ async function tryStartQuoteFromCompleteInfo(
       if (requiredFields.every((f) => aiCollected[f.key] !== undefined)) collected = { ...gate, ...aiCollected };
     }
 
-    // 沿用 startBookingFlow 的判斷：客人可能有一筆還停在「待報價」的舊單（session 過期但訂單還在），
-    // 接續它而不是再開一筆，否則同一位客人會累積出一堆重複的空訂單。
-    let resolvedNickname = nickname;
-    const { data: latestBooking } = await supabase
-      .from('bookings')
-      .select('id, status')
-      .eq('channel_id', activeChannelId)
-      .eq('line_user_id', userId)
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    let bookingId: string;
-    if (latestBooking && REUSABLE_ON_RESTART_STATUSES.includes(latestBooking.status)) {
-      bookingId = latestBooking.id;
-      await resetBookingForRequote(bookingId, flow.id, collected);
-    } else {
-      try {
-        const p = await lineClient.getProfile(userId);
-        resolvedNickname = p.displayName;
-      } catch {}
-      try {
-        const created = await insertNewBooking({
-          channel_id: activeChannelId,
-          line_user_id: userId,
-          nickname: resolvedNickname,
-          flow_id: flow.id,
-          status: 'inquiring',
-          collected_answers: collected,
-        });
-        bookingId = created.id;
-      } catch (e: any) {
-        console.error('[Booking] direct-info insert failed:', e.message);
-        return false; // 開不了單就當作沒處理過，讓呼叫端照原本的邏輯往下走
-      }
-    }
+    const bookingId = await reuseOrCreateInquiryBooking(lineClient, userId, nickname, flow, collected);
+    if (!bookingId) return false; // 開不了單就當作沒處理過，讓呼叫端照原本的邏輯往下走
 
     const sendReply = (text: string) => lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text }).then(() => {});
-    await finishBookingFlow(lineClient, sendReply, settings, userId, resolvedNickname, flow, collected, bookingId);
+    await quoteFlowDeps.finishBookingFlow(lineClient, sendReply, settings, userId, nickname, flow, collected, bookingId);
     return true;
   }
 
   return false;
+}
+
+// 沒有 session 的客人開始訂房時要掛在哪一筆訂單上。沿用 startBookingFlow 的判斷：客人可能有一筆
+// 還停在「待報價／待預定」的舊單（session 過期但訂單還在），接續它而不是再開一筆，否則同一位客人
+// 會累積出一堆重複的空訂單。回傳 null 代表開不了單。
+async function reuseOrCreateInquiryBooking(
+  lineClient: Client,
+  userId: string,
+  nickname: string | null,
+  flow: FlowDef,
+  collected: Record<string, string>
+): Promise<string | null> {
+  const { data: latestBooking } = await supabase
+    .from('bookings')
+    .select('id, status')
+    .eq('channel_id', activeChannelId)
+    .eq('line_user_id', userId)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (latestBooking && REUSABLE_ON_RESTART_STATUSES.includes(latestBooking.status)) {
+    await resetBookingForRequote(latestBooking.id, flow.id, collected);
+    return latestBooking.id;
+  }
+
+  let resolvedNickname = nickname;
+  try {
+    const p = await lineClient.getProfile(userId);
+    resolvedNickname = p.displayName;
+  } catch {}
+  try {
+    const created = await insertNewBooking({
+      channel_id: activeChannelId,
+      line_user_id: userId,
+      nickname: resolvedNickname,
+      flow_id: flow.id,
+      status: 'inquiring',
+      collected_answers: collected,
+    });
+    return created.id;
+  } catch (e: any) {
+    console.error('[Booking] inquiry insert failed:', e.message);
+    return null;
+  }
 }
 
 // 訂房流程進行到一半時，如果流程本身或當下步驟被後台異動掉（刪除流程／改步驟順序）導致對不上，
@@ -1990,20 +2022,23 @@ async function continueBookingFlow(
   session: BookingSession,
   isImage = false
 ): Promise<boolean> {
-  if (session.phase === 'awaiting_confirmation') {
-    traceStep('等待客人確認報價（是／否）');
-    return handleBookingConfirmation(lineClient, lineEvent, settings, userId, nickname, userMessage, session);
-  }
-  if (session.phase === 'awaiting_remittance') {
-    traceStep('等待客人回報匯款');
-    return handleRemittanceReport(lineClient, lineEvent, settings, userId, nickname, userMessage, session, isImage);
-  }
-
   const flow = await fetchFlowById(session.flowId);
   if (!flow) {
     await handoverBrokenFlowSession(lineClient, lineEvent, settings, userId, nickname);
     return true;
   }
+
+  // 報價流程走「意圖優先」的編排（見 handleQuoteConversation），三個階段共用同一套判斷。
+  // 下面逐步問答的舊邏輯只剩 collect／query 型流程在用。
+  if (flow.flowType === 'quote') {
+    return handleQuoteConversation({ lineClient, lineEvent, settings, userId, nickname, userMessage, session, flow, isImage });
+  }
+  if (session.phase !== 'in_flow') {
+    // 待確認／待匯款只有報價流程會進入；collect／query 型出現這種 session 是資料異常
+    await handoverBrokenFlowSession(lineClient, lineEvent, settings, userId, nickname);
+    return true;
+  }
+
   const currentStep = flow.steps.find((s) => s.step_order === session.stepIndex + 1);
   if (!currentStep) {
     await handoverBrokenFlowSession(lineClient, lineEvent, settings, userId, nickname);
@@ -2327,7 +2362,7 @@ async function finishBookingFlow(
   // 就會一路掉到最下面的一般 AI 問答，由 AI 自己編一句「我們會幫您確認，稍後回覆您」——
   // 實際上完全沒有建立訂單、也沒有通知任何客服，客人卻以為已經送出了，等於直接掉單。
   // 改成把 session 停在最後一個步驟：客人重送表單就會被當成重新回答那一步，直接重算報價。
-  // 沒有再送的話，session 自己會在 30 分鐘後逾時，客人會收到「請重新輸入一次」的提示。
+  // 沒有再送的話，session 自己會逾時（見 IN_FLOW_SESSION_TTL_MS），客人會收到「請重新輸入一次」的提示。
   const keepSessionForRetry = () =>
     saveBookingSession(userId, {
       flowId: flow.id,
@@ -2615,7 +2650,7 @@ async function finishBookingFlow(
       room_type_label: roomTypeLabel,
       // 2026-08 改版：報價算完（AI 卡片送出的當下）狀態就直接進「待預定」，不用等客人回「是」——
       // 「待預定」現在代表「報價已送出，等客人決定是否要訂」；客人回「是」之後轉成「待確認」
-      // （見 handleBookingConfirmation()），等客服核對匯款。顯式寫出來是為了防呆：萬一這張訂單
+      // （見 confirmQuote()），等客服核對匯款。顯式寫出來是為了防呆：萬一這張訂單
       // 是重新試算（狀態理論上還是 inquiring），也不會不小心被改壞。
       status: 'awaiting_deposit',
       collected_answers: collected,
@@ -2664,80 +2699,26 @@ async function finishBookingFlow(
 // 也才有帳可對。兩筆的關係記在新單的 supersedes_booking_id：
 //   舊單還在「待預定」（報價送出、顧客還沒回是）：沒鎖房也沒收錢，當場就取消，留著沒意義。
 //   舊單已經是「待確認」（顧客回過是、可能已匯款）：先留著不動，等新報價被接受時才取消
-//     （見 handleBookingConfirmation 的 isYes 分支），否則顧客這次重新報價又回「否」的話，
+//     （見 confirmQuote()），否則顧客這次重新報價又回「否」的話，
 //     兩筆就都沒了。
 // 顧客明確要求重填訂房資訊的指令。報價確認與等匯款兩個階段都認得同一組字，
 // 顧客不用記在哪個階段該打哪個字。整句話要以這些字開頭才算，避免「我不想修改」被誤判。
-// 客人在等報價確認時問別的事（「有早餐嗎」「幾點可以入住」）：這種要交給一般 AI 問答用知識庫
-// 回答，不是推給真人。只認「像問句」的訊息：句尾是嗎／呢／？，或含請問／怎麼／多少／幾點這類
-// 疑問詞。「好啊但我想改成10/10」這種不是問句、是帶條件的要求，AI 沒辦法真的改訂單、答應了
-// 也是空話，還是照原本的方式交給真人判斷。
-function looksLikeQuestion(message: string): boolean {
-  const t = message.trim().replace(/[。！!~～\s]+$/, '');
-  return /[?？嗎呢嘛麼]$/.test(t) || /(請問|怎麼|怎樣|如何|多少|幾點|幾天|幾個|什麼|甚麼|哪裡|哪邊|哪些|有沒有|可不可以|能不能|是否)/.test(t);
-}
-
-function isRestartCommand(message: string): boolean {
-  return /^(修改|重新報價|重新試算|重新算|改訂單|改資料)/i.test(message.trim());
-}
-
-// 「是/否」的判定：整句話必須就是那個答案，只允許差在標點與語尾助詞。
-//
-// 原本是用開頭比對（/^(是|對|好|要|...)/），只要句子開頭一個字命中就算數，結果
-// 「好啊但我想改成10/10」「好像有點貴」「要再想一下」全部會被判成同意，當場成立訂單、
-// 鎖房、送出匯款帳號。這種話真正的意思是「有其他要求」，該由真人接手處理，AI 不能自作主張——
-// 訂單一旦成立就牽涉到房間與金流，寧可多問一句，也不要猜錯方向。
-const YES_ANSWERS = new Set(['是', '對', '好', '要', '確定', '沒問題', 'ok', 'okay', 'yes', 'y']);
-const NO_ANSWERS = new Set(['否', '不', '不要', '不用', '不需要', '取消', 'no', 'n']);
-
-function normalizeShortAnswer(message: string): string {
-  return message
-    .trim()
-    .toLowerCase()
-    .replace(/[\s。，、；：！？!?~～．.…「」『』()（）]/g, '') // 標點與空白
-    .replace(/(的|了|啊|阿|喔|噢|唷|呀|吧|囉|嘍|喲|耶|哦|呦)+$/, ''); // 語尾助詞：「好的」「好啊」都還是「好」
-}
-
-// 顧客在等回「是/否」的階段，直接把整組新的訂房資訊丟回來（通常是把報價表單重填一次送出）。
-// 以新的為準：取消上一筆報價、開一筆新訂單帶著新資料，跳過收集步驟直接進系統試算。
-//
-// 刻意要求「流程定義的每一個欄位都解析得到」才算數，只有零星幾個欄位不算——那更可能是顧客在
-// 問別的事情（例如「2台車可以停嗎」剛好被抽出一個數字），貿然重算會把他原本那筆報價弄不見。
+// 報價之後（待確認／待匯款）客人改了訂房內容：以新的為準，取消上一筆報價、開一筆新訂單
+// 帶著改過的資料，跳過收集直接重新試算。collected 是「原本已收集＋這次改的」合併結果，
+// 由 handleQuoteConversation 準備好。
 //
 // 回傳 true 代表已經處理掉了（新報價已送出，或試算失敗但也已經回覆顧客），呼叫端不要再回。
-async function tryRequoteFromCompleteInfo(
+async function requoteWithCollected(
   lineClient: Client,
   lineEvent: any,
   settings: any,
   userId: string,
   nickname: string | null,
-  userMessage: string,
-  session: BookingSession
+  flow: FlowDef,
+  session: BookingSession,
+  collected: Record<string, string>
 ): Promise<boolean> {
   if (!session.bookingId) return false;
-  const flow = await fetchFlowById(session.flowId);
-  if (!flow || flow.flowType !== 'quote') return false;
-
-  const allFields = flow.steps.flatMap((s) => s.fields);
-  if (!allFields.length) return false;
-
-  const extracted =
-    flow.replyMode === 'system'
-      ? extractStepFieldsWithoutAi(userMessage, allFields)
-      : await extractStepFields(settings, userMessage, allFields).catch((e: any) => {
-          console.error('[Booking] requote extraction failed:', e.message);
-          return {} as Record<string, string>;
-        });
-
-  const collected: Record<string, string> = {};
-  for (const f of allFields) {
-    if (extracted[f.key] === undefined) continue;
-    const normalized = normalizeFieldValue(f.value_type, extracted[f.key]);
-    if (normalized !== null) collected[f.key] = normalized;
-  }
-
-  // 少一個欄位就不算「完整訂房資訊」，交回呼叫端照原本的四選一提示處理。
-  if (allFields.some((f) => collected[f.key] === undefined)) return false;
 
   const { data: oldBooking } = await supabase
     .from('bookings')
@@ -2841,83 +2822,416 @@ async function restartQuoteFlow(
   await logConversation(userId, nickname, 'outbound', firstMessage, 'system');
 }
 
-async function handleBookingConfirmation(
-  lineClient: Client,
-  lineEvent: any,
-  settings: any,
-  userId: string,
-  nickname: string | null,
-  userMessage: string,
-  session: BookingSession
-): Promise<boolean> {
-  const trimmed = userMessage.trim();
-  const answer = normalizeShortAnswer(trimmed);
-  const isNo = NO_ANSWERS.has(answer);
-  const isYes = !isNo && YES_ANSWERS.has(answer);
+// ========================================================================
+// 報價流程的對話編排：意圖優先
+//
+// 客人一句話進來，不管現在是收集中、待確認還是待匯款，都先問「他想做什麼」，再依意圖分派。
+// 以前三個階段各有一套「這句是不是是／否／別的流程觸發字／問題」的 regex 判斷，彼此不一致，
+// 每補一條規則就在別的階段誤判一次（「1」被當人數蓋掉 12、「我要訂房」被當成在回答上一題、
+// 「有早餐嗎」被推給真人……）。現在只有一個分類器（src/lib/bookingIntent.ts）、一張分派表。
+//
+// 欄位用「槽位」而不是「步驟」：任何時候客人給了哪個欄位就填哪個，缺什麼問什麼，不看現在
+// 第幾步。管理員設定的步驟問句還是會用，但語意變成「這一組欄位都還沒答時，用這段話問」，
+// 不再是關卡。
+// ========================================================================
 
-  // 報價確認送出之後，顧客只能回「是」「否」「真人客服」或「修改／重新報價」——
-  // 「真人客服」在更上層（handoverKeywords）就攔截掉了，不會走到這裡。
-  if (isRestartCommand(trimmed)) {
-    await restartQuoteFlow(lineClient, lineEvent, settings, userId, nickname, session);
+interface QuoteConversationArgs {
+  lineClient: Client;
+  lineEvent: any;
+  settings: any;
+  userId: string;
+  nickname: string | null;
+  userMessage: string;
+  session: BookingSession;
+  flow: FlowDef;
+  isImage: boolean;
+}
+
+function sessionPhaseToIntentPhase(phase: BookingSession['phase']): BookingPhase {
+  return phase === 'in_flow' ? 'collecting' : phase;
+}
+
+// 各階段交給一般 AI 問答時，答完要補的那句提醒
+function reminderForPhase(phase: BookingPhase, missingLabels: string[], collectedCount: number): string {
+  if (phase === 'awaiting_confirmation') {
+    return '📋 您的報價仍在等待確認：回覆「是」訂房、「否」取消，或「修改」重新填寫訂房資訊。';
+  }
+  if (phase === 'awaiting_remittance') {
+    return '📋 您的訂單正在等待匯款，完成後請回覆帳號末五碼，我們會盡快為您核對。';
+  }
+  if (missingLabels.length) return `📋 訂房資訊還需要：${missingLabels.join('、')}，補上後我們就為您試算。`;
+  if (collectedCount > 0) return '📋 您的訂房詢問還在進行中，回覆上方問題後我們就為您試算。';
+  return '📋 要訂房的話，請回覆上方表單的資訊，我們會為您試算。';
+}
+
+// 分類器抽出來的值做格式檢查／正規化。日期統一成 YYYY-MM-DD（AI 偶爾會照客人原文回 2/2），
+// 數字類轉整數，value_type 的通用檢查也在這裡。不合格的另外列出來，回給客人「格式錯誤」。
+function normalizeSlots(fields: FlowFieldDef[], slots: Record<string, string>): { values: Record<string, string>; invalid: FlowFieldDef[] } {
+  const values: Record<string, string> = {};
+  const invalid: FlowFieldDef[] = [];
+  for (const f of fields) {
+    const raw = slots[f.key];
+    if (raw === undefined) continue;
+    let v: string | undefined;
+    if (f.quote_field === 'checkin_date' || f.quote_field === 'checkout_date') {
+      v = BOOKING_DATE_RE.test(raw) ? raw : scanDates(raw)[0];
+    } else {
+      v = coerceStepFieldValue(f, raw);
+    }
+    const normalized = v === undefined ? null : normalizeFieldValue(f.value_type, v);
+    if (normalized === null) invalid.push(f);
+    else values[f.key] = normalized;
+  }
+  return { values, invalid };
+}
+
+// 意圖分類：明確的短答不花 AI；system 模式只用規則；AI 模式呼叫 AI，失敗退回規則。
+async function classifyBookingIntent(settings: any, flow: FlowDef, message: string, ctx: IntentContext, nickname: string | null, lineClient: Client): Promise<IntentResult> {
+  const extract = (m: string, fields: IntentContext['fields']) => extractStepFieldsWithoutAi(m, fields as FlowFieldDef[]);
+
+  if (isRestartCommand(message)) return { intent: 'restart', slots: {}, source: 'rules' };
+  if (ctx.phase === 'awaiting_confirmation') {
+    if (isNoAnswer(message)) return { intent: 'decline', slots: {}, source: 'rules' };
+    if (isYesAnswer(message)) return { intent: 'confirm', slots: {}, source: 'rules' };
+  }
+  if (flow.replyMode === 'system') return classifyByRules(message, ctx, extract);
+
+  const prompt = buildIntentPrompt(ctx);
+  const startedAt = Date.now();
+  try {
+    const raw = await quoteFlowDeps.callAi(settings, message, prompt);
+    const parsed = parseIntentResponse(raw, ctx);
+    traceData('intent_ai', {
+      provider: settings.active_ai,
+      latency_ms: Date.now() - startedAt,
+      raw: clipForTrace(raw, 600),
+      parsed: parsed ? { intent: parsed.intent, slots: parsed.slots } : null,
+    });
+    if (parsed) return parsed;
+    traceStep('AI 意圖分類回覆無法解析，退回規則判斷');
+  } catch (e: any) {
+    traceData('intent_ai', { provider: settings.active_ai, latency_ms: Date.now() - startedAt, error: e.message });
+    traceError(`意圖分類 AI 呼叫失敗：${e.message}`);
+    console.error('[Booking] intent classification failed:', e.message);
+    for (const id of parseCsvKeywords(settings.agent_user_ids)) {
+      try {
+        await lineClient.pushMessage(id, {
+          type: 'text',
+          text: `⚠️ AI 呼叫失敗（訂房意圖判斷）：【${nickname || '匿名用戶'}】\n錯誤訊息：${e.message}\n已改用規則判斷繼續流程，請檢查 AI 設定。`,
+        });
+      } catch {}
+    }
+  }
+  return classifyByRules(message, ctx, extract);
+}
+
+// 收集中：把新值合併進槽位，齊了就報價；沒齊就問缺的。
+// 「問缺的」有兩種：什麼都還沒填 → 送管理員設定的第一步問句（表單）；填了一部分 →
+// 若還有整組都沒答的步驟就送那一步的問句，否則直接列出還缺哪幾個算價欄位。
+async function advanceCollecting(
+  a: QuoteConversationArgs,
+  reply: (text: string) => Promise<void>,
+  merged: Record<string, string>
+): Promise<boolean> {
+  const { lineClient, lineEvent, settings, userId, nickname, session, flow } = a;
+  const allFields = flow.steps.flatMap((s) => s.fields);
+  const missing = missingEssentialFields(allFields, merged);
+
+  if (missing.length === 0) {
+    // 算價三要素齊了。還有整組都沒答的步驟（例如「房型與備註」那一步）就先問一次，
+    // 讓管理員設定的問句有機會出現；已經問過（stepIndex 走過）就不再問，直接報價。
+    const nextStepIdx = flow.steps.findIndex(
+      (st, i) => i > session.stepIndex && st.fields.length > 0 && st.fields.every((f) => !merged[f.key])
+    );
+    if (nextStepIdx >= 0 && Object.keys(merged).length > 0) {
+      traceStep(`算價欄位已齊，但第 ${nextStepIdx + 1} 步的欄位都還沒答，先問這一步`);
+      await saveBookingSession(userId, { ...session, stepIndex: nextStepIdx, collected: merged, phase: 'in_flow' });
+      const text = await renderFlowMessage(flow.steps[nextStepIdx].message_template, settings, userId, nickname, session.bookingId);
+      await reply(text);
+      return true;
+    }
+    traceStep('算價欄位已齊，進入試算／報價');
+    if (session.bookingId) {
+      await supabase.from('bookings').update({ collected_answers: merged, updated_at: new Date().toISOString() }).eq('id', session.bookingId);
+    }
+    const sendReply = (text: string) => lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text }).then(() => {});
+    await quoteFlowDeps.finishBookingFlow(lineClient, sendReply, settings, userId, nickname, flow, merged, session.bookingId as string);
     return true;
   }
 
-  if (!isYes && !isNo) {
-    // 顧客直接把整組新的訂房資訊丟回來（例如整張表單重填一次）：以新的為準，取消上一筆報價、
-    // 開一筆新訂單，跳過收集步驟直接進系統試算。刻意要求「解析得出完整資訊」才算——
-    // 只有零星幾個欄位的話更可能是他在問別的事，貿然重算會把他原本那筆報價弄不見。
-    if (await tryRequoteFromCompleteInfo(lineClient, lineEvent, settings, userId, nickname, userMessage, session)) return true;
+  await saveBookingSession(userId, { ...session, collected: merged, phase: 'in_flow' });
+  if (Object.keys(merged).length === 0) {
+    const first = flow.steps.find((st) => st.step_order === 1);
+    if (first) {
+      traceStep('還沒有任何欄位，送出第一步的表單');
+      await reply(await renderFlowMessage(first.message_template, settings, userId, nickname, session.bookingId));
+      return true;
+    }
+  }
+  traceStep(`還缺：${missing.map((f) => f.label).join('、')}，再問一次`);
+  await reply(`還需要麻煩您補充：${missing.map((f) => f.label).join('、')}`);
+  return true;
+}
 
-    // 這句話不是在回答是/否/修改，很可能是客人點了圖文選單之類的自動回覆按鈕，剛好在等
-    // 報價回覆的當下觸發了另一個流程的關鍵字——這時候該讓那個自動回覆正常顯示，而不是硬用
-    // 「請回是/否」卡住客人（客人根本不知道自己在被問是/否，只會覺得 AI 答非所問）。
-    // 一定要排除流程自己：顧客打到自己流程的觸發字（例如「價格」）會拿到一張空白表單，
-    // 但 session 還停在等是/否，填完送出又被擋回來，繞不出去。
-    // 刻意不呼叫 startBookingFlow()：那會建新訂單、覆蓋掉這筆待確認的 session，讓客人之後
-    // 真的回「是」或「否」時已經接不回這筆報價了。這裡只送出對方流程的第一句話當作提示，
-    // session 完全不動，原本待確認的報價繼續安靜留著。
-    const interruptingFlow = (await fetchActiveFlows()).find((f) => f.id !== session.flowId && matchTriggerRules(trimmed, f.triggerRules));
-    const interruptingFirstStep = interruptingFlow?.steps.find((s) => s.step_order === 1);
-    if (interruptingFirstStep) {
-      const replyText = await renderFlowMessage(interruptingFirstStep.message_template, settings, userId, nickname, null);
-      await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
-      await logConversation(userId, nickname, 'outbound', replyText, 'system');
-      return true; // 停留在 awaiting_confirmation，不清 session
+async function handleQuoteConversation(a: QuoteConversationArgs): Promise<boolean> {
+  const { lineClient, lineEvent, settings, userId, nickname, userMessage, session, flow, isImage } = a;
+  const phase = sessionPhaseToIntentPhase(session.phase);
+  const allFields = flow.steps.flatMap((s) => s.fields);
+  const reply = async (text: string) => {
+    await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text });
+    await logConversation(userId, nickname, 'outbound', text, 'system');
+  };
+  const notifyAgents = async (text: string) => {
+    for (const id of parseCsvKeywords(settings.agent_user_ids)) {
+      try { await lineClient.pushMessage(id, { type: 'text', text }); } catch {}
+    }
+  };
+
+  traceData('flow', {
+    name: flow.name,
+    type: flow.flowType,
+    mode: flow.replyMode,
+    phase,
+    fields: allFields.map((f) => `${f.label}${f.quote_field ? `（${f.quote_field}）` : ''}`),
+    collected_before: session.collected,
+  });
+
+  // 圖片：待匯款階段是匯款憑證（沿用既有處理）；其他階段沒有可判讀的內容，通知客服看一眼。
+  if (isImage) {
+    if (phase === 'awaiting_remittance') {
+      traceStep('待匯款階段收到圖片，視為匯款憑證');
+      return quoteFlowDeps.handleRemittanceReport(lineClient, lineEvent, settings, userId, nickname, userMessage, session, true);
+    }
+    traceStep('訂房流程中收到圖片，通知客服人工查看（session 不動）');
+    await reply('已收到您傳送的圖片，我們會請專人為您確認 🙏');
+    await notifyAgents(`🖼️ 訂房流程中收到圖片：【${nickname || '匿名用戶'}】\n請到 LINE 官方帳號查看，可能需要人工協助。`);
+    return true;
+  }
+
+  // 便宜又確定的兩個判斷先做，不花 AI：
+  // (1) 打到「別的」流程的觸發字（通常是圖文選單按鈕）且沒有欄位內容 → 顯示那個流程的第一句，session 不動
+  // (2) 打到「本流程」的觸發字且沒有欄位內容 → 重新開始
+  const quoteSlotsInMessage = extractStepFieldsWithoutAi(userMessage, allFields.filter((f) => f.quote_field));
+  const hasQuoteContent = Object.keys(quoteSlotsInMessage).length > 0;
+  if (!hasQuoteContent) {
+    const other = (await fetchActiveFlows()).find((f) => f.id !== flow.id && matchTriggerRules(userMessage, f.triggerRules));
+    const otherFirst = other?.steps.find((st) => st.step_order === 1);
+    if (otherFirst) {
+      traceStep(`對到流程「${other!.name}」的觸發字，顯示那個流程的第一步（目前訂房 session 不動）`);
+      await reply(await renderFlowMessage(otherFirst.message_template, settings, userId, nickname, null));
+      return true;
+    }
+    if (matchTriggerRules(userMessage, flow.triggerRules)) {
+      traceStep(`對到本流程「${flow.name}」的觸發字、沒有欄位內容，視為重新開始`);
+      return restartQuote(a);
+    }
+  }
+
+  // 客服上一句問的是哪幾個欄位：算價三要素還缺就是缺的那幾個；三要素齊了、正在問某一步
+  // （例如「有什麼備註嗎？」）就是那一步還沒填的欄位。「客人只回一個數字」要對到哪一欄靠這個。
+  const essentialsMissing = missingEssentialFields(allFields, session.collected);
+  const currentStepFields = flow.steps[session.stepIndex]?.fields ?? [];
+  const askedKeys = phase !== 'collecting'
+    ? []
+    : (essentialsMissing.length ? essentialsMissing : currentStepFields.filter((f) => !session.collected[f.key])).map((f) => f.key);
+
+  // 意圖分類（AI 模式會帶最近對話當脈絡）
+  const history = flow.replyMode === 'system' ? [] : (await fetchConversationContext(userId, userMessage)).history;
+  const ctx: IntentContext = {
+    phase,
+    fields: allFields,
+    collected: session.collected,
+    recentMessages: history.map((h) => ({ role: h.direction === 'inbound' ? 'customer' as const : 'bot' as const, text: h.content })),
+    todayIso: dateToIso(taiwanToday()),
+    askedKeys,
+  };
+  const result = await classifyBookingIntent(settings, flow, userMessage, ctx, nickname, lineClient);
+  traceData('intent', { intent: result.intent, slots: result.slots, source: result.source, reason: result.reason ?? null });
+  traceStep(`意圖：${result.intent}${result.source === 'rules' ? '（規則）' : ''}${result.reason ? `——${result.reason}` : ''}`);
+
+  const missingLabels = () => missingEssentialFields(allFields, session.collected).map((f) => f.label);
+
+  switch (result.intent) {
+    case 'restart':
+      return restartQuote(a);
+
+    case 'question':
+      // 交給一般 AI 問答（知識庫），答完補提醒。session 完全不動。
+      setTurnReminder(reminderForPhase(phase, missingLabels(), Object.keys(session.collected).length));
+      traceStep('客人在問問題，交給一般 AI 問答回答，答完補提醒（session 不動）');
+      return false;
+
+    case 'provide_info':
+    case 'modify': {
+      const { values, invalid } = normalizeSlots(allFields, result.slots);
+      const merged = { ...session.collected, ...values };
+      traceData('slots_applied', values);
+      if (invalid.length > 0) {
+        traceStep(`格式錯誤：${invalid.map((f) => f.label).join('、')}`);
+        await saveBookingSession(userId, { ...session, collected: merged });
+        await reply(`${invalid.map((f) => f.label).join('、')}格式錯誤，請重新輸入`);
+        return true;
+      }
+      if (phase === 'collecting') return advanceCollecting(a, reply, merged);
+      if (Object.keys(values).length === 0) {
+        // AI 說有資訊但抽不出東西：當成不明，走下面的階段預設
+        traceStep('分類為提供資訊但沒有任何可用的欄位值，改走階段預設處理');
+        return handleUnclear(a, reply, notifyAgents, phase, missingLabels());
+      }
+      // 待確認／待匯款：客人改了內容 → 以新的為準重新報價
+      traceStep('報價後客人更改訂房內容，重新試算');
+      return quoteFlowDeps.requoteWithCollected(lineClient, lineEvent, settings, userId, nickname, flow, session, merged);
     }
 
-    // 客人在確認前先問別的事（「有早餐嗎」）：回傳 false 讓呼叫端把這句交給一般 AI 問答，
-    // 用知識庫回答；呼叫端答完會補一句「報價仍在等您確認」。session 完全不動，
-    // 他問完回「是」還是接得回這筆報價。以前這裡一律推給真人，客人只是想確認個早餐就得等人回。
-    if (looksLikeQuestion(trimmed)) {
-      traceStep('等報價確認時問了別的問題，交給一般 AI 問答回答（session 不動）');
+    case 'confirm':
+      if (phase === 'awaiting_confirmation') {
+        traceStep('客人同意報價，成立訂單');
+        return quoteFlowDeps.confirmQuote(lineClient, lineEvent, settings, userId, nickname, session);
+      }
+      if (phase === 'collecting') {
+        traceStep('收集中就說「確認」，還沒有報價可確認，改問缺的欄位');
+        await reply(`目前還沒有報價可以確認喔，還需要麻煩您補充：${missingLabels().join('、') || '訂房資訊'}`);
+        return true;
+      }
+      await reply('您的訂單已經成立，正在等待匯款。完成匯款後請回覆帳號末五碼，我們會盡快為您核對 🙏');
+      return true;
+
+    case 'decline':
+      if (phase === 'awaiting_confirmation') {
+        traceStep('客人不訂了，取消報價');
+        return quoteFlowDeps.declineQuote(lineClient, lineEvent, userId, nickname, session);
+      }
+      if (phase === 'collecting') {
+        traceStep('收集中客人說不訂了，取消詢問');
+        if (session.bookingId) {
+          await supabase.from('bookings').update({ status: 'cancelled', updated_at: new Date().toISOString() }).eq('id', session.bookingId);
+        }
+        await clearBookingSession(userId);
+        await reply('好的，這次先不訂房沒關係！之後有需要歡迎再告訴我們 😊');
+        return true;
+      }
+      // 待匯款：訂單已成立、可能已經付款，不自動取消，交給客服處理
+      traceStep('待匯款階段客人說要取消，通知客服人工處理（不自動取消）');
+      await reply('好的，已通知客服為您處理取消事宜，稍後會與您聯繫 🙏');
+      await notifyHandover(settings, lineClient, `🙋 待匯款的訂單客人要求取消：【${nickname || '匿名用戶'}】\n顧客回覆：${userMessage}\n（系統未自動取消，請人工確認是否已付款後處理）`);
+      return true;
+
+    case 'payment_report':
+      if (phase === 'awaiting_remittance') {
+        traceStep('客人回報匯款，通知客服核對');
+        return quoteFlowDeps.handleRemittanceReport(lineClient, lineEvent, settings, userId, nickname, userMessage, session, false);
+      }
+      traceStep('還沒到匯款階段就回報匯款，提醒目前狀態');
+      await reply(
+        phase === 'awaiting_confirmation'
+          ? '目前的報價還在等您確認喔，回覆「是」我們就為您成立訂單並提供匯款資訊 😊'
+          : `目前還沒有需要匯款的訂單喔。要訂房的話請先補充：${missingLabels().join('、') || '訂房資訊'}`
+      );
+      return true;
+
+    case 'unclear':
+    default:
+      return handleUnclear(a, reply, notifyAgents, phase, missingLabels());
+  }
+}
+
+// 意圖不明時的階段預設：收集中什麼都沒填就當閒聊交給 AI；填了一部分就再問缺的；
+// 待確認交給真人判斷；待匯款保守當成匯款回報（漏掉真的回報比誤判嚴重）。
+async function handleUnclear(
+  a: QuoteConversationArgs,
+  reply: (text: string) => Promise<void>,
+  _notifyAgents: (text: string) => Promise<void>,
+  phase: BookingPhase,
+  missingLabels: string[]
+): Promise<boolean> {
+  const { lineClient, lineEvent, settings, userId, nickname, userMessage, session } = a;
+  if (phase === 'collecting') {
+    if (Object.keys(session.collected).length === 0) {
+      traceStep('收集中、還沒填任何欄位、意圖不明：當一般對話交給 AI，答完提醒可以填表單');
+      setTurnReminder(reminderForPhase(phase, missingLabels, Object.keys(session.collected).length));
       return false;
     }
-
-    // 走到這裡代表顧客回的既不是是/否/修改、不是完整的新訂房資訊、也不像在問問題——最常見的
-    // 就是「好啊但我想改成10/10」這種「開頭像同意、實際上另有要求」的句子。AI 不猜他的意思，
-    // 只回一句可選項目，同時通知真人接手，由真人判斷他到底要什麼。
-    // session 完全不動：真人處理完之後，顧客回「是」還是接得回這筆報價。
-    traceStep('等報價確認時的回覆既不是是/否/修改也不像問句，交給真人判斷');
-    const replyText = '不好意思，這部分我們請專人為您確認，稍後會與您聯繫 🙏\n如果您已經確定，也可以直接回覆「是」訂房、「否」取消，或回覆「修改」重新填寫訂房資訊。';
-    await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
-    await logConversation(userId, nickname, 'outbound', replyText, 'system');
+    if (missingLabels.length === 0) {
+      // 算價三要素都齊了、卡在某個選填步驟（例如「有什麼備註嗎？」）、客人回了看不懂的東西：
+      // 選填的不強求，直接往下走（advanceCollecting 會跳過已問過的步驟、進試算）。
+      traceStep('意圖不明但算價欄位已齊，選填步驟不強求，直接往下');
+      return advanceCollecting(a, reply, session.collected);
+    }
+    traceStep(`意圖不明，再問一次缺的欄位：${missingLabels.join('、')}`);
+    await reply(`還需要麻煩您補充：${missingLabels.join('、')}`);
+    return true;
+  }
+  if (phase === 'awaiting_confirmation') {
+    traceStep('待確認階段意圖不明（不是是/否/修改/問題），交給真人判斷');
+    await reply('不好意思，這部分我們請專人為您確認，稍後會與您聯繫 🙏\n如果您已經確定，也可以直接回覆「是」訂房、「否」取消，或回覆「修改」重新填寫訂房資訊。');
     await notifyHandover(
       settings,
       lineClient,
       `🙋 報價確認階段需要人工判斷：【${nickname || '匿名用戶'}】\n顧客回覆：${userMessage}\n（不是單純的是/否/修改，系統沒有自行成立訂單，請人工接手回覆）`
     );
-    return true; // 停留在 awaiting_confirmation，不清 session
-  }
-
-  if (isNo) {
-    await supabase.from('bookings').update({ status: 'cancelled', updated_at: new Date().toISOString() }).eq('id', session.bookingId);
-    const replyText = '好的，這次先不訂房沒關係！之後想重新試算歡迎再輸入訂房關鍵字，或直接點選「真人客服」讓我們協助您。';
-    await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
-    await logConversation(userId, nickname, 'outbound', replyText, 'system');
-    await clearBookingSession(userId);
     return true;
   }
+  traceStep('待匯款階段意圖不明，保守當成匯款回報通知客服');
+  return quoteFlowDeps.handleRemittanceReport(lineClient, lineEvent, settings, userId, nickname, userMessage, session, false);
+}
 
+// 重新開始：收集中沿用同一筆 inquiring 訂單重送表單；報價後要走 restartQuoteFlow
+// （舊單待預定就取消、已待確認就記 supersedes 留給客服），否則會多開一筆重複的訂單。
+async function restartQuote(a: QuoteConversationArgs): Promise<boolean> {
+  const { lineClient, lineEvent, settings, userId, nickname, session, flow } = a;
+  if (session.phase === 'in_flow') {
+    await quoteFlowDeps.startBookingFlow(lineClient, lineEvent, settings, userId, nickname, flow);
+  } else {
+    await quoteFlowDeps.restartQuoteFlow(lineClient, lineEvent, settings, userId, nickname, session);
+  }
+  return true;
+}
+
+// 分派器會呼叫的重機械（成立訂單、試算、重開流程、匯款通知、AI 呼叫）集中在這裡，
+// 情境測試時整包換成記錄呼叫的假函式，就能不碰資料庫與 LINE 跑完整的編排邏輯。
+// 生產環境不會動到它。函式宣告會提升，所以放在這裡引用下面才定義的函式沒問題。
+export const quoteFlowDeps = {
+  finishBookingFlow,
+  confirmQuote,
+  declineQuote,
+  handleRemittanceReport,
+  restartQuoteFlow,
+  startBookingFlow,
+  requoteWithCollected,
+  callAi: async (settings: any, message: string, prompt: string): Promise<string> =>
+    settings.active_ai === 'gpt' ? (await callGPT(settings, message, [], prompt)).text : callGemini(settings, message, [], prompt),
+};
+
+// 情境測試用的出口：只在測試 harness 匹配。
+export const __quoteFlowTesting = { handleQuoteConversation, tryStartQuoteFromCompleteInfo, extractStepFieldsWithoutAi, runTurn, takeTurnReminder, setActiveChannelId: (id: string | null) => { activeChannelId = id; } };
+
+
+// 客人不訂了：取消這筆報價中的訂單、清 session。
+async function declineQuote(
+  lineClient: Client,
+  lineEvent: any,
+  userId: string,
+  nickname: string | null,
+  session: BookingSession
+): Promise<boolean> {
+  await supabase.from('bookings').update({ status: 'cancelled', updated_at: new Date().toISOString() }).eq('id', session.bookingId);
+  const replyText = '好的，這次先不訂房沒關係！之後想重新試算歡迎再輸入訂房關鍵字，或直接點選「真人客服」讓我們協助您。';
+  await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
+  await logConversation(userId, nickname, 'outbound', replyText, 'system');
+  await clearBookingSession(userId);
+  return true;
+}
+
+// 客人同意報價：檢查房況、鎖房、成立訂單、送出預訂單與匯款資訊。
+// 「客人這句是不是同意」已經由 handleQuoteConversation 判斷完，這裡只負責成立訂單。
+async function confirmQuote(
+  lineClient: Client,
+  lineEvent: any,
+  settings: any,
+  userId: string,
+  nickname: string | null,
+  session: BookingSession
+): Promise<boolean> {
   const quote = session.quote;
   const flow = await fetchFlowById(session.flowId);
   const { data: booking } = await supabase.from('bookings').select('*').eq('id', session.bookingId).single();
@@ -3165,7 +3479,7 @@ async function handleRemittanceReport(
 // ========================================================================
 // 候補自動回報（排程管理的「候補自動配對」排程呼叫 processWaitlist()）
 //
-// finishBookingFlow／handleBookingConfirmation 排不出房或發現撞期時，除了回覆客人，
+// finishBookingFlow／confirmQuote 排不出房或發現撞期時，除了回覆客人，
 // 也會記一筆 waitlist_blocked_by（監看哪一筆訂單）。這裡定期掃描這些候補中的訂單，
 // 只要監看對象「有結果」了（不再是佔用中狀態），就重新試算一次、主動推播給客人——
 // 只重試這一次，不管成功或還是排不出來，都會清空 waitlist_blocked_by，不會無限重試。
