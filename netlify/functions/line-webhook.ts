@@ -554,6 +554,10 @@ async function processLineEvent(
     // 「其他問題」之類剛好也對到某個流程觸發字的自動回覆圖文選單，就會被悄悄開一個全新的空白
     // session，把已經收集好的資訊整個蓋掉——客人會看到報價卡片後面立刻接一句「還需要補充」，
     // 而且怎麼回「是」都卡在同一句，因為當下其實是在回答一個他根本不知道自己開啟的新流程。
+    // 客人在等報價確認時問了別的問題、由下面的一般 AI 問答回答：答完要補一句提醒，
+    // 不然他可能以為問完就沒事了，報價一直懸在那裡等他回是/否。
+    let remindPendingQuote = false;
+
     if (settings.is_ai_enabled) {
       // 只有「這位客人本來就有 booking_session」才需要搶鎖——全新客人的第一句話不可能跟自己
       // 的舊 session 競爭。搶到鎖時一併換成當下重新讀到的最新一份 user_states，不能沿用呼叫端
@@ -590,6 +594,7 @@ async function processLineEvent(
           // 被那段清掉的話顧客之後真的要回答流程時就接不住了。
           if (handled) return;
           traceStep('流程判斷這則訊息不歸它管，往下交給一般 AI 問答');
+          remindPendingQuote = existingSession.phase === 'awaiting_confirmation';
         } else {
           const activeFlows = await fetchActiveFlows();
 
@@ -682,6 +687,10 @@ async function processLineEvent(
           await lineClient.pushMessage(id, { type: 'text', text: `⚠️ AI 呼叫失敗：【${nickname || '匿名用戶'}】\n錯誤訊息：${e.message}` });
         } catch {}
       }
+    }
+
+    if (aiResult && remindPendingQuote) {
+      aiResult += '\n\n📋 您的報價仍在等待確認：回覆「是」訂房、「否」取消，或「修改」重新填寫訂房資訊。';
     }
 
     if (aiResult) {
@@ -1983,8 +1992,7 @@ async function continueBookingFlow(
 ): Promise<boolean> {
   if (session.phase === 'awaiting_confirmation') {
     traceStep('等待客人確認報價（是／否）');
-    await handleBookingConfirmation(lineClient, lineEvent, settings, userId, nickname, userMessage, session);
-    return true;
+    return handleBookingConfirmation(lineClient, lineEvent, settings, userId, nickname, userMessage, session);
   }
   if (session.phase === 'awaiting_remittance') {
     traceStep('等待客人回報匯款');
@@ -2660,6 +2668,15 @@ async function finishBookingFlow(
 //     兩筆就都沒了。
 // 顧客明確要求重填訂房資訊的指令。報價確認與等匯款兩個階段都認得同一組字，
 // 顧客不用記在哪個階段該打哪個字。整句話要以這些字開頭才算，避免「我不想修改」被誤判。
+// 客人在等報價確認時問別的事（「有早餐嗎」「幾點可以入住」）：這種要交給一般 AI 問答用知識庫
+// 回答，不是推給真人。只認「像問句」的訊息：句尾是嗎／呢／？，或含請問／怎麼／多少／幾點這類
+// 疑問詞。「好啊但我想改成10/10」這種不是問句、是帶條件的要求，AI 沒辦法真的改訂單、答應了
+// 也是空話，還是照原本的方式交給真人判斷。
+function looksLikeQuestion(message: string): boolean {
+  const t = message.trim().replace(/[。！!~～\s]+$/, '');
+  return /[?？嗎呢嘛麼]$/.test(t) || /(請問|怎麼|怎樣|如何|多少|幾點|幾天|幾個|什麼|甚麼|哪裡|哪邊|哪些|有沒有|可不可以|能不能|是否)/.test(t);
+}
+
 function isRestartCommand(message: string): boolean {
   return /^(修改|重新報價|重新試算|重新算|改訂單|改資料)/i.test(message.trim());
 }
@@ -2832,7 +2849,7 @@ async function handleBookingConfirmation(
   nickname: string | null,
   userMessage: string,
   session: BookingSession
-) {
+): Promise<boolean> {
   const trimmed = userMessage.trim();
   const answer = normalizeShortAnswer(trimmed);
   const isNo = NO_ANSWERS.has(answer);
@@ -2842,14 +2859,14 @@ async function handleBookingConfirmation(
   // 「真人客服」在更上層（handoverKeywords）就攔截掉了，不會走到這裡。
   if (isRestartCommand(trimmed)) {
     await restartQuoteFlow(lineClient, lineEvent, settings, userId, nickname, session);
-    return;
+    return true;
   }
 
   if (!isYes && !isNo) {
     // 顧客直接把整組新的訂房資訊丟回來（例如整張表單重填一次）：以新的為準，取消上一筆報價、
     // 開一筆新訂單，跳過收集步驟直接進系統試算。刻意要求「解析得出完整資訊」才算——
     // 只有零星幾個欄位的話更可能是他在問別的事，貿然重算會把他原本那筆報價弄不見。
-    if (await tryRequoteFromCompleteInfo(lineClient, lineEvent, settings, userId, nickname, userMessage, session)) return;
+    if (await tryRequoteFromCompleteInfo(lineClient, lineEvent, settings, userId, nickname, userMessage, session)) return true;
 
     // 這句話不是在回答是/否/修改，很可能是客人點了圖文選單之類的自動回覆按鈕，剛好在等
     // 報價回覆的當下觸發了另一個流程的關鍵字——這時候該讓那個自動回覆正常顯示，而不是硬用
@@ -2865,13 +2882,22 @@ async function handleBookingConfirmation(
       const replyText = await renderFlowMessage(interruptingFirstStep.message_template, settings, userId, nickname, null);
       await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
       await logConversation(userId, nickname, 'outbound', replyText, 'system');
-      return; // 停留在 awaiting_confirmation，不清 session
+      return true; // 停留在 awaiting_confirmation，不清 session
     }
 
-    // 走到這裡代表顧客回的既不是是/否/修改，也不是完整的新訂房資訊——最常見的就是
-    // 「好啊但我想改成10/10」這種「開頭像同意、實際上另有要求」的句子。AI 不猜他的意思，
+    // 客人在確認前先問別的事（「有早餐嗎」）：回傳 false 讓呼叫端把這句交給一般 AI 問答，
+    // 用知識庫回答；呼叫端答完會補一句「報價仍在等您確認」。session 完全不動，
+    // 他問完回「是」還是接得回這筆報價。以前這裡一律推給真人，客人只是想確認個早餐就得等人回。
+    if (looksLikeQuestion(trimmed)) {
+      traceStep('等報價確認時問了別的問題，交給一般 AI 問答回答（session 不動）');
+      return false;
+    }
+
+    // 走到這裡代表顧客回的既不是是/否/修改、不是完整的新訂房資訊、也不像在問問題——最常見的
+    // 就是「好啊但我想改成10/10」這種「開頭像同意、實際上另有要求」的句子。AI 不猜他的意思，
     // 只回一句可選項目，同時通知真人接手，由真人判斷他到底要什麼。
     // session 完全不動：真人處理完之後，顧客回「是」還是接得回這筆報價。
+    traceStep('等報價確認時的回覆既不是是/否/修改也不像問句，交給真人判斷');
     const replyText = '不好意思，這部分我們請專人為您確認，稍後會與您聯繫 🙏\n如果您已經確定，也可以直接回覆「是」訂房、「否」取消，或回覆「修改」重新填寫訂房資訊。';
     await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
     await logConversation(userId, nickname, 'outbound', replyText, 'system');
@@ -2880,7 +2906,7 @@ async function handleBookingConfirmation(
       lineClient,
       `🙋 報價確認階段需要人工判斷：【${nickname || '匿名用戶'}】\n顧客回覆：${userMessage}\n（不是單純的是/否/修改，系統沒有自行成立訂單，請人工接手回覆）`
     );
-    return; // 停留在 awaiting_confirmation，不清 session
+    return true; // 停留在 awaiting_confirmation，不清 session
   }
 
   if (isNo) {
@@ -2889,7 +2915,7 @@ async function handleBookingConfirmation(
     await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
     await logConversation(userId, nickname, 'outbound', replyText, 'system');
     await clearBookingSession(userId);
-    return;
+    return true;
   }
 
   const quote = session.quote;
@@ -2900,7 +2926,7 @@ async function handleBookingConfirmation(
     await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: replyText });
     await logConversation(userId, nickname, 'outbound', replyText, 'system');
     await clearBookingSession(userId);
-    return;
+    return true;
   }
 
   const roomTypeIdsByNight = new Map<string, string[]>();
@@ -2962,7 +2988,7 @@ async function handleBookingConfirmation(
       } catch {}
     }
     await clearBookingSession(userId);
-    return;
+    return true;
   }
 
   // 客戶口頭確認要訂房了，房間鎖定、匯款資訊已送出，但實際匯款尚未核實，所以是「待確認」
@@ -3043,6 +3069,7 @@ async function handleBookingConfirmation(
   // awaiting_remittance，這樣他之後傳的第一句話（不管是「轉帳成功12345」還是隨便講什麼）
   // 都會被 handleRemittanceReport() 接住，而不是掉進一般 AI 回覆或被當成新的訂房流程開始。
   await saveBookingSession(userId, { ...session, phase: 'awaiting_remittance' });
+  return true;
 }
 
 // 預訂單送出之後顧客傳來的第一則訊息。
