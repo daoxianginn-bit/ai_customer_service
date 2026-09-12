@@ -1,4 +1,5 @@
 import { useMemo, useState, type ReactNode } from 'react';
+import { UnsavedChangesProvider, useInterceptInternalLinks } from '../app/UnsavedChanges';
 import { Link as RouterLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import {
   AppBar, Avatar, Box, Breadcrumbs, Divider, Drawer, IconButton, Link, List, ListItemButton,
@@ -53,6 +54,15 @@ function readCollapsed(): boolean {
 }
 
 export default function AppLayout() {
+  return (
+    <UnsavedChangesProvider>
+      <AppLayoutInner />
+    </UnsavedChangesProvider>
+  );
+}
+
+function AppLayoutInner() {
+  const onClickCapture = useInterceptInternalLinks();
   const navigate = useNavigate();
   const location = useLocation();
   const { role, profile, signOut } = useAuth();
@@ -226,7 +236,7 @@ export default function AppLayout() {
   );
 
   return (
-    <Box sx={{ display: 'flex', minHeight: '100vh', bgcolor: 'background.default' }}>
+    <Box sx={{ display: 'flex', minHeight: '100vh', bgcolor: 'background.default' }} onClickCapture={onClickCapture}>
       {topbar}
 
       {isDesktop ? (

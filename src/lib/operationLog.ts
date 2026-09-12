@@ -60,6 +60,9 @@ export const LOG_FUNCTION_NAMES = [
   'list-admins',
   'delete-admin',
   'delete-customer-data',
+  'ai-test',
+  'flow-test',
+  'knowledge-test',
 ];
 
 /** 系統自動異動時的固定異動者名稱。 */

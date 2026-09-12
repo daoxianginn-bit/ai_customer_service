@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react';
+import { useUnsavedChanges } from '../../app/UnsavedChanges';
 import { Box, Button, Card, CardContent, Divider, Skeleton, Stack, Typography } from '@mui/material';
 import ResultState from './ResultState';
 import { useSnackbar } from 'notistack';
@@ -33,6 +34,7 @@ interface SettingsShellProps {
 }
 
 export default function SettingsShell({ loading, loadError, onRetry, dirty, saving, onSave, onDiscard, savedMessage = '設定已儲存', title, description, headerSecondary, children }: SettingsShellProps) {
+  useUnsavedChanges(!!dirty && !saving);
   const { enqueueSnackbar } = useSnackbar();
   const { isMobile } = useBreakpoint();
 

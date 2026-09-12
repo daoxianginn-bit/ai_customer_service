@@ -2883,7 +2883,7 @@ function normalizeSlots(fields: FlowFieldDef[], slots: Record<string, string>): 
 }
 
 // 意圖分類：明確的短答不花 AI；system 模式只用規則；AI 模式呼叫 AI，失敗退回規則。
-async function classifyBookingIntent(settings: any, flow: FlowDef, message: string, ctx: IntentContext, nickname: string | null, lineClient: Client): Promise<IntentResult> {
+async function classifyBookingIntent(settings: any, flow: FlowDef, message: string, ctx: IntentContext, nickname: string | null, lineClient: Client | null): Promise<IntentResult> {
   const extract = (m: string, fields: IntentContext['fields']) => extractStepFieldsWithoutAi(m, fields as FlowFieldDef[]);
 
   if (isRestartCommand(message)) return { intent: 'restart', slots: {}, source: 'rules' };
@@ -2910,7 +2910,8 @@ async function classifyBookingIntent(settings: any, flow: FlowDef, message: stri
     traceData('intent_ai', { provider: settings.active_ai, latency_ms: Date.now() - startedAt, error: e.message });
     traceError(`意圖分類 AI 呼叫失敗：${e.message}`);
     console.error('[Booking] intent classification failed:', e.message);
-    for (const id of parseCsvKeywords(settings.agent_user_ids)) {
+    // lineClient 為 null＝流程測試模擬器在呼叫，不要真的推播通知客服
+    if (lineClient) for (const id of parseCsvKeywords(settings.agent_user_ids)) {
       try {
         await lineClient.pushMessage(id, {
           type: 'text',
@@ -3201,6 +3202,75 @@ export const quoteFlowDeps = {
 
 // 情境測試用的出口：只在測試 harness 匹配。
 export const __quoteFlowTesting = { handleQuoteConversation, tryStartQuoteFromCompleteInfo, extractStepFieldsWithoutAi, runTurn, takeTurnReminder, setActiveChannelId: (id: string | null) => { activeChannelId = id; } };
+
+// ------------------------------------------------------------------------
+// 流程測試模擬器（V2 §36）：後台「對話流程」頁輸入一句話，看系統會判成什麼意圖、抓到哪些欄位。
+// 只跑分類與擷取，不碰 bookings／user_states／conversations，也不推播 LINE。
+// 跟正式對話走同一個 classifyBookingIntent（AI 模式會真的呼叫 AI），所以測到的就是線上行為。
+// ------------------------------------------------------------------------
+export async function simulateFlowTurn(input: {
+  message: string;
+  flowId?: string | null;
+  phase?: BookingPhase;
+  collected?: Record<string, string>;
+  recentMessages?: { role: 'customer' | 'bot'; text: string }[];
+}): Promise<{
+  flow: { id: string; name: string; replyMode: string; flowType: string } | null;
+  intent: IntentResult | null;
+  missing: string[];
+  merged: Record<string, string>;
+  fields: { key: string; label: string; quote_field: string | null }[];
+  extractedWithoutAi: Record<string, string>;
+  steps: string[];
+  errors: string[];
+  data?: Record<string, unknown>;
+  elapsed_ms: number;
+}> {
+  const startedAt = Date.now();
+  const { data: settings } = await supabase.from('settings').select('*').single();
+  const flows = await fetchActiveFlows();
+  const flow = (input.flowId ? flows.find((f) => f.id === input.flowId) : null) ?? flows.find((f) => f.flowType === 'quote') ?? flows[0] ?? null;
+  const collected = input.collected || {};
+  if (!flow) return { flow: null, intent: null, missing: [], merged: collected, fields: [], extractedWithoutAi: {}, steps: ['沒有啟用中的對話流程'], errors: [], elapsed_ms: Date.now() - startedAt };
+
+  const allFields = flow.steps.flatMap((st) => st.fields);
+  const phase: BookingPhase = input.phase || 'collecting';
+  const essentialsMissing = missingEssentialFields(allFields, collected);
+  const askedKeys = phase !== 'collecting' ? [] : (essentialsMissing.length ? essentialsMissing : allFields.filter((f) => !collected[f.key])).map((f) => f.key);
+  const ctx: IntentContext = {
+    phase,
+    fields: allFields,
+    collected,
+    recentMessages: input.recentMessages || [],
+    todayIso: dateToIso(taiwanToday()),
+    askedKeys,
+  };
+  const steps: string[] = [];
+  const errors: string[] = [];
+  const trace: TurnTrace = { startedAt, steps, data: {}, errors, inbound: null, reminder: null };
+  return await turnTraceStore.run(trace, async () => {
+    const result = await classifyBookingIntent(settings, flow, input.message, ctx, null, null);
+    const merged: Record<string, string> = { ...collected };
+    for (const f of allFields) {
+      if (result.slots[f.key] === undefined) continue;
+      const normalized = normalizeFieldValue(f.value_type, result.slots[f.key]);
+      if (normalized !== null) merged[f.key] = normalized;
+    }
+    const missing = missingEssentialFields(allFields, merged).map((f) => f.label);
+    return {
+      flow: { id: flow.id, name: flow.name, replyMode: flow.replyMode, flowType: flow.flowType },
+      intent: result,
+      missing,
+      merged,
+      fields: allFields.map((f) => ({ key: f.key, label: f.label, quote_field: f.quote_field })),
+      extractedWithoutAi: extractStepFieldsWithoutAi(input.message, allFields),
+      steps,
+      errors,
+      data: trace.data,
+      elapsed_ms: Date.now() - startedAt,
+    };
+  });
+}
 
 
 // 客人不訂了：取消這筆報價中的訂單、清 session。

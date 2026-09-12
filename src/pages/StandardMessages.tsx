@@ -9,6 +9,8 @@ import VariableText from '../components/VariableText';
 import { PageHeader, Button, ConfirmDialog, Switch, EmptyState } from '../components/ui';
 import { TriggerRule, KeywordMatch, parseTriggerRules, serializeTriggerRules } from '../lib/messageVariables';
 import { useTemplateVariables } from '../hooks/useTemplateVariables';
+import FlowTestSimulator from '../features/flows/FlowTestSimulator';
+import { useUnsavedChanges } from '../app/UnsavedChanges';
 
 const NO_PURPOSE_OPTION = { value: '', label: '無（純收集資訊）' };
 
@@ -262,6 +264,8 @@ export default function StandardMessages() {
     window.addEventListener('beforeunload', handler);
     return () => window.removeEventListener('beforeunload', handler);
   }, [dirty]);
+  // 站內換頁也要擋（側欄、頁籤）：登記到外殼的未儲存防護
+  useUnsavedChanges(dirty);
 
   const fetchAll = async () => {
     setLoading(true);
@@ -499,7 +503,12 @@ export default function StandardMessages() {
         icon={<MessageSquareText className="w-6 h-6 text-green-600" />}
         title="LINE 自定訊息流程"
         description="顧客傳訊息時，系統依關鍵字啟動對應流程，一步步問完資料後自動算價、回報價、收訂金。"
-        action={<Button onClick={startNewFlow} icon={<Plus className="w-4 h-4" />}>新增流程</Button>}
+        action={
+          <div className="flex items-center gap-2">
+            <FlowTestSimulator flowId={selectedId && selectedId !== NEW_FLOW_ID ? selectedId : null} flowName={selectedId && selectedId !== NEW_FLOW_ID ? flows.find((f) => f.id === selectedId)?.name : undefined} />
+            <Button onClick={startNewFlow} icon={<Plus className="w-4 h-4" />}>新增流程</Button>
+          </div>
+        }
       />
 
       {errorMsg && (

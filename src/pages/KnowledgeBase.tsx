@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import { Plus, Trash2, Pencil, FileText, File as FileIcon, ClipboardList, Download } from 'lucide-react';
 import { PageHeader, Button, EmptyState, Switch, ConfirmDialog, Modal, ResponsiveTable } from '../components/ui';
+import KnowledgeTestDrawer from '../features/knowledge/KnowledgeTestDrawer';
 
 type KbItem = {
   id: string;
@@ -144,7 +145,12 @@ export default function KnowledgeBase() {
         icon={<ClipboardList className="w-6 h-6 text-green-600" />}
         title="AI知識庫"
         description="可新增多筆文字或檔案資料，AI 回覆時會參考已啟用的項目"
-        action={<Button onClick={openNewForm} icon={<Plus className="w-4 h-4" />}>新增資料</Button>}
+        action={
+          <div className="flex items-center gap-2">
+            <KnowledgeTestDrawer />
+            <Button onClick={openNewForm} icon={<Plus className="w-4 h-4" />}>新增資料</Button>
+          </div>
+        }
       />
 
       <div className="bg-white rounded-xl shadow-sm border overflow-hidden">
