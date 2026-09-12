@@ -54,6 +54,8 @@ export const navigation: NavSection[] = [
         children: [
           { label: '訂單', path: '/bookings', permission: 'booking.view', description: '查看、搜尋及處理所有訂房' },
           { label: '房況行事曆', path: '/bookings/calendar', permission: 'calendar.view', description: '每個色塊是一筆訂單，點選可查看詳情' },
+          { label: '待辦事項', path: '/bookings/tasks', permission: 'booking.view', description: '所有需要人工處理的事項：核款、尾款、退款、押金、撞期、轉接' },
+          { label: '候補／衝突', path: '/bookings/conflicts', permission: 'booking.view', description: 'OTA 房況衝突、系統攔下的撞期、候補中的詢問' },
         ],
       },
       {

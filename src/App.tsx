@@ -19,10 +19,12 @@ import Setup2FA from './pages/auth/Setup2FA';
 import Verify2FA from './pages/auth/Verify2FA';
 
 // 工作台
-import Overview from './pages/Overview';
+import DashboardPage from './features/dashboard/DashboardPage';
 // 訂房營運
 import BookingListPage from './features/booking/BookingListPage';
 import BookingDetailPage from './features/booking/BookingDetailPage';
+import BookingConflictsPage from './features/booking/BookingConflictsPage';
+import TaskCenterPage from './features/tasks/TaskCenterPage';
 import RoomCalendar from './pages/RoomCalendar';
 // 客服與 AI
 import AiServiceCenter from './pages/AiServiceCenter';
@@ -118,12 +120,14 @@ function AppRoutes() {
 
       <Route element={<AppLayout />}>
         {/* 工作台 */}
-        <Route path="/" element={guarded(<Overview />)} />
+        <Route path="/" element={guarded(<DashboardPage />)} />
 
         {/* 營運 */}
         <Route path="/bookings" element={<ModuleShell />}>
           <Route index element={guarded(<BookingListPage />)} />
           <Route path="calendar" element={guarded(<RoomCalendar />)} />
+          <Route path="tasks" element={guarded(<TaskCenterPage />)} />
+          <Route path="conflicts" element={guarded(<BookingConflictsPage />)} />
           <Route path=":id" element={guarded(<BookingDetailPage />)} />
         </Route>
         <Route path="/service" element={<ModuleShell />}>

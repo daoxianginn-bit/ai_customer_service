@@ -164,3 +164,25 @@ export async function logBookingSaved(args: {
 export async function logBookingSaveFailed(editingId: string | null, orderNumber: string | null, err: unknown) {
   await logUiError({ feature: LOG_FEATURES.order, action: editingId ? '修改失敗' : '新增失敗', target: orderNumber || null, error: err });
 }
+
+/**
+ * 人工清除 OTA 撞期旗標（§4.2 候補／衝突）。旗標是 OTA 同步排程標上去的，下次同步若已不撞期
+ * 也會自動清掉；這裡給人工查核完「其實沒問題」時用，不動 status。
+ */
+export async function resolveOtaConflict(order: BookingRow) {
+  try {
+    const payload = { ota_conflict_with: null, ota_conflict_detected_at: null, updated_at: new Date().toISOString() };
+    const { error } = await supabase.from('bookings').update(payload).eq('id', order.id);
+    if (error) throw error;
+    await logOperation({
+      feature: LOG_FEATURES.order,
+      action: '清除撞期旗標',
+      target: order.order_number || order.id,
+      before: { OTA撞期對象: order.ota_conflict_with },
+      after: { OTA撞期對象: null },
+    });
+  } catch (err: any) {
+    await logUiError({ feature: LOG_FEATURES.order, action: '清除撞期旗標失敗', target: order.order_number || null, error: err });
+    throw err;
+  }
+}
