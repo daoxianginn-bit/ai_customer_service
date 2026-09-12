@@ -21,7 +21,8 @@ import Verify2FA from './pages/auth/Verify2FA';
 // 工作台
 import Overview from './pages/Overview';
 // 訂房營運
-import OrderManagement from './pages/OrderManagement';
+import BookingListPage from './features/booking/BookingListPage';
+import BookingDetailPage from './features/booking/BookingDetailPage';
 import RoomCalendar from './pages/RoomCalendar';
 // 客服與 AI
 import AiServiceCenter from './pages/AiServiceCenter';
@@ -121,8 +122,9 @@ function AppRoutes() {
 
         {/* 營運 */}
         <Route path="/bookings" element={<ModuleShell />}>
-          <Route index element={guarded(<OrderManagement />)} />
+          <Route index element={guarded(<BookingListPage />)} />
           <Route path="calendar" element={guarded(<RoomCalendar />)} />
+          <Route path=":id" element={guarded(<BookingDetailPage />)} />
         </Route>
         <Route path="/service" element={<ModuleShell />}>
           <Route index element={guarded(<AiServiceCenter view="workbench" />)} />

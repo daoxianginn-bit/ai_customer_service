@@ -171,7 +171,7 @@ export default function AppLayout() {
     // 詳情頁（/bookings/:id）：路徑比頁籤深一層，最後一段當作「目前項目」
     if (!resolved.child || (resolved.child.path !== location.pathname && resolved.item.path !== location.pathname)) {
       const tail = location.pathname.split('/').filter(Boolean).pop();
-      if (tail && !crumbs.some((c) => c.to === location.pathname)) crumbs.push({ label: tail.length > 12 ? '詳情' : tail });
+      if (tail && !crumbs.some((c) => c.to === location.pathname)) crumbs.push({ label: '詳情' });
     }
   }
   const pageTitle = resolved?.child?.label || resolved?.item.label || '';

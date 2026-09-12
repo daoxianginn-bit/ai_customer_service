@@ -55,13 +55,15 @@ export interface DataTableProps<T> {
   rowActions?: (row: T) => ReactNode;
   /** 點整列時觸發（通常是開啟檢視/編輯） */
   onRowClick?: (row: T) => void;
+  /** 緊湊列高（欄位多的列表用，V2 §21） */
+  dense?: boolean;
 }
 
 export default function DataTableMui<T>({
   columns, rows, rowKey, loading, emptyMessage = '沒有資料',
   sortBy, sortDir = 'asc', onSortChange,
   page, rowsPerPage = 20, totalCount, onPageChange, onRowsPerPageChange,
-  selected, onSelectedChange, rowActions, onRowClick,
+  selected, onSelectedChange, rowActions, onRowClick, dense,
 }: DataTableProps<T>) {
   const selectable = !!selected && !!onSelectedChange;
   const pageKeys = useMemo(() => rows.map(rowKey), [rows, rowKey]);
@@ -86,7 +88,7 @@ export default function DataTableMui<T>({
     <Paper variant="outlined">
       {/* overflowX 讓寬表格自己捲動，而不是把整個版面撐寬（外層 main 有 minWidth:0 配合） */}
       <TableContainer sx={{ overflowX: 'auto' }}>
-        <Table stickyHeader>
+        <Table stickyHeader size={dense ? 'small' : 'medium'}>
           <TableHead>
             <TableRow>
               {selectable && (

@@ -112,6 +112,8 @@ export const appTheme = createTheme({
       styleOverrides: {
         root: { borderColor: neutral.border, fontSize: px(typeScale.body.size), paddingTop: 12, paddingBottom: 12 },
         head: { fontWeight: 600, color: neutral.text600, backgroundColor: gray[50], whiteSpace: 'nowrap', fontSize: px(typeScale.small.size) },
+        // 緊湊表格（DataTable dense）：欄位多的列表在 1440 寬也要塞得下，不要橫向捲動
+        sizeSmall: { paddingTop: 8, paddingBottom: 8, paddingLeft: 10, paddingRight: 10 },
       },
     },
     MuiTableRow: {
