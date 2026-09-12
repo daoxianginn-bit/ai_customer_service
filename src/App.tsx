@@ -4,37 +4,62 @@ import { ThemeProvider } from '@mui/material/styles';
 import CssBaseline from '@mui/material/CssBaseline';
 import { Box, CircularProgress, Stack, Typography } from '@mui/material';
 import { SnackbarProvider } from 'notistack';
-import { enterpriseTheme } from './muiTheme';
+import { appTheme } from './muiTheme';
 import ConfirmDialogProvider from './components/ui-mui/ConfirmDialogProvider';
 import { AuthProvider, useAuth } from './lib/AuthContext';
 import { canAccessRoute, defaultRouteFor } from './lib/permissions';
+import { LEGACY_REDIRECTS } from './app/navigation';
+import AppLayout from './layouts/AppLayout';
+import ModuleShell from './layouts/ModuleShell';
+
+// 登入與 2FA
 import Login from './pages/Login';
 import InviteVerify from './pages/auth/InviteVerify';
 import Setup2FA from './pages/auth/Setup2FA';
 import Verify2FA from './pages/auth/Verify2FA';
+
+// 工作台
 import Overview from './pages/Overview';
-import SystemSettings from './pages/SystemSettings';
-import KnowledgeBase from './pages/KnowledgeBase';
+// 訂房營運
+import OrderManagement from './pages/OrderManagement';
+import RoomCalendar from './pages/RoomCalendar';
+// 客服與 AI
 import AiServiceCenter from './pages/AiServiceCenter';
-import AdminAccounts from './pages/AdminAccounts';
+import StandardMessages from './pages/StandardMessages';
+import KnowledgeBase from './pages/KnowledgeBase';
+import HandoverRules from './pages/service/HandoverRules';
+// 客戶與行銷
+import CustomerDirectory from './pages/CustomerDirectory';
+import CustomMessageSending from './pages/CustomMessageSending';
+// 房務
+import LinenManagement from './pages/LinenManagement';
+// 房型與空間
+import RoomSpaceManagement from './pages/RoomSpaceManagement';
+// 價格中心
 import PricingOverview from './pages/pricing/Overview';
 import FormulaSettings from './pages/pricing/FormulaSettings';
-import StandardMessages from './pages/StandardMessages';
-import MessageVariables from './pages/MessageVariables';
-import CustomMessageSending from './pages/CustomMessageSending';
-import OrderManagement from './pages/OrderManagement';
-import OperationLogs from './pages/OperationLogs';
-import RoomCalendar from './pages/RoomCalendar';
-import RoomSpaceManagement from './pages/RoomSpaceManagement';
-import LinenManagement from './pages/LinenManagement';
+import QuoteCalculator from './pages/pricing/QuoteCalculator';
+// 串接管理
+import LineChannels from './pages/integrations/LineChannels';
+import OtaChannels from './pages/integrations/OtaChannels';
+import GoogleCalendarSettings from './pages/integrations/GoogleCalendarSettings';
+import NotificationGroups from './pages/integrations/NotificationGroups';
+// 自動化
 import ScheduledTasks from './pages/ScheduledTasks';
-import CustomerDirectory from './pages/CustomerDirectory';
-import Layout from './components/Layout';
+import AutomationHistory from './pages/automation/AutomationHistory';
+// 系統管理
+import PropertySettings from './pages/admin/PropertySettings';
+import AiEngineSettings from './pages/admin/AiEngineSettings';
+import BookingRulesSettings from './pages/admin/BookingRulesSettings';
+import AdminAccounts from './pages/AdminAccounts';
+import SecuritySettings from './pages/admin/SecuritySettings';
+import MessageVariables from './pages/MessageVariables';
+import OperationLogs from './pages/OperationLogs';
+import ErrorLogs from './pages/admin/ErrorLogs';
 
 const envMissing = !import.meta.env.VITE_SUPABASE_URL || import.meta.env.VITE_SUPABASE_URL.includes('placeholder');
 
-
-// 半受保護路由：只有處在對應 2FA 階段的人才會被導到這裡（見下方 AppRoutes 的說明）
+// 半受保護路由：只有處在對應 2FA 階段的人才會被導到這裡
 const PRE_AUTH_PATHS = ['/auth/setup-2fa', '/auth/verify-2fa'];
 // 完全公開路由：不需要任何 session
 const PUBLIC_PATHS = ['/login', '/auth/invite-verify'];
@@ -51,11 +76,11 @@ function FullScreenSpinner({ message }: { message: string }) {
 }
 
 /**
- * 路徑層級的角色守衛（只在使用者已經完成 2FA、進到後台之後才會用到）。
- * 沒權限的人靜靜導回自己進得去的頁面——選單本來就會依角色隱藏，
- * 會走到這裡通常是手動輸入網址或用了舊書籤。
+ * 路徑層級的權限守衛（只在使用者已完成 2FA、進到後台之後才會用到）。
+ * 權限從 app/navigation.ts 的宣告取（見 lib/permissions.ts 的 canAccessRoute），
+ * 沒權限的人靜靜導回自己進得去的頁面。
  *
- * 注意：這只是介面層的引導，不是安全防線。真正擋住資料的是資料庫的 RLS。
+ * 這只是介面層的引導，不是安全防線。真正擋住資料的是資料庫的 RLS（§74、§129-13）。
  */
 function RequireAccess({ children }: { children: ReactNode }) {
   const { role } = useAuth();
@@ -66,6 +91,8 @@ function RequireAccess({ children }: { children: ReactNode }) {
   return <>{children}</>;
 }
 
+const guarded = (el: ReactNode) => <RequireAccess>{el}</RequireAccess>;
+
 function AppRoutes() {
   const { phase } = useAuth();
   const location = useLocation();
@@ -74,25 +101,12 @@ function AppRoutes() {
   if (phase === 'loading') return <FullScreenSpinner message="系統載入中..." />;
   if (phase === 'accepting-invite') return <FullScreenSpinner message="確認邀請資格中..." />;
 
-  // 未登入／被擋下：只能待在公開頁
   if (phase === 'anonymous' || phase === 'blocked') {
     if (!PUBLIC_PATHS.includes(path)) return <Navigate to="/login" replace />;
   }
-
-  // 已通過 Google 但還沒完成 2FA：強制留在對應的 2FA 頁面。
-  // 這是規格「半受保護路由」的實作——除了 2FA 相關頁面，哪裡都去不了，
-  // 也看不到任何後台選單（那些頁面用的是 IsolatedLayout）。
-  if (phase === 'needs-mfa-setup' && path !== '/auth/setup-2fa') {
-    return <Navigate to="/auth/setup-2fa" replace />;
-  }
-  if (phase === 'needs-mfa-verify' && path !== '/auth/verify-2fa') {
-    return <Navigate to="/auth/verify-2fa" replace />;
-  }
-
-  // 已完成 2FA 的人不需要再看到登入頁或 2FA 頁
-  if (phase === 'ready' && (PUBLIC_PATHS.includes(path) || PRE_AUTH_PATHS.includes(path))) {
-    return <Navigate to="/" replace />;
-  }
+  if (phase === 'needs-mfa-setup' && path !== '/auth/setup-2fa') return <Navigate to="/auth/setup-2fa" replace />;
+  if (phase === 'needs-mfa-verify' && path !== '/auth/verify-2fa') return <Navigate to="/auth/verify-2fa" replace />;
+  if (phase === 'ready' && (PUBLIC_PATHS.includes(path) || PRE_AUTH_PATHS.includes(path))) return <Navigate to="/" replace />;
 
   return (
     <Routes>
@@ -101,33 +115,73 @@ function AppRoutes() {
       <Route path="/auth/setup-2fa" element={<Setup2FA />} />
       <Route path="/auth/verify-2fa" element={<Verify2FA />} />
 
-      <Route element={<Layout />}>
-        <Route path="/" element={<RequireAccess><Overview /></RequireAccess>} />
-        <Route path="/ai-service-center" element={<RequireAccess><AiServiceCenter /></RequireAccess>} />
-        <Route path="/standard-messages" element={<RequireAccess><StandardMessages /></RequireAccess>} />
-        <Route path="/message-variables" element={<RequireAccess><MessageVariables /></RequireAccess>} />
-        <Route path="/broadcast" element={<RequireAccess><CustomMessageSending /></RequireAccess>} />
-        <Route path="/orders" element={<RequireAccess><OrderManagement /></RequireAccess>} />
-        <Route path="/operation-logs" element={<RequireAccess><OperationLogs /></RequireAccess>} />
-        <Route path="/room-calendar" element={<RequireAccess><RoomCalendar /></RequireAccess>} />
-        <Route path="/room-spaces" element={<RequireAccess><RoomSpaceManagement /></RequireAccess>} />
-        <Route path="/room-pricing" element={<RequireAccess><PricingOverview /></RequireAccess>} />
-        {/* 試算報價改成「計價公式設定」標題列的一顆按鈕（開在對話框裡），不再是獨立頁面。
-            舊路徑保留轉址，避免書籤失效。 */}
-        <Route path="/room-pricing/quote" element={<Navigate to="/room-pricing/formula" replace />} />
-        <Route path="/room-pricing/formula" element={<RequireAccess><FormulaSettings /></RequireAccess>} />
-        <Route path="/linens" element={<RequireAccess><LinenManagement /></RequireAccess>} />
-        {/* 舊路徑（改版前「耗材維護」獨立頁面）保留轉址，避免書籤失效 */}
-        <Route path="/consumables" element={<Navigate to="/linens" replace />} />
-        <Route path="/scheduled-tasks" element={<RequireAccess><ScheduledTasks /></RequireAccess>} />
-        <Route path="/customers" element={<RequireAccess><CustomerDirectory /></RequireAccess>} />
-        <Route path="/knowledge-base" element={<RequireAccess><KnowledgeBase /></RequireAccess>} />
-        <Route path="/system-settings" element={<RequireAccess><SystemSettings /></RequireAccess>} />
-        {/* 舊路徑（改版前 AI 引擎設定／LINE 串接設定／轉接規則三個獨立頁面）保留轉址，避免書籤失效 */}
-        <Route path="/ai-settings" element={<Navigate to="/system-settings" replace />} />
-        <Route path="/line-settings" element={<Navigate to="/system-settings" replace />} />
-        <Route path="/handover-rules" element={<Navigate to="/system-settings" replace />} />
-        <Route path="/accounts" element={<RequireAccess><AdminAccounts /></RequireAccess>} />
+      <Route element={<AppLayout />}>
+        {/* 工作台 */}
+        <Route path="/" element={guarded(<Overview />)} />
+
+        {/* 營運 */}
+        <Route path="/bookings" element={<ModuleShell />}>
+          <Route index element={guarded(<OrderManagement />)} />
+          <Route path="calendar" element={guarded(<RoomCalendar />)} />
+        </Route>
+        <Route path="/service" element={<ModuleShell />}>
+          <Route index element={guarded(<AiServiceCenter view="workbench" />)} />
+          <Route path="conversations" element={guarded(<AiServiceCenter view="conversations" />)} />
+          <Route path="flows" element={guarded(<StandardMessages />)} />
+          <Route path="knowledge" element={guarded(<KnowledgeBase />)} />
+          <Route path="rules" element={guarded(<HandoverRules />)} />
+        </Route>
+        <Route path="/customers" element={<ModuleShell />}>
+          <Route index element={guarded(<CustomerDirectory />)} />
+        </Route>
+        <Route path="/marketing" element={<ModuleShell />}>
+          <Route path="send" element={guarded(<CustomMessageSending />)} />
+        </Route>
+        <Route path="/housekeeping" element={<ModuleShell />}>
+          <Route path="linens" element={guarded(<LinenManagement view="items" />)} />
+          <Route path="consumables" element={guarded(<LinenManagement view="consumables" />)} />
+          <Route path="statistics" element={guarded(<LinenManagement view="report" />)} />
+        </Route>
+
+        {/* 商品 */}
+        <Route path="/inventory" element={<ModuleShell />}>
+          <Route path="rooms" element={guarded(<RoomSpaceManagement view="rooms" />)} />
+          <Route path="spaces" element={guarded(<RoomSpaceManagement view="spaces" />)} />
+        </Route>
+        <Route path="/pricing" element={<ModuleShell />}>
+          <Route index element={guarded(<PricingOverview />)} />
+          <Route path="settings" element={guarded(<FormulaSettings />)} />
+          <Route path="simulator" element={guarded(<QuoteCalculator />)} />
+        </Route>
+
+        {/* 自動化 */}
+        <Route path="/integrations" element={<ModuleShell />}>
+          <Route path="line" element={guarded(<LineChannels />)} />
+          <Route path="ota" element={guarded(<OtaChannels />)} />
+          <Route path="google-calendar" element={guarded(<GoogleCalendarSettings />)} />
+          <Route path="notifications" element={guarded(<NotificationGroups />)} />
+        </Route>
+        <Route path="/automation" element={<ModuleShell />}>
+          <Route path="rules" element={guarded(<ScheduledTasks />)} />
+          <Route path="history" element={guarded(<AutomationHistory />)} />
+        </Route>
+
+        {/* 管理 */}
+        <Route path="/admin" element={<ModuleShell />}>
+          <Route path="property" element={guarded(<PropertySettings />)} />
+          <Route path="ai" element={guarded(<AiEngineSettings />)} />
+          <Route path="booking-rules" element={guarded(<BookingRulesSettings />)} />
+          <Route path="accounts" element={guarded(<AdminAccounts />)} />
+          <Route path="security" element={guarded(<SecuritySettings />)} />
+          <Route path="message-variables" element={guarded(<MessageVariables />)} />
+          <Route path="audit" element={guarded(<OperationLogs />)} />
+          <Route path="errors" element={guarded(<ErrorLogs />)} />
+        </Route>
+
+        {/* 舊網址與模組入口轉址（§160）：書籤、圖文選單裡的連結不會壞 */}
+        {Object.entries(LEGACY_REDIRECTS).map(([from, to]) => (
+          <Route key={from} path={from} element={<Navigate to={to} replace />} />
+        ))}
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
@@ -147,10 +201,7 @@ function App() {
           <div className="bg-gray-50 p-4 rounded-lg text-left text-xs font-mono text-gray-500 break-all mb-6">
             網址: {window.location.origin}
           </div>
-          <button
-            onClick={() => window.location.reload()}
-            className="w-full bg-green-600 text-white py-2 rounded-lg font-semibold hover:bg-green-700 transition-colors"
-          >
+          <button onClick={() => window.location.reload()} className="w-full bg-green-600 text-white py-2 rounded-lg font-semibold hover:bg-green-700 transition-colors">
             重新整理頁面
           </button>
         </div>
@@ -159,19 +210,11 @@ function App() {
   }
 
   return (
-    <ThemeProvider theme={enterpriseTheme}>
-    {/* CssBaseline 會套用 theme 的 background.default 到 body，並正規化瀏覽器預設樣式。
-        注意 index.css 仍負責 #root 撐滿寬高——那是 Vite 範本殘留的 body flex 造成的問題，
-        CssBaseline 不會處理，兩者各司其職。 */}
+    <ThemeProvider theme={appTheme}>
     <CssBaseline />
-    {/* 規範的「輕量非阻塞」回饋層：右上角浮動 Toast、3 秒自動消失 */}
-    <SnackbarProvider
-      maxSnack={3}
-      autoHideDuration={3000}
-      anchorOrigin={{ vertical: 'top', horizontal: 'right' }}
-    >
-    {/* 二次確認對話框：以 Promise Hook 形式提供給各頁（useConfirm），
-        放在 Router 外層，任何頁面都拿得到同一個實例 */}
+    {/* 輕量非阻塞回饋層：右上角浮動 Toast、3 秒自動消失（§79） */}
+    <SnackbarProvider maxSnack={3} autoHideDuration={3000} anchorOrigin={{ vertical: 'top', horizontal: 'right' }}>
+    {/* 二次確認對話框：Promise 形式提供給各頁（useConfirm），放在 Router 外層 */}
     <ConfirmDialogProvider>
     <AuthProvider>
     <BrowserRouter>

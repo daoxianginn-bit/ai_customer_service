@@ -65,19 +65,19 @@ export default function Overview() {
       </div>
 
       <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
-        <Link to="/ai-service-center" className="bg-white p-5 rounded-xl shadow-sm border hover:border-green-400 hover:bg-green-50 transition-colors flex items-center gap-3">
+        <Link to="/service" className="bg-white p-5 rounded-xl shadow-sm border hover:border-green-400 hover:bg-green-50 transition-colors flex items-center gap-3">
           <Headphones className="w-5 h-5 text-green-600" />
           <span className="font-medium text-gray-700">AI客服中心</span>
         </Link>
-        <Link to="/orders" className="bg-white p-5 rounded-xl shadow-sm border hover:border-green-400 hover:bg-green-50 transition-colors flex items-center gap-3">
+        <Link to="/bookings" className="bg-white p-5 rounded-xl shadow-sm border hover:border-green-400 hover:bg-green-50 transition-colors flex items-center gap-3">
           <ClipboardList className="w-5 h-5 text-green-600" />
           <span className="font-medium text-gray-700">訂單管理</span>
         </Link>
-        <Link to="/broadcast" className="bg-white p-5 rounded-xl shadow-sm border hover:border-green-400 hover:bg-green-50 transition-colors flex items-center gap-3">
+        <Link to="/marketing/send" className="bg-white p-5 rounded-xl shadow-sm border hover:border-green-400 hover:bg-green-50 transition-colors flex items-center gap-3">
           <Send className="w-5 h-5 text-green-600" />
           <span className="font-medium text-gray-700">客製訊息發送</span>
         </Link>
-        <Link to="/room-calendar" className="bg-white p-5 rounded-xl shadow-sm border hover:border-green-400 hover:bg-green-50 transition-colors flex items-center gap-3">
+        <Link to="/bookings/calendar" className="bg-white p-5 rounded-xl shadow-sm border hover:border-green-400 hover:bg-green-50 transition-colors flex items-center gap-3">
           <CalendarDays className="w-5 h-5 text-green-600" />
           <span className="font-medium text-gray-700">行事曆</span>
         </Link>
@@ -85,15 +85,15 @@ export default function Overview() {
           <Users className="w-5 h-5 text-green-600" />
           <span className="font-medium text-gray-700">客戶資料</span>
         </Link>
-        <Link to="/knowledge-base" className="bg-white p-5 rounded-xl shadow-sm border hover:border-green-400 hover:bg-green-50 transition-colors flex items-center gap-3">
+        <Link to="/service/knowledge" className="bg-white p-5 rounded-xl shadow-sm border hover:border-green-400 hover:bg-green-50 transition-colors flex items-center gap-3">
           <BookOpen className="w-5 h-5 text-green-600" />
           <span className="font-medium text-gray-700">AI知識庫</span>
         </Link>
-        <Link to="/system-settings" className="bg-white p-5 rounded-xl shadow-sm border hover:border-green-400 hover:bg-green-50 transition-colors flex items-center gap-3">
+        <Link to="/admin/ai" className="bg-white p-5 rounded-xl shadow-sm border hover:border-green-400 hover:bg-green-50 transition-colors flex items-center gap-3">
           <Bot className="w-5 h-5 text-green-600" />
           <span className="font-medium text-gray-700">基本設定</span>
         </Link>
-        <Link to="/accounts" className="bg-white p-5 rounded-xl shadow-sm border hover:border-green-400 hover:bg-green-50 transition-colors flex items-center gap-3">
+        <Link to="/admin/accounts" className="bg-white p-5 rounded-xl shadow-sm border hover:border-green-400 hover:bg-green-50 transition-colors flex items-center gap-3">
           <Settings className="w-5 h-5 text-green-600" />
           <span className="font-medium text-gray-700">系統設定</span>
         </Link>

@@ -18,8 +18,12 @@ const emptyForm = (): Omit<SpaceRow, 'id'> => ({
   type: '房間', name: '', floor: '', capacity: 2, equipment: '', is_active: true, display_order: 0,
 });
 
-export default function RoomSpaceManagement() {
+// V2 把房間與公共空間拆成兩個頁籤（§4.6）。資料模型沒變（同一張 room_types，type 欄位區分），
+// view 只決定列表顯示哪一種、新增時預設哪一種。
+export default function RoomSpaceManagement({ view = 'rooms' }: { view?: 'rooms' | 'spaces' } = {}) {
   const [rows, setRows] = useState<SpaceRow[]>([]);
+  const isRoomsView = view === 'rooms';
+  const visibleRows = rows.filter((r) => (isRoomsView ? (r.type || '房間') === '房間' : (r.type || '房間') !== '房間'));
   const [loading, setLoading] = useState(true);
   const [queryError, setQueryError] = useState('');
 
@@ -51,7 +55,7 @@ export default function RoomSpaceManagement() {
 
   const openNew = () => {
     setEditingId(null);
-    setForm({ ...emptyForm(), display_order: rows.length });
+    setForm({ ...emptyForm(), type: isRoomsView ? '房間' : '公共空間', display_order: rows.length });
     setFormError('');
     setShowForm(true);
   };
@@ -132,9 +136,9 @@ export default function RoomSpaceManagement() {
     <div className="w-full space-y-6">
       <PageHeader
         icon={<DoorOpen className="w-6 h-6 text-green-600" />}
-        title="房型與空間維護"
-        description="管理民宿裡每個房間或空間的基本資料。只有「房間」類型會出現在「房型與報價」的訂價與訂房邏輯裡，其他類型（例如公共空間）純粹是設施紀錄。"
-        action={<Button onClick={openNew} icon={<Plus className="w-4 h-4" />}>新增房間/空間</Button>}
+        title={isRoomsView ? '房間' : '公共空間'}
+        description={isRoomsView ? '會進入計價與訂房邏輯的房間。名稱、樓層、容納人數在這裡維護。' : '客廳、廚房、烤肉區等設施，純粹是紀錄，不會進入房價計算。'}
+        action={<Button onClick={openNew} icon={<Plus className="w-4 h-4" />}>{isRoomsView ? '新增房間' : '新增空間'}</Button>}
       />
 
       {queryError && (
@@ -143,10 +147,10 @@ export default function RoomSpaceManagement() {
 
       <div className="bg-white rounded-xl shadow-sm border overflow-hidden">
         <ResponsiveTable
-          rows={rows}
+          rows={visibleRows}
           rowKey={(row) => row.id}
           loading={loading}
-          empty={<EmptyState icon={<DoorOpen className="w-12 h-12 text-gray-200" />} message="尚未設定任何房間或空間，點右上角「新增房間/空間」開始" />}
+          empty={<EmptyState icon={<DoorOpen className="w-12 h-12 text-gray-200" />} message={isRoomsView ? '尚未設定任何房間，點右上角「新增房間」開始' : '尚未設定任何公共空間'} />}
           onRowClick={openEdit}
           // 欄位順序維持原本的表格順序。手機卡片是靠 cardTitle／cardAside 這些旗標挑欄位，
           // 跟在陣列裡的位置無關，所以不需要為了卡片版面去動桌機的欄序。

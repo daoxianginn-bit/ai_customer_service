@@ -85,7 +85,16 @@ function ChangeTable({
   );
 }
 
-export default function OperationLogs() {
+// V2 把「錯誤紀錄」與「自動化執行紀錄」做成獨立頁籤（§84、§63），但資料都在 operation_logs，
+// 用 preset 決定預設篩選：錯誤頁鎖定 level=error、執行紀錄鎖定 feature=排程管理。
+// 鎖定的條件不顯示在篩選列，使用者不會把它清掉又跑回全部紀錄。
+interface OperationLogsProps {
+  preset?: { level?: 'error'; feature?: string };
+  title?: string;
+  description?: string;
+}
+
+export default function OperationLogs({ preset, title, description }: OperationLogsProps = {}) {
   const [rows, setRows] = useState<LogRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(0);
@@ -94,9 +103,9 @@ export default function OperationLogs() {
   const [detail, setDetail] = useState<LogRow | null>(null);
 
   const [keyword, setKeyword] = useState('');
-  const [feature, setFeature] = useState('');
+  const [feature, setFeature] = useState(preset?.feature || '');
   const [actorType, setActorType] = useState('');
-  const [level, setLevel] = useState('');
+  const [level, setLevel] = useState(preset?.level || '');
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
 
@@ -148,12 +157,12 @@ export default function OperationLogs() {
 
   const clearFilters = () => {
     setKeyword('');
-    setFeature('');
+    setFeature(preset?.feature || '');
     setActorType('');
-    setLevel('');
+    setLevel(preset?.level || '');
     setStartDate('');
     setEndDate('');
-    runQuery(0, { keyword: '', feature: '', actorType: '', level: '', startDate: '', endDate: '' });
+    runQuery(0, { keyword: '', feature: preset?.feature || '', actorType: '', level: preset?.level || '', startDate: '', endDate: '' });
   };
 
   const showErrorsOnly = () => {
@@ -165,13 +174,13 @@ export default function OperationLogs() {
     <div className="w-full space-y-5">
       <PageHeader
         icon={<ScrollText className="w-6 h-6 text-green-600" />}
-        title="操作紀錄"
-        description="查詢資料被誰、在什麼時候、從什麼改成什麼，以及系統發生過哪些錯誤（含 4XX／5XX 與錯誤訊息）。"
-        action={
+        title={title || '操作紀錄'}
+        description={description || '查詢資料被誰、在什麼時候、從什麼改成什麼，以及系統發生過哪些錯誤（含 4XX／5XX 與錯誤訊息）。'}
+        action={preset?.level ? undefined : (
           <Button variant={level === 'error' ? 'danger' : 'secondary'} onClick={showErrorsOnly} icon={<AlertTriangle className="w-4 h-4" />}>
             只看系統錯誤
           </Button>
-        }
+        )}
       />
 
       <FilterBar activeCount={[keyword, feature, actorType, level, startDate, endDate].filter(Boolean).length}>
@@ -186,6 +195,7 @@ export default function OperationLogs() {
               className="w-full px-3 py-2 border rounded-lg text-sm"
             />
           </div>
+          {!preset?.level && (
           <div>
             <label className="flex items-center gap-1 text-xs text-gray-500 mb-1"><ListFilter className="w-3.5 h-3.5" />類型</label>
             <select value={level} onChange={(e) => setLevel(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm bg-white">
@@ -194,6 +204,8 @@ export default function OperationLogs() {
               <option value="error">系統錯誤</option>
             </select>
           </div>
+          )}
+          {!preset?.feature && (
           <div>
             <label className="flex items-center gap-1 text-xs text-gray-500 mb-1"><ListFilter className="w-3.5 h-3.5" />功能</label>
             <select value={feature} onChange={(e) => setFeature(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm bg-white">
@@ -206,6 +218,7 @@ export default function OperationLogs() {
               </optgroup>
             </select>
           </div>
+          )}
           <div>
             <label className="flex items-center gap-1 text-xs text-gray-500 mb-1"><UserCog className="w-3.5 h-3.5" />異動者</label>
             <select value={actorType} onChange={(e) => setActorType(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm bg-white">

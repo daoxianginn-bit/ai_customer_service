@@ -55,8 +55,10 @@ function monthKey(iso: string | null): string {
   return iso ? iso.slice(0, 7) : '未設定日期';
 }
 
-export default function LinenManagement() {
-  const [tab, setTab] = useState<Tab>('consumables');
+// V2 把這頁拆成三個路由（§4.5）：布巾／耗材／房務統計。view 指定時只顯示那一區、不顯示內部頁籤；
+// 「房型布巾預設」依 §47 應該放到房型底下，第一階段先跟布巾品項放同一頁。
+export default function LinenManagement({ view }: { view?: Tab } = {}) {
+  const [tab, setTab] = useState<Tab>(view || 'consumables');
   const [loading, setLoading] = useState(true);
   const [errorMsg, setErrorMsg] = useState('');
 
@@ -431,8 +433,9 @@ export default function LinenManagement() {
       )}
 
       <div className="bg-white rounded-xl shadow-sm border overflow-hidden">
+        {/* 由路由指定 view 時，上方已有模組頁籤，這裡的內部頁籤只在「布巾」頁顯示品項／預設兩個子區 */}
         <div className="flex border-b overflow-x-auto">
-          {TABS.map((t) => (
+          {TABS.filter((t) => !view || (view === 'items' ? t.key === 'items' || t.key === 'defaults' : t.key === view)).map((t) => (
             <button
               key={t.key}
               onClick={() => setTab(t.key)}

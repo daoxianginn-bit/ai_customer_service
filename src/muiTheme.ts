@@ -1,20 +1,16 @@
 import { createTheme } from '@mui/material/styles';
+import { primary, gray, success, warning, danger, info, neutral, fontFamily, typeScale, radius, shadow, breakpoints } from './app/tokens';
 
 // ========================================================================
-// 全域 Theme：依《企業級 React + Material UI (MUI) 後台系統規範標準書》實作。
+// 全域 MUI Theme：依《民宿 AI 客服暨營運後台 V2》§6–7 實作。
 //
-// 設計取向跟改版前刻意不同：改版前是「對齊 Tailwind 綠色系、圓角 12、寬鬆留白」，
-// 現在改成規範要求的「企業級後台」——藍色主色、緊湊（Dense）排版、卡片用邊框而非陰影，
-// 目的是在單一螢幕塞進最多有效業務資料。
-//
-// 頁面仍在從 Tailwind 逐頁遷移到 MUI（見 components/ui-mui/），這份 theme 是唯一的樣式來源，
-// 新頁面一律不要自己寫死顏色/字級，改用 theme token，避免又長回各模組各行其道的狀態。
+// 所有數值來自 app/tokens.ts，這裡只負責把 token 對映到 MUI 的結構。
+// 風格取向：專業、留白、資訊密度中等、靠邊框而不是陰影分層、不用高飽和整列底色。
+// 新頁面一律用 theme token，不要自己寫死顏色／字級。
 // ========================================================================
 
-// 對話框改成整頁顯示的門檻。這裡用 600px，跟外殼側欄的 900px、內容表格的 768px 都不同，
-// 三個數字各有各的理由：側欄要讓出 240px 所以最早收；表格對齊 Tailwind 的 md；
-// 對話框則是到了真正的手機寬度才值得整頁，600～768px 的平板上置中卡片仍然好用。
-const dialogFullScreenQuery = '@media (max-width:599.95px)';
+// 對話框改成整頁顯示的門檻：真正的手機寬度才整頁，平板上置中卡片仍然好用。
+const dialogFullScreenQuery = `@media (max-width:${breakpoints.md - 0.05}px)`;
 const dialogFullScreen = {
   margin: 0,
   width: '100%',
@@ -25,88 +21,136 @@ const dialogFullScreen = {
   border: 'none',
 } as const;
 
-// 規範的資訊層級：頁標題 20px、模組標題 16px、表格/內文 14px、輔助字 12px。
-// 基準 fontSize 13 是規範指定值（MUI 會以此換算 rem）。
-export const enterpriseTheme = createTheme({
+const px = (n: number) => `${n}px`;
+
+export const appTheme = createTheme({
+  breakpoints: { values: { ...breakpoints } },
   palette: {
-    primary: { main: '#1890FF', light: '#E6F7FF', dark: '#096DD9', contrastText: '#FFFFFF' },
-    success: { main: '#52C41A' },
-    warning: { main: '#FAAD14' },
-    error: { main: '#FF4D4F' },
-    info: { main: '#1890FF' },
-    background: { default: '#F0F2F5', paper: '#FFFFFF' },
-    text: { primary: '#1F2937', secondary: '#6B7280' },
-    divider: '#E5E7EB',
+    primary: { main: primary[600], light: primary[100], dark: primary[700], contrastText: '#FFFFFF' },
+    secondary: { main: gray[600], light: gray[100], dark: gray[800], contrastText: '#FFFFFF' },
+    success: { main: success[600], light: success[100], dark: success[700], contrastText: '#FFFFFF' },
+    warning: { main: warning[600], light: warning[100], dark: warning[700], contrastText: '#FFFFFF' },
+    error: { main: danger[600], light: danger[100], dark: danger[700], contrastText: '#FFFFFF' },
+    info: { main: info[600], light: info[100], dark: info[700], contrastText: '#FFFFFF' },
+    background: { default: neutral.background, paper: neutral.surface },
+    text: { primary: neutral.text900, secondary: neutral.text600, disabled: neutral.text400 },
+    divider: neutral.border,
+    action: { hover: gray[50], selected: primary[100] },
   },
   typography: {
-    fontFamily: '"Inter", "PingFang TC", "Microsoft JhengHei", system-ui, sans-serif',
-    fontSize: 13,
-    h5: { fontSize: 20, fontWeight: 600, lineHeight: 1.4 },   // 頁標題
-    h6: { fontSize: 16, fontWeight: 600, lineHeight: 1.5 },   // 模組標題
-    subtitle1: { fontSize: 14, fontWeight: 600, lineHeight: 1.5 },
-    subtitle2: { fontSize: 13, fontWeight: 600, lineHeight: 1.5 },
-    body1: { fontSize: 14, lineHeight: 1.6 },                 // 表格/內文
-    body2: { fontSize: 13, lineHeight: 1.6 },
-    caption: { fontSize: 12, lineHeight: 1.5 },               // 輔助字
-    button: { textTransform: 'none', fontWeight: 500 },
+    fontFamily,
+    fontSize: typeScale.body.size,
+    h4: { fontSize: px(typeScale.pageTitle.size), lineHeight: px(typeScale.pageTitle.lineHeight), fontWeight: typeScale.pageTitle.weight },
+    h5: { fontSize: px(typeScale.sectionTitle.size), lineHeight: px(typeScale.sectionTitle.lineHeight), fontWeight: typeScale.sectionTitle.weight },
+    h6: { fontSize: px(typeScale.cardTitle.size), lineHeight: px(typeScale.cardTitle.lineHeight), fontWeight: typeScale.cardTitle.weight },
+    subtitle1: { fontSize: px(typeScale.body.size), lineHeight: px(typeScale.body.lineHeight), fontWeight: 600 },
+    subtitle2: { fontSize: px(typeScale.small.size), lineHeight: px(typeScale.small.lineHeight), fontWeight: 600 },
+    body1: { fontSize: px(typeScale.body.size), lineHeight: px(typeScale.body.lineHeight) },
+    body2: { fontSize: px(typeScale.small.size), lineHeight: px(typeScale.small.lineHeight) },
+    caption: { fontSize: px(typeScale.caption.size), lineHeight: px(typeScale.caption.lineHeight) },
+    button: { textTransform: 'none', fontWeight: 500, fontSize: px(typeScale.body.size) },
   },
-  shape: { borderRadius: 6 },
+  shape: { borderRadius: radius.small },
+  shadows: [
+    'none',
+    shadow.card, shadow.card, shadow.card, shadow.card,
+    shadow.overlay, shadow.overlay, shadow.overlay, shadow.overlay,
+    shadow.overlay, shadow.overlay, shadow.overlay, shadow.overlay,
+    shadow.overlay, shadow.overlay, shadow.overlay, shadow.overlay,
+    shadow.overlay, shadow.overlay, shadow.overlay, shadow.overlay,
+    shadow.overlay, shadow.overlay, shadow.overlay, shadow.overlay,
+  ],
   components: {
-    // 緊湊型排版：全域預設 small，個別需要放大的地方再自己覆寫。
-    MuiButton: {
-      defaultProps: { size: 'small', disableElevation: true },
+    MuiCssBaseline: {
+      styleOverrides: {
+        body: { backgroundColor: neutral.background, color: neutral.text900 },
+        // 手機上可點區域至少 44px（§89）
+        '@media (max-width: 767.95px)': {
+          '.MuiIconButton-root': { minWidth: 44, minHeight: 44 },
+        },
+      },
     },
-    MuiTextField: {
-      defaultProps: { size: 'small', variant: 'outlined' },
+    MuiButton: {
+      defaultProps: { size: 'medium', disableElevation: true },
+      styleOverrides: {
+        root: { borderRadius: radius.input, minHeight: 36 },
+        sizeSmall: { minHeight: 32 },
+        outlined: { borderColor: neutral.border, color: neutral.text900, '&:hover': { borderColor: gray[300], backgroundColor: gray[50] } },
+      },
+    },
+    MuiTextField: { defaultProps: { size: 'small', variant: 'outlined' } },
+    MuiOutlinedInput: {
+      styleOverrides: {
+        root: { borderRadius: radius.input, backgroundColor: neutral.surface, '& fieldset': { borderColor: neutral.border } },
+      },
     },
     MuiSelect: { defaultProps: { size: 'small' } },
     MuiFormControl: { defaultProps: { size: 'small' } },
+    MuiFormHelperText: { styleOverrides: { root: { marginLeft: 0 } } },
     MuiTable: { defaultProps: { size: 'small' } },
     MuiCheckbox: { defaultProps: { size: 'small' } },
     MuiRadio: { defaultProps: { size: 'small' } },
-    MuiChip: { defaultProps: { size: 'small' } },
+    MuiChip: {
+      defaultProps: { size: 'small' },
+      styleOverrides: { root: { borderRadius: radius.small, fontWeight: 500 } },
+    },
     MuiIconButton: { defaultProps: { size: 'small' } },
-    // 卡片一律用 1px 邊框取代陰影，資訊密度高時陰影會讓畫面顯得雜亂。
+    // 卡片：1px 邊框 + 極淡陰影，不用重陰影
     MuiPaper: {
       defaultProps: { elevation: 0 },
       styleOverrides: {
         root: { backgroundImage: 'none' },
-        outlined: { borderColor: '#E5E7EB' },
+        outlined: { borderColor: neutral.border },
+        rounded: { borderRadius: radius.card },
       },
     },
     MuiCard: {
       defaultProps: { elevation: 0, variant: 'outlined' },
-      styleOverrides: { root: { borderColor: '#E5E7EB' } },
+      styleOverrides: { root: { borderColor: neutral.border, borderRadius: radius.card, boxShadow: shadow.card } },
     },
     MuiTableCell: {
       styleOverrides: {
-        root: { borderColor: '#E5E7EB' },
-        head: { fontWeight: 600, backgroundColor: '#FAFAFA', whiteSpace: 'nowrap' },
+        root: { borderColor: neutral.border, fontSize: px(typeScale.body.size), paddingTop: 12, paddingBottom: 12 },
+        head: { fontWeight: 600, color: neutral.text600, backgroundColor: gray[50], whiteSpace: 'nowrap', fontSize: px(typeScale.small.size) },
       },
     },
     MuiTableRow: {
       styleOverrides: {
-        root: { '&:last-child td': { borderBottom: 0 } },
+        root: { '&:last-child td': { borderBottom: 0 }, '&:hover td': { backgroundColor: gray[50] } },
       },
     },
-    MuiTooltip: {
-      defaultProps: { arrow: true },
-    },
+    MuiTooltip: { defaultProps: { arrow: true } },
     MuiDialog: {
       styleOverrides: {
-        paper: { border: '1px solid #E5E7EB' },
-        // 手機上把「內容型」對話框撐成整頁。用 maxWidth 產生的 class 來分流：
-        //   sm／md → 幾乎都是表單，留邊界只是把可填的空間變小，整頁最好用
-        //   xs     → 確認提示、單筆詳情這類短內容，維持置中小卡；
-        //            把一句「確定要刪除嗎？」放大成整頁反而像出事了
-        // 寫在 theme 而不是各頁加 fullScreen：一處生效，之後新增的對話框也自動適用。
+        paper: { border: `1px solid ${neutral.border}`, borderRadius: radius.modal, boxShadow: shadow.overlay },
+        // 手機上把表單型對話框撐成整頁；xs（確認提示）維持置中小卡
         paperWidthSm: { [dialogFullScreenQuery]: dialogFullScreen },
         paperWidthMd: { [dialogFullScreenQuery]: dialogFullScreen },
       },
     },
+    MuiDrawer: {
+      styleOverrides: { paper: { boxShadow: 'none' } },
+    },
+    MuiTabs: {
+      styleOverrides: {
+        root: { minHeight: 40 },
+        indicator: { height: 2, backgroundColor: primary[600] },
+      },
+    },
+    MuiTab: {
+      styleOverrides: {
+        root: { minHeight: 40, textTransform: 'none', fontWeight: 500, fontSize: px(typeScale.body.size), padding: '8px 12px', '&.Mui-selected': { color: primary[700], fontWeight: 600 } },
+      },
+    },
+    MuiAlert: {
+      styleOverrides: { root: { borderRadius: radius.input } },
+    },
+    MuiListItemButton: {
+      styleOverrides: { root: { borderRadius: radius.small } },
+    },
   },
 });
 
-// 舊名稱保留：頁面仍以 `muiTheme` 匯入，改名會一次動到所有已遷移頁面，
-// 沒有實質好處。兩個名字指向同一個 theme。
-export const muiTheme = enterpriseTheme;
+// 舊名稱保留：頁面仍以 `muiTheme`／`enterpriseTheme` 匯入，三個名字指向同一個 theme。
+export const muiTheme = appTheme;
+export const enterpriseTheme = appTheme;

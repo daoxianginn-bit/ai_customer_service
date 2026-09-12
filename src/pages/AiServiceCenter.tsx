@@ -135,8 +135,11 @@ function TurnDiagnostics({ meta }: { meta: TurnMeta }) {
 
 const PAGE_SIZE = 20;
 
-export default function AiServiceCenter() {
-  const [tab, setTab] = useState<Tab>('active');
+// V2 把這頁拆成兩個路由（§4.3）：/service 是客服工作台（進行中＋轉接歷史），
+// /service/conversations 是對話紀錄。view 決定顯示哪一組，內部頁籤只在工作台切進行中／歷史。
+// 第二階段會把工作台改成三欄式（§28）；這一步先讓兩個路由各自對應正確的內容。
+export default function AiServiceCenter({ view = 'workbench' }: { view?: 'workbench' | 'conversations' } = {}) {
+  const [tab, setTab] = useState<Tab>(view === 'conversations' ? 'conversations' : 'active');
   const [users, setUsers] = useState<any[]>([]);
   const [history, setHistory] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -260,8 +263,8 @@ export default function AiServiceCenter() {
     <div className="w-full space-y-6">
       <PageHeader
         icon={<Headphones className="w-6 h-6 text-green-600" />}
-        title="AI客服中心"
-        description="處理進行中的真人對話請求、查詢轉接歷史與完整對話紀錄"
+        title={view === 'conversations' ? '對話紀錄' : '客服工作台'}
+        description={view === 'conversations' ? '每位客人的完整對話，可展開每則訊息的處理過程' : '處理進行中的真人對話請求與轉接歷史'}
         action={
           <button
             onClick={tab === 'active' ? fetchHandoverUsers : tab === 'history' ? fetchHistory : () => fetchConvUsers(page, userFilter)}
@@ -272,6 +275,7 @@ export default function AiServiceCenter() {
         }
       />
 
+      {view === 'workbench' && (
       <div className="flex gap-2 bg-white p-1.5 rounded-xl shadow-sm border w-fit">
         <button
           onClick={() => setTab('active')}
@@ -285,13 +289,8 @@ export default function AiServiceCenter() {
         >
           <History className="w-4 h-4" /> 轉接歷史
         </button>
-        <button
-          onClick={() => setTab('conversations')}
-          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors ${tab === 'conversations' ? 'bg-red-50 text-red-600' : 'text-gray-500 hover:bg-gray-50'}`}
-        >
-          <MessageSquare className="w-4 h-4" /> 對話紀錄
-        </button>
       </div>
+      )}
 
       {tab === 'active' && (
         <div className="bg-white rounded-xl shadow-sm border overflow-hidden">

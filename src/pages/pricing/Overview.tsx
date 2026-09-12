@@ -123,7 +123,7 @@ export default function PricingOverview() {
             滿載獎勵 <strong>NT$ {fullOccupancyBonus.toLocaleString()}</strong><br />
             最少接待人數 <strong>{minGroupHeadcount} 人</strong>
           </Typography>
-          <Link to="/room-pricing/formula#pricing-formula-section" style={{ fontSize: 12, color: '#15803d', display: 'inline-flex', alignItems: 'center', gap: 4, textDecoration: 'none' }}>
+          <Link to="/pricing/settings#pricing-formula-section" style={{ fontSize: 12, color: '#15803d', display: 'inline-flex', alignItems: 'center', gap: 4, textDecoration: 'none' }}>
             前往計價公式設定 <ArrowRight size={12} />
           </Link>
         </Paper>
@@ -136,10 +136,10 @@ export default function PricingOverview() {
             旺季 <strong>+{dateSurchargePeak.toLocaleString()}</strong>
           </Typography>
           <Stack spacing={0.5}>
-            <Link to="/room-pricing/formula#pricing-formula-section" style={{ fontSize: 12, color: '#15803d', display: 'inline-flex', alignItems: 'center', gap: 4, textDecoration: 'none' }}>
+            <Link to="/pricing/settings#pricing-formula-section" style={{ fontSize: 12, color: '#15803d', display: 'inline-flex', alignItems: 'center', gap: 4, textDecoration: 'none' }}>
               調整加價金額 <ArrowRight size={12} />
             </Link>
-            <Link to="/room-calendar" style={{ fontSize: 12, color: '#15803d', display: 'inline-flex', alignItems: 'center', gap: 4, textDecoration: 'none' }}>
+            <Link to="/bookings/calendar" style={{ fontSize: 12, color: '#15803d', display: 'inline-flex', alignItems: 'center', gap: 4, textDecoration: 'none' }}>
               <CalendarDays size={12} /> 到「行事曆」設定旺季/連假日期區間 <ArrowRight size={12} />
             </Link>
           </Stack>
@@ -174,7 +174,7 @@ export default function PricingOverview() {
               })}
             </Stack>
           )}
-          <Link to="/room-pricing/formula#promotions-section" style={{ fontSize: 12, color: '#15803d', display: 'inline-flex', alignItems: 'center', gap: 4, textDecoration: 'none' }}>
+          <Link to="/pricing/settings#promotions-section" style={{ fontSize: 12, color: '#15803d', display: 'inline-flex', alignItems: 'center', gap: 4, textDecoration: 'none' }}>
             管理所有促銷方案 <ArrowRight size={12} />
           </Link>
         </Paper>
@@ -184,7 +184,7 @@ export default function PricingOverview() {
         <Paper variant="outlined" sx={{ overflow: 'hidden' }}>
           <Stack direction="row" justifyContent="space-between" alignItems="center" flexWrap="wrap" gap={1} sx={{ p: 2.5, borderBottom: '1px solid', borderColor: 'divider' }}>
             <Typography fontWeight={600}>房型概覽</Typography>
-            <Link to="/room-spaces" style={{ fontSize: 12, color: '#15803d', display: 'inline-flex', alignItems: 'center', gap: 4, textDecoration: 'none' }}>
+            <Link to="/inventory/rooms" style={{ fontSize: 12, color: '#15803d', display: 'inline-flex', alignItems: 'center', gap: 4, textDecoration: 'none' }}>
               管理房型 <ArrowRight size={12} />
             </Link>
           </Stack>
@@ -217,7 +217,7 @@ export default function PricingOverview() {
           </TableContainer>
           <Divider />
           <Box sx={{ px: 2.5, py: 1.5 }}>
-            <Link to="/room-pricing/formula#pricing-formula-section" style={{ fontSize: 12, color: '#15803d', display: 'inline-flex', alignItems: 'center', gap: 4, textDecoration: 'none' }}>
+            <Link to="/pricing/settings#pricing-formula-section" style={{ fontSize: 12, color: '#15803d', display: 'inline-flex', alignItems: 'center', gap: 4, textDecoration: 'none' }}>
               調整加開房費/押金 <ArrowRight size={12} />
             </Link>
           </Box>
