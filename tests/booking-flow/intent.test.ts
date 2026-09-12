@@ -2,7 +2,7 @@
 import { __quoteFlowTesting } from '../../netlify/functions/line-webhook';
 const { extractStepFieldsWithoutAi } = __quoteFlowTesting;
 import {
-  classifyByRules, parseIntentResponse, buildIntentPrompt, missingEssentialFields,
+  classifyByRules, parseIntentResponse, buildIntentPrompt, missingEssentialFields, scanNights, addDaysIso,
   type IntentContext, type IntentFieldDef,
 } from '../../src/lib/bookingIntent';
 
@@ -95,6 +95,22 @@ p = parseIntentResponse('{"intent":"teleport","slots":{}}', ctx('collecting', {}
 t('解析｜未知意圖 → null', p === null);
 p = parseIntentResponse('完全不是 JSON', ctx('collecting', {}));
 t('解析｜非 JSON → null', p === null);
+
+// ===== 晚數 → 退房日 =====
+t('晚數｜「住一晚」→ 1', scanNights('住一晚') === 1);
+t('晚數｜「兩天一夜」→ 1（以夜為準）', scanNights('兩天一夜') === 1);
+t('晚數｜「三天兩夜」→ 2', scanNights('三天兩夜') === 2);
+t('晚數｜「3晚」→ 3', scanNights('3晚') === 3);
+t('晚數｜「住2個晚上」→ 2', scanNights('住2個晚上') === 2);
+t('晚數｜「有早餐嗎」→ 無', scanNights('有早餐嗎') === undefined);
+t('日期加法｜2027-03-03 +1 → 2027-03-04', addDaysIso('2027-03-03', 1) === '2027-03-04');
+t('日期加法｜跨月 2027-02-28 +1 → 2027-03-01', addDaysIso('2027-02-28', 1) === '2027-03-01');
+r = c('collecting', { checkin: '2027-03-03', headcount: '8' }, '住一晚');
+t('規則｜有入住日、回「住一晚」→ provide_info 退房=入住+1', r.intent === 'provide_info' && r.slots.checkout === '2027-03-04');
+r = c('collecting', { headcount: '8' }, '住一晚');
+t('規則｜沒有入住日、回「住一晚」→ 推不出退房日 → unclear', r.intent === 'unclear');
+r = c('collecting', {}, '3/3入住 住兩晚 8人');
+t('規則｜「3/3入住 住兩晚 8人」一句話 → 三要素齊', r.intent === 'provide_info' && r.slots.checkout === addDaysIso(r.slots.checkin, 2) && r.slots.headcount === '8');
 
 // ===== 必要欄位 =====
 t('必要欄位｜四欄齊 → 無缺', missingEssentialFields(fields, four).length === 0);

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase';
-import { Plus, Trash2, Pencil, FileText, File as FileIcon, ClipboardList } from 'lucide-react';
+import { Plus, Trash2, Pencil, FileText, File as FileIcon, ClipboardList, Download } from 'lucide-react';
 import { PageHeader, Button, EmptyState, Switch, ConfirmDialog, Modal, ResponsiveTable } from '../components/ui';
 
 type KbItem = {
@@ -156,7 +156,26 @@ export default function KnowledgeBase() {
           rowClass={() => 'hover:bg-green-50 transition-colors'}
           columns={[
             { key: 'title', header: '標題', cardTitle: true, thClass: 'text-sm font-semibold', tdClass: 'font-medium text-gray-800', cell: (item) => item.title },
-            { key: 'type', header: '類型', thClass: 'text-sm font-semibold', tdClass: 'text-sm text-gray-500', cardFullWidth: true, cell: (item) => (item.type === 'text' ? '文字' : `檔案 (${item.file_name})`) },
+            {
+              key: 'type', header: '類型', thClass: 'text-sm font-semibold', tdClass: 'text-sm text-gray-500', cardFullWidth: true,
+              // 檔案型的條目以前只顯示檔名，要看內容得去 Supabase Storage 翻。file_url 本來就是公開網址，
+              // 直接做成下載連結；點列會進編輯，所以要 stopPropagation。
+              cell: (item) => item.type === 'text' ? '文字' : (
+                item.file_url ? (
+                  <a
+                    href={item.file_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    download={item.file_name || undefined}
+                    onClick={(e) => e.stopPropagation()}
+                    className="inline-flex items-center gap-1 text-green-700 hover:underline"
+                    title="下載檔案"
+                  >
+                    <Download className="w-3.5 h-3.5" /> {item.file_name || '檔案'}
+                  </a>
+                ) : `檔案 (${item.file_name})`
+              ),
+            },
             { key: 'is_active', header: '啟用中', cardAside: true, thClass: 'text-sm font-semibold', cell: (item) => <Switch checked={item.is_active} onChange={() => toggleActive(item)} /> },
             { key: 'created_at', header: '建立時間', thClass: 'text-sm font-semibold', tdClass: 'text-sm text-gray-500', cell: (item) => new Date(item.created_at).toLocaleString('zh-TW') },
             {

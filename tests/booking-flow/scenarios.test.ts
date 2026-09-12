@@ -1,6 +1,7 @@
 import { quoteFlowDeps, __quoteFlowTesting, flushPendingWrites } from '../../netlify/functions/line-webhook';
 import { __reset, __db } from './stubs/supabase';
 import { __sent, Client } from './stubs/line';
+import { addDaysIso } from '../../src/lib/bookingIntent';
 
 const { handleQuoteConversation, runTurn, takeTurnReminder, setActiveChannelId } = __quoteFlowTesting;
 
@@ -216,6 +217,13 @@ const arg = (r: any, fn: string, i: number) => r.calls.find((c: any) => c.fn ===
 
   r = await cold('2/2 12個人');
   t('冷啟動｜日期＋人數 → 開流程、只問退房', r.handled === true && /退房日期/.test(r.replies[0] || '') && !/人數/.test(r.replies[0] || ''), r);
+
+  // 截圖裡的真實案例：「你好，我想安排明年3月3號大約8人」→ 問退房 →「住一晚」→ 應該直接試算（沒指定房型＝自動配房）
+  r = await cold('你好，我想安排明年3月3號大約8人');
+  t('冷啟動｜「明年3月3號大約8人」→ 抓到入住＋人數、只問退房日期', r.handled === true && /退房日期/.test(r.replies[0] || '') && r.session?.collected?.headcount === '8' && /^[0-9]{4}-03-03$/.test(r.session?.collected?.checkin || ''), r);
+  const checkinIso = r.session?.collected?.checkin;
+  r = await turn({ mode: 'system', phase: 'in_flow', collected: { checkin: checkinIso, headcount: '8' }, msg: '住一晚' });
+  t('接著回「住一晚」→ 退房＝入住＋1、三要素齊 → 試算（不要求房數）', called(r, 'finishBookingFlow') && arg(r, 'finishBookingFlow', 6).checkout === addDaysIso(checkinIso, 1), r);
 
   r = await cold('2/2 有房嗎');
   t('冷啟動｜只有一個日期 → 不開流程（交給 AI 問答）', r.handled === false && r.bookings.length === 0, r);

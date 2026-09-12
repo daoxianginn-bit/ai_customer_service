@@ -120,6 +120,25 @@ export function interpretBareAnswer(message: string, field: IntentFieldDef): str
   return undefined;
 }
 
+// 「住一晚」「兩天一夜」「3 晚」這種講法：客人常常只給入住日跟晚數，不會算退房日。
+// 回傳晚數；抓不到回 undefined。
+const CN_NUM: Record<string, number> = { 一: 1, 兩: 2, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10 };
+export function scanNights(message: string): number | undefined {
+  const t = message.replace(/\s+/g, '');
+  // 「兩天一夜」「三天兩夜」：以「夜」的數字為準
+  const dn = t.match(/([0-9一兩二三四五六七八九十]+)天([0-9一兩二三四五六七八九十]+)夜/);
+  const raw = dn ? dn[2] : t.match(/(?:住|待|停留|住宿)?([0-9一兩二三四五六七八九十]+)\s*(?:個)?(?:晚|夜)/)?.[1];
+  if (!raw) return undefined;
+  const n = /^\d+$/.test(raw) ? Number(raw) : CN_NUM[raw];
+  return n && n > 0 && n < 60 ? n : undefined;
+}
+
+export function addDaysIso(iso: string, days: number): string {
+  const [y, m, d] = iso.split('-').map(Number);
+  const date = new Date(Date.UTC(y, m - 1, d + days));
+  return date.toISOString().slice(0, 10);
+}
+
 export const QUOTE_ESSENTIAL_FIELDS = ['checkin_date', 'checkout_date', 'headcount'] as const;
 
 /** 算價必要的欄位裡，還沒填的那些。房數是選填，不會出現在這裡。 */
@@ -158,6 +177,16 @@ export function classifyByRules(
   for (const f of ctx.fields) {
     if (ctx.collected[f.key] && slots[f.key] !== undefined && !trimmed.includes(f.label)) delete slots[f.key];
   }
+
+  // 「住一晚」「兩天一夜」：有入住日、沒退房日時，用晚數推出退房日
+  const checkinField = ctx.fields.find((f) => f.quote_field === 'checkin_date');
+  const checkoutField = ctx.fields.find((f) => f.quote_field === 'checkout_date');
+  if (checkinField && checkoutField && slots[checkoutField.key] === undefined) {
+    const checkin = slots[checkinField.key] ?? ctx.collected[checkinField.key];
+    const nights = scanNights(trimmed);
+    if (checkin && nights && /^\d{4}-\d{2}-\d{2}$/.test(checkin)) slots[checkoutField.key] = addDaysIso(checkin, nights);
+  }
+
   if (Object.keys(slots).length > 0) {
     return rules(ctx.phase === 'collecting' ? 'provide_info' : 'modify', slots);
   }
@@ -245,7 +274,9 @@ ${historyLines.length ? historyLines.join('\n') : '  （無）'}
 - 同一句話既有欄位值又像在問問題時，以欄位值為主（provide_info 或 modify）。
 - 已收集的欄位，客人明確給了不同的值 → modify；還沒收集的欄位給了值 → provide_info。
 - 「好啊但…」「可以，不過…」這種帶條件的同意，不是 confirm，看條件內容判斷是 modify 或 question。
-- 日期沒寫年份：該日期今年還沒過就用今年，已經過了就用明年。
+- 日期沒寫年份：該日期今年還沒過就用今年，已經過了就用明年。「明年 3 月 3 號」就是明年。
+- 客人只講住幾晚（「住一晚」「兩天一夜」「3 晚」）：退房日＝入住日＋晚數，直接算出來填進退房日期。
+- 「大約 8 人」「8 個人左右」：人數就填 8。
 - 房數欄位客人沒提到就不要填，不要填 0。
 - 客人把整張表單（含「入住日期：」這類標籤）貼回來時，逐行對應欄位；留空的行不填。
 - 不確定就 unclear，不要猜。

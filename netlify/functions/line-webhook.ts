@@ -2488,21 +2488,21 @@ async function finishBookingFlow(
     // 兩者之間沒有人把關的話，「12 人 + 2 人房 2 間」會照 12 人報價、卻只開 4 個床位的房間，
     // 客人拿到看起來正常的報價，到現場才發現睡不下。這種指定本身就自相矛盾，直接請客人改。
     //
-    // 沒填的房數就是 0 間，不是「沒意見」——所以整張表單的房數全部留空／填 0 時算出來的容量是 0，
-    // 一樣擋下來請客人改。只有「這個流程根本沒有問房數」時才輪到系統自動配房（hasRoomCountFields）。
+    // 但「完全沒指定房型」是「沒意見」，不是「0 間」：客人打「明年 3/3 大約 8 人，住一晚」根本
+    // 沒提到房型，這時該由系統自動配房（下面 requestedLayout 傳 null 給引擎就是這個意思），
+    // 不是回他「房數的欄位沒有填，安排不出 8 位的房間」——他從頭到尾沒看過房數欄位。
+    // 以前這裡把留空當 0 擋下來，跟冷啟動那條路（房數選填）與意圖優先的流程（只追問三要素）
+    // 互相矛盾，客人用自然語言訂房一定會撞到。
     const requestedRooms = toRoomCountRequests(requestedLayout);
     const requestedCapacity = totalRequestedCapacity(requestedRooms);
-    const hasRoomCountFields = allFields.some((f) => f.quote_field === 'room_count');
-    if (hasRoomCountFields && requestedCapacity < headcount) {
+    if (requestedRooms.length > 0 && requestedCapacity < headcount) {
       await supabase
         .from('bookings')
         .update({ collected_answers: collected, checkin_date: checkinIso, checkout_date: checkoutIso, nights, headcount, updated_at: new Date().toISOString() })
         .eq('id', bookingId);
-      const replyText = requestedRooms.length
-        ? `不好意思，您指定的房間住不下 ${headcount} 位：${describeRoomRequests(requestedRooms)}最多 ${requestedCapacity} 人 🙏` +
-          `\n麻煩您調整房數再送一次，或點選「真人客服」由專人為您確認。`
-        : `不好意思，房數的欄位沒有填，這樣安排不出 ${headcount} 位的房間 🙏` +
-          `\n麻煩您填一下每種房型各要開幾間再送一次，或點選「真人客服」由專人為您確認。`;
+      const replyText =
+        `不好意思，您指定的房間住不下 ${headcount} 位：${describeRoomRequests(requestedRooms)}最多 ${requestedCapacity} 人 🙏` +
+        `\n麻煩您調整房數再送一次，或點選「真人客服」由專人為您確認。`;
       await sendReply(replyText);
       await logConversation(userId, nickname, 'outbound', replyText, 'system');
       await keepSessionForRetry();
