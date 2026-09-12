@@ -41,7 +41,7 @@ export default function PageHeaderV2({ title, description, action, secondary, ad
         )}
       </Box>
       {(action || secondary) && (
-        <Stack direction="row" spacing={1} alignItems="center" sx={{ flexShrink: 0 }}>
+        <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap sx={{ flexShrink: 0, maxWidth: '100%' }}>
           {secondary}
           {action}
         </Stack>

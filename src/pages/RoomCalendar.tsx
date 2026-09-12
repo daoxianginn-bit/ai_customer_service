@@ -5,29 +5,33 @@ import { zhTW } from 'date-fns/locale';
 import 'react-big-calendar/lib/css/react-big-calendar.css';
 import './RoomCalendar.css';
 import { supabase } from '../lib/supabase';
-import { Box, Paper, Stack, Typography, IconButton, Button, Tooltip, Chip, Dialog, DialogTitle, DialogContent, Alert, CircularProgress } from '@mui/material';
-import { ChevronLeft, ChevronRight, CalendarDays, SlidersHorizontal, X, RefreshCw, Eye } from 'lucide-react';
-import PageHeaderMui from '../components/ui-mui/PageHeaderMui';
-import { useIsMobile } from '../hooks/useIsMobile';
-import { OCCUPYING_STATUSES, UNRESERVED_WITH_DATES_STATUSES, bookingStatusLabel } from '../lib/bookingStatus';
+import { Box, Paper, Stack, Typography, IconButton, Button, Tooltip, Chip, Dialog, DialogTitle, DialogContent, DialogActions, Alert, CircularProgress, ToggleButton, ToggleButtonGroup, Skeleton } from '@mui/material';
+import { Link as RouterLink } from 'react-router-dom';
+import { ChevronLeft, ChevronRight, SlidersHorizontal, X, RefreshCw, Eye, CalendarDays, List } from 'lucide-react';
+import PageHeaderV2 from '../components/ui-mui/PageHeaderV2';
+import StatusBadge from '../components/ui-mui/StatusBadge';
+import { Can } from '../app/Can';
+import { useBreakpoint } from '../app/useBreakpoint';
+import { success, warning, info, danger, gray, neutral } from '../app/tokens';
+import { OCCUPYING_STATUSES, UNRESERVED_WITH_DATES_STATUSES, bookingStatusLabel, bookingStatusMeta, type StatusTone } from '../lib/bookingStatus';
+import { formatDate, formatShortDate } from '../lib/format';
 import DateRangeSettingsModal from '../components/DateRangeSettingsModal';
 import { OtaChannel, otaPlatformLabel, otaChannelExportUrl } from '../lib/otaChannels';
 import { parseIcsEvents } from '../lib/icsParser';
 
-// 行事曆事件用實心色塊呈現，這裡單獨定義（十六進位色碼，直接當 MUI sx/style 用）。
-// 跟 bookingStatus.ts 的 badgeClassName 用同一套顏色邏輯（同色系），只是換成十六進位。
-const STATUS_HEX: Record<string, string> = {
-  awaiting_deposit: '#facc15',
-  awaiting_confirmation: '#f59e0b',
-  reserved: '#a855f7',
-  awaiting_balance: '#f97316',
-  awaiting_checkin: '#0ea5e9',
-  checked_in: '#14b8a6',
-  deposit_processing: '#6366f1',
-  completed: '#22c55e',
-  pending_manual_conflict: '#ef4444',
+// 行事曆色塊只用五種語意色調（V2 §25：顏色不超過 5 種），跟 StatusBadge 同一套 tone：
+// 綠＝已成立／順利、琥珀＝等人動手、藍＝等待中、紅＝衝突／退款、灰＝起點／結案。
+// 同一色調裡的不同狀態靠色塊上的文字與點開後的 Badge 區分，不再一狀態一色。
+const TONE_HEX: Record<StatusTone, { bg: string; fg: string }> = {
+  success: { bg: success[600], fg: '#fff' },
+  warning: { bg: warning[600], fg: '#fff' },
+  info: { bg: info[600], fg: '#fff' },
+  danger: { bg: danger[600], fg: '#fff' },
+  neutral: { bg: gray[500], fg: '#fff' },
 };
-const UNRESERVED_HEX = '#9ca3af'; // 報價階段（待報價／待預定：已算過價但客人還沒回「是」，尚未鎖定房間），顏色跟其他狀態區隔用灰色＋虛線框
+const TONE_LABEL: Record<StatusTone, string> = { success: '已成立', warning: '等人處理', info: '等待中', danger: '衝突／退款', neutral: '結案' };
+// 報價階段（待報價／待預定：有日期但房間還沒鎖定）：白底灰字虛線框，跟正式訂單一眼分得開
+const UNRESERVED_STYLE = { backgroundColor: '#fff', color: neutral.text600, border: `1px dashed ${gray[400]}` };
 
 const CALENDAR_STATUSES = [...OCCUPYING_STATUSES];
 
@@ -63,7 +67,9 @@ interface BookingEvent {
 export default function RoomCalendar() {
   // 月檢視在手機上放不下：7 欄擠進 375px，每格只剩 50 出頭，事件色塊會變成看不出是誰的細條。
   // 改用議程檢視——同樣是「這段期間有誰要來」，但排成一份可以直接讀的清單。
-  const isMobile = useIsMobile();
+  const { isMobile } = useBreakpoint();
+  // 手機預設列表（§26），可切回月檢視
+  const [mobileView, setMobileView] = useState<'list' | 'month'>('list');
 
   const [calendarDate, setCalendarDate] = useState(new Date());
   const [events, setEvents] = useState<BookingEvent[]>([]);
@@ -113,7 +119,7 @@ export default function RoomCalendar() {
 
       const { data: bookings } = await supabase
         .from('bookings')
-        .select('id, name, nickname, whole_house, status, checkin_date, checkout_date, room_type_label, total_amount')
+        .select('id, name, nickname, whole_house, status, checkin_date, checkout_date, room_type_label, total_amount, headcount, nights')
         // 報價階段（待報價／待預定）的訂單也要撈：這些有日期、但還沒鎖定房間，
         // 管理員仍然需要看到「有人在問這幾天」，只是要跟真正鎖房的訂單區隔開來顯示。
         .in('status', [...CALENDAR_STATUSES, ...UNRESERVED_WITH_DATES_STATUSES])
@@ -128,7 +134,7 @@ export default function RoomCalendar() {
           const roomLabel = b.whole_house ? '包棟' : b.room_type_label || (unreserved ? '未指定房型' : '房型未定');
           return {
             id: b.id,
-            title: `${guestName}（${roomLabel}）`,
+            title: `${guestName}${b.headcount ? ` · ${b.headcount}人` : ''} · ${roomLabel}`,
             start: new Date(`${b.checkin_date}T00:00:00`),
             end: new Date(`${b.checkout_date}T00:00:00`), // 退房日不算住宿夜，跟 react-big-calendar 多日事件「end 不含」的慣例一致
             allDay: true,
@@ -271,53 +277,76 @@ export default function RoomCalendar() {
     );
   };
 
-  const eventPropGetter = (event: BookingEvent) => ({
-    style: {
-      backgroundColor: event.unreserved ? UNRESERVED_HEX : STATUS_HEX[event.status] || '#9ca3af',
-      color: '#fff',
-      border: event.unreserved ? '1px dashed #fff' : 'none',
-      opacity: event.unreserved ? 0.85 : 1,
-    },
-  });
+  const eventPropGetter = (event: BookingEvent) => {
+    if (event.unreserved) return { style: UNRESERVED_STYLE };
+    const c = TONE_HEX[bookingStatusMeta(event.status).tone];
+    return { style: { backgroundColor: c.bg, color: c.fg, border: 'none' } };
+  };
+
+  // 手機列表：依入住日分組，同一天多筆就列多筆（§26）
+  const agendaGroups = events
+    .filter((e) => e.booking.checkin_date)
+    .sort((a, b) => String(a.booking.checkin_date).localeCompare(String(b.booking.checkin_date)))
+    .reduce<{ date: string; items: BookingEvent[] }[]>((acc, e) => {
+      const d = String(e.booking.checkin_date);
+      const last = acc[acc.length - 1];
+      if (last && last.date === d) last.items.push(e); else acc.push({ date: d, items: [e] });
+      return acc;
+    }, []);
+  const todayIso = toIso(new Date().getFullYear(), new Date().getMonth(), new Date().getDate());
 
   const goPrevMonth = () => setCalendarDate(new Date(year, month - 1, 1));
   const goNextMonth = () => setCalendarDate(new Date(year, month + 1, 1));
 
   return (
-    <Box sx={{ maxWidth: 1200, mx: 'auto', display: 'flex', flexDirection: 'column', gap: 2 }}>
-      <PageHeaderMui
-        icon={<CalendarDays size={26} color="#16a34a" />}
-        title="行事曆"
-        description="每個色塊是一筆訂單（房客／房型），顏色代表訂單狀態；旺季／連假日期會有標籤，滑鼠移過去可以看詳細說明。點色塊可以查看該筆訂單詳情。"
-        // 手機放不下一整排，讓它自己換行；月份切換自成一組，才不會被拆到兩行去。
-        action={
+    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+      <PageHeaderV2
+        secondary={
           <Stack direction="row" spacing={1} alignItems="center" useFlexGap flexWrap="wrap">
-            <Stack direction="row" spacing={1} alignItems="center">
-              <IconButton onClick={goPrevMonth} size="small" sx={{ border: '1px solid', borderColor: 'divider' }}><ChevronLeft size={18} /></IconButton>
-              <Typography fontWeight={600} sx={{ width: 92, textAlign: 'center' }}>{year}年{month + 1}月</Typography>
-              <IconButton onClick={goNextMonth} size="small" sx={{ border: '1px solid', borderColor: 'divider' }}><ChevronRight size={18} /></IconButton>
-            </Stack>
-            <Button variant="contained" startIcon={<SlidersHorizontal size={16} />} onClick={() => setDateRangeModalOpen(true)}>
-              旺季/連假日期設定
-            </Button>
-            <Tooltip title={syncTaskId ? '手動抓取第三方平台行事曆、同步進系統並推播到 Google 行事曆' : '請先到「排程管理」新增一筆「行事曆整合同步」排程'}>
-              <span>
-                <Button
-                  variant="outlined"
-                  startIcon={syncRunning ? <CircularProgress size={14} /> : <RefreshCw size={16} />}
-                  onClick={runSyncNow}
-                  disabled={!syncTaskId || syncRunning}
-                >
-                  {syncRunning ? '整合中...' : '手動整合第三方'}
-                </Button>
-              </span>
-            </Tooltip>
-            <Button variant="outlined" startIcon={<Eye size={16} />} onClick={openPreview}>
-              預覽匯出行事曆
-            </Button>
+            <Can permission="pricing.manage">
+              <Button variant="outlined" color="inherit" startIcon={<SlidersHorizontal size={16} />} onClick={() => setDateRangeModalOpen(true)}>
+                {isMobile ? '旺季/連假' : '旺季/連假日期設定'}
+              </Button>
+            </Can>
+            <Can permission="integration.manage">
+              <Tooltip title={syncTaskId ? '手動抓取第三方平台行事曆、同步進系統並推播到 Google 行事曆' : '請先到「自動化排程」新增一筆「行事曆整合同步」排程'}>
+                <span>
+                  <Button
+                    variant="outlined"
+                    color="inherit"
+                    startIcon={syncRunning ? <CircularProgress size={14} /> : <RefreshCw size={16} />}
+                    onClick={runSyncNow}
+                    disabled={!syncTaskId || syncRunning}
+                  >
+                    {syncRunning ? '整合中...' : '手動整合第三方'}
+                  </Button>
+                </span>
+              </Tooltip>
+            </Can>
+            <Can permission="integration.view">
+              <Button variant="outlined" color="inherit" startIcon={<Eye size={16} />} onClick={openPreview}>
+                {isMobile ? '匯出預覽' : '預覽匯出行事曆'}
+              </Button>
+            </Can>
           </Stack>
         }
       />
+
+      {/* 月份切換＋手機的 月／列表 切換 */}
+      <Stack direction="row" alignItems="center" justifyContent="space-between" spacing={1}>
+        <Stack direction="row" spacing={1} alignItems="center">
+          <IconButton onClick={goPrevMonth} size="small" sx={{ border: '1px solid', borderColor: 'divider' }} aria-label="上個月"><ChevronLeft size={18} /></IconButton>
+          <Typography fontWeight={600} sx={{ width: 92, textAlign: 'center' }}>{year}年{month + 1}月</Typography>
+          <IconButton onClick={goNextMonth} size="small" sx={{ border: '1px solid', borderColor: 'divider' }} aria-label="下個月"><ChevronRight size={18} /></IconButton>
+          <Button size="small" color="inherit" onClick={() => setCalendarDate(new Date())}>今天</Button>
+        </Stack>
+        {isMobile && (
+          <ToggleButtonGroup size="small" exclusive value={mobileView} onChange={(_, v) => v && setMobileView(v)}>
+            <ToggleButton value="list" aria-label="列表"><List size={16} /></ToggleButton>
+            <ToggleButton value="month" aria-label="月"><CalendarDays size={16} /></ToggleButton>
+          </ToggleButtonGroup>
+        )}
+      </Stack>
 
       {syncResult && (
         <Alert severity={syncResult.ok ? 'success' : 'error'} onClose={() => setSyncResult(null)}>
@@ -326,20 +355,58 @@ export default function RoomCalendar() {
       )}
 
       <Stack direction="row" flexWrap="wrap" gap={2} rowGap={1} alignItems="center">
-        {CALENDAR_STATUSES.map((status) => (
-          <Stack key={status} direction="row" alignItems="center" spacing={0.75}>
-            <Box sx={{ width: 12, height: 12, borderRadius: 0.5, bgcolor: STATUS_HEX[status] }} />
-            <Typography variant="caption" color="text.secondary">{bookingStatusLabel(status)}</Typography>
-          </Stack>
-        ))}
+        {(['success', 'warning', 'info', 'danger', 'neutral'] as StatusTone[]).map((tone) => {
+          const statuses = CALENDAR_STATUSES.filter((st) => bookingStatusMeta(st).tone === tone);
+          if (!statuses.length) return null;
+          return (
+            <Tooltip key={tone} title={statuses.map(bookingStatusLabel).join('、')}>
+              <Stack direction="row" alignItems="center" spacing={0.75} sx={{ cursor: 'help' }}>
+                <Box sx={{ width: 12, height: 12, borderRadius: 0.5, bgcolor: TONE_HEX[tone].bg }} />
+                <Typography variant="caption" color="text.secondary">{TONE_LABEL[tone]}</Typography>
+              </Stack>
+            </Tooltip>
+          );
+        })}
         <Stack direction="row" alignItems="center" spacing={0.75}>
-          <Box sx={{ width: 12, height: 12, borderRadius: 0.5, bgcolor: UNRESERVED_HEX, border: '1px dashed #fff', outline: '1px solid #d1d5db' }} />
+          <Box sx={{ width: 12, height: 12, borderRadius: 0.5, ...UNRESERVED_STYLE }} />
           <Typography variant="caption" color="text.secondary">報價中（未鎖房間）</Typography>
         </Stack>
         <Chip label="旺季" size="small" sx={{ height: 20, fontSize: '0.65rem', bgcolor: '#fed7aa', color: '#9a3412' }} />
         <Chip label="連假" size="small" sx={{ height: 20, fontSize: '0.65rem', bgcolor: '#fecaca', color: '#991b1b' }} />
       </Stack>
 
+      {isMobile && mobileView === 'list' ? (
+        <Stack spacing={1.5}>
+          {loading && [0, 1, 2].map((i) => <Skeleton key={i} variant="rounded" height={72} />)}
+          {!loading && agendaGroups.length === 0 && (
+            <Typography variant="body2" color="text.secondary" sx={{ py: 4, textAlign: 'center' }}>{year}年{month + 1}月沒有訂單</Typography>
+          )}
+          {!loading && agendaGroups.map((g) => (
+            <Box key={g.date}>
+              <Typography variant="caption" sx={{ fontWeight: 600, color: g.date === todayIso ? 'primary.main' : 'text.secondary' }}>
+                {formatShortDate(g.date)}{g.date === todayIso ? '・今天' : ''}・入住 {g.items.length} 筆
+              </Typography>
+              <Stack spacing={0.75} sx={{ mt: 0.5 }}>
+                {g.items.map((e) => (
+                  <Paper key={e.id} variant="outlined" component={RouterLink} to={`/bookings/${e.id}`} sx={{ p: 1.25, display: 'block', textDecoration: 'none', color: 'inherit', borderStyle: e.unreserved ? 'dashed' : 'solid' }}>
+                    <Stack direction="row" justifyContent="space-between" alignItems="flex-start" spacing={1}>
+                      <Box sx={{ minWidth: 0 }}>
+                        <Typography variant="body2" sx={{ fontWeight: 600 }} noWrap>
+                          {e.booking.name || e.booking.nickname || '未取得'}{e.booking.headcount ? ` · ${e.booking.headcount}人` : ''}
+                        </Typography>
+                        <Typography variant="caption" color="text.secondary" noWrap sx={{ display: 'block' }}>
+                          {e.booking.whole_house ? '包棟' : e.booking.room_type_label || '房型未定'}・{formatShortDate(e.booking.checkin_date)} → {formatShortDate(e.booking.checkout_date)}{e.booking.nights ? `・${e.booking.nights} 晚` : ''}
+                        </Typography>
+                      </Box>
+                      <StatusBadge status={e.status} />
+                    </Stack>
+                  </Paper>
+                ))}
+              </Stack>
+            </Box>
+          ))}
+        </Stack>
+      ) : (
       <Paper variant="outlined" className="room-calendar" sx={{ p: 1.5, height: { xs: 560, md: 720 } }}>
         {loading && <Typography variant="body2" color="text.secondary" align="center" sx={{ py: 0.5 }}>載入中...</Typography>}
         <Calendar
@@ -348,11 +415,8 @@ export default function RoomCalendar() {
           events={events}
           date={calendarDate}
           onNavigate={setCalendarDate}
-          views={isMobile ? [Views.AGENDA] : [Views.MONTH]}
-          view={isMobile ? Views.AGENDA : Views.MONTH}
-          // 議程檢視預設只列 30 天，給 31 才會跟上面的月份切換範圍一致——
-          // 不然月底那一兩天會憑空消失。
-          length={31}
+          views={[Views.MONTH]}
+          view={Views.MONTH}
           toolbar={false}
           popup
           dayPropGetter={dayPropGetter}
@@ -371,6 +435,7 @@ export default function RoomCalendar() {
           style={{ height: '100%' }}
         />
       </Paper>
+      )}
 
       {/* ============== 點色塊看訂單詳情 ============== */}
       <Dialog open={!!selectedEvent} onClose={() => setSelectedEvent(null)} maxWidth="xs" fullWidth>
@@ -385,23 +450,25 @@ export default function RoomCalendar() {
                 <Typography fontWeight={600}>{selectedEvent.booking.name || selectedEvent.booking.nickname || '未取得'}</Typography>
                 <Typography variant="caption" color="text.secondary" component="div">
                   {selectedEvent.booking.whole_house ? '包棟' : selectedEvent.booking.room_type_label || '房型未定'}
-                  {'　'}
-                  {String(selectedEvent.booking.checkin_date).replace(/-/g, '/')} ~ {String(selectedEvent.booking.checkout_date).replace(/-/g, '/')}
+                  {selectedEvent.booking.headcount ? `・${selectedEvent.booking.headcount} 人` : ''}
+                </Typography>
+                <Typography variant="caption" color="text.secondary" component="div">
+                  {formatDate(selectedEvent.booking.checkin_date)} → {formatDate(selectedEvent.booking.checkout_date)}{selectedEvent.booking.nights ? `・${selectedEvent.booking.nights} 晚` : ''}
                 </Typography>
               </Box>
               <Box sx={{ textAlign: 'right', flexShrink: 0 }}>
                 {selectedEvent.booking.total_amount != null && (
                   <Typography variant="body2" sx={{ mb: 0.5 }}>NT$ {Number(selectedEvent.booking.total_amount).toLocaleString()}</Typography>
                 )}
-                <Chip
-                  label={bookingStatusLabel(selectedEvent.status)}
-                  size="small"
-                  sx={{ bgcolor: selectedEvent.unreserved ? UNRESERVED_HEX : STATUS_HEX[selectedEvent.status] || '#9ca3af', color: '#fff' }}
-                />
+                <StatusBadge status={selectedEvent.status} />
               </Box>
             </Stack>
           )}
         </DialogContent>
+        <DialogActions>
+          <Button color="inherit" onClick={() => setSelectedEvent(null)}>關閉</Button>
+          {selectedEvent && <Button variant="contained" component={RouterLink} to={`/bookings/${selectedEvent.id}`}>查看訂單</Button>}
+        </DialogActions>
       </Dialog>
 
       <DateRangeSettingsModal
