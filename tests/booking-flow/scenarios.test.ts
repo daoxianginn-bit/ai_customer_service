@@ -98,10 +98,10 @@ const arg = (r: any, fn: string, i: number) => r.calls.find((c: any) => c.fn ===
   t('收集中｜「我要訂房」→ 重新開始（startBookingFlow），不花 AI', called(r, 'startBookingFlow') && !called(r, 'restartQuoteFlow'), r.calls);
 
   r = await turn({ mode: 'ai', phase: 'in_flow', collected: four, msg: '有早餐嗎', ai: '{"intent":"question","slots":{}}' });
-  t('收集中｜三要素齊、「有早餐嗎」→ 交給 AI 問答（handled=false）＋「還在進行中」提醒', r.handled === false && /還在進行中/.test(r.reminder || ''), r);
+  t('收集中｜三要素齊、「有早餐嗎」→ 交給 AI 問答（handled=false）＋「還在進行中」提醒', r.handled === false && /即為您試算/.test(r.reminder || ''), r);
 
   r = await turn({ mode: 'ai', phase: 'in_flow', collected: { checkin: '2027-02-02' }, msg: '有早餐嗎', ai: '{"intent":"question","slots":{}}' });
-  t('收集中｜缺退房人數、「有早餐嗎」→ AI 問答 ＋「還需要：退房日期、人數」提醒', r.handled === false && /還需要：退房日期、人數/.test(r.reminder || ''), r);
+  t('收集中｜缺退房人數、「有早餐嗎」→ AI 問答 ＋「還需要：退房日期、人數」提醒', r.handled === false && /訂房還需要：退房日期、人數/.test(r.reminder || ''), r);
 
   r = await turn({ mode: 'ai', phase: 'in_flow', collected: {}, msg: '嗨', ai: '{"intent":"unclear","slots":{}}' });
   t('收集中｜什麼都沒填、「嗨」→ 當閒聊交給 AI（handled=false）', r.handled === false && !!r.reminder, r);
@@ -141,7 +141,7 @@ const arg = (r: any, fn: string, i: number) => r.calls.find((c: any) => c.fn ===
   t('待確認｜「否」→ declineQuote', called(r, 'declineQuote'), r.calls);
 
   r = await turn({ mode: 'ai', phase: 'awaiting_confirmation', collected: four, msg: '有早餐嗎', ai: '{"intent":"question","slots":{}}' });
-  t('待確認｜「有早餐嗎」→ AI 問答 + 提醒「是／否／修改」', r.handled === false && /仍在等待確認/.test(r.reminder || ''), r);
+  t('待確認｜「有早餐嗎」→ AI 問答 + 提醒「是／否／修改」', r.handled === false && /報價確認：回「是」/.test(r.reminder || ''), r);
 
   r = await turn({ mode: 'ai', phase: 'awaiting_confirmation', collected: four, msg: '好啊但我想改成10/10', ai: '{"intent":"modify","slots":{"checkin":"2026-10-10","checkout":"2026-10-12"}}' });
   t('待確認｜「好啊但改成10/10」AI 判 modify → 重新報價，帶新日期', called(r, 'requoteWithCollected') && arg(r, 'requoteWithCollected', 7).checkin === '2026-10-10' && !called(r, 'confirmQuote'), r.calls);

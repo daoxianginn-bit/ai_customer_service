@@ -2852,16 +2852,13 @@ function sessionPhaseToIntentPhase(phase: BookingSession['phase']): BookingPhase
 }
 
 // 各階段交給一般 AI 問答時，答完要補的那句提醒
+// 一行就好：這句是接在 AI 回答後面的，客人剛看完答案，只要點一下還有事沒做完。
 function reminderForPhase(phase: BookingPhase, missingLabels: string[], collectedCount: number): string {
-  if (phase === 'awaiting_confirmation') {
-    return '📋 您的報價仍在等待確認：回覆「是」訂房、「否」取消，或「修改」重新填寫訂房資訊。';
-  }
-  if (phase === 'awaiting_remittance') {
-    return '📋 您的訂單正在等待匯款，完成後請回覆帳號末五碼，我們會盡快為您核對。';
-  }
-  if (missingLabels.length) return `📋 訂房資訊還需要：${missingLabels.join('、')}，補上後我們就為您試算。`;
-  if (collectedCount > 0) return '📋 您的訂房詢問還在進行中，回覆上方問題後我們就為您試算。';
-  return '📋 要訂房的話，請回覆上方表單的資訊，我們會為您試算。';
+  if (phase === 'awaiting_confirmation') return '📋 報價確認：回「是」訂房／「否」取消／「修改」重填';
+  if (phase === 'awaiting_remittance') return '📋 匯款後請回覆帳號末五碼';
+  if (missingLabels.length) return `📋 訂房還需要：${missingLabels.join('、')}`;
+  if (collectedCount > 0) return '📋 回覆上方問題後即為您試算';
+  return '📋 要訂房請回覆上方表單';
 }
 
 // 分類器抽出來的值做格式檢查／正規化。日期統一成 YYYY-MM-DD（AI 偶爾會照客人原文回 2/2），
@@ -3595,8 +3592,15 @@ export async function processWaitlist(): Promise<{ ok: boolean; summary: string 
 // 知識庫邊界：不管管理員在「系統指令」裡怎麼寫，客服回答一律不能超出知識庫範圍——
 // 沒寫的問題如果讓 AI 憑常識回答，遇到退房政策、寵物政策這類「猜錯代價很高」的問題會很危險。
 // 固定寫死在這裡（不是 settings.system_prompt 的一部分），管理員改系統指令也不會不小心把這條規則改掉。
+// 知識庫的內容就是民宿本身的規定與事實，AI 要以「我們」的身分直接講，不能講成「資料上寫」。
+// 以前這段把知識庫叫「參考資料」，模型就照著回客人「參考資料未提供早餐資訊」——客人不知道
+// 什麼是參考資料，聽起來像在推責任。標題與規則都改用民宿自己的口吻，並明確禁止提到「資料」
+// 這類字眼。沒寫到的事還是不能猜，但要講成「這部分我幫您確認」而不是「資料裡沒有」。
+const KB_KNOWLEDGE_HEADER = '【本民宿的實際資訊】';
 const KB_BOUNDARY_INSTRUCTION =
-  '重要規則：只能根據下面「參考資料」裡的內容回答問題。參考資料沒有提到的事情，一律誠實回答「不好意思，這個問題我不清楚，建議您聯繫真人客服協助」，絕對不要用自己的知識猜測或編造答案，即使聽起來很合理也一樣。';
+  `重要規則：你是這間民宿的客服人員，下面${KB_KNOWLEDGE_HEADER}裡的內容就是我們自己的規定與事實，請直接以「我們」的口吻回答，例如「我們的入住時間是下午三點」。` +
+  '回答時絕對不要提到「參考資料」「資料」「知識庫」「文件」「提供的資訊」這類字眼，客人不需要知道你是從哪裡讀到的。' +
+  '如果客人問的事情在上面的資訊裡完全沒有寫到，不要用自己的知識猜測或編造，即使聽起來很合理也一樣；請回答「不好意思，這部分我幫您確認一下，稍後由專人回覆您 🙏」。';
 
 // 知識庫檔案型附件過去每一則訊息都重新下載一次內容，短 TTL 記憶體快取避免重複下載
 // （管理員換檔案後最多晚 5 分鐘生效，跟 quote sheet header 快取用同一個 TTL）。
@@ -3696,7 +3700,7 @@ export async function callGPT(
       const text = await fetchKbFileText(item.file_url);
       if (text) fileContent += `\n\n【${item.title}】\n${text}`;
     }
-    systemContent = `${settings.system_prompt}\n\n${KB_BOUNDARY_INSTRUCTION}\n\n${bookingSummaryBlock(recentBooking)}參考資料：\n${textBlock}${fileContent}`;
+    systemContent = `${settings.system_prompt}\n\n${KB_BOUNDARY_INSTRUCTION}\n\n${bookingSummaryBlock(recentBooking)}${KB_KNOWLEDGE_HEADER}\n${textBlock}${fileContent}`;
   }
 
   const historyMessages = overrideSystemPrompt ? [] : buildHistoryMessages(history);
@@ -3761,7 +3765,7 @@ export async function callGemini(
   }
 
   const textBlock = kbItems.filter((i) => i.type === 'text' && i.content).map((i) => `【${i.title}】\n${i.content}`).join('\n\n');
-  const systemParts: any[] = [{ text: `System: ${settings.system_prompt}\n\n${KB_BOUNDARY_INSTRUCTION}\n\n${bookingSummaryBlock(recentBooking)}Reference: ${textBlock}` }];
+  const systemParts: any[] = [{ text: `System: ${settings.system_prompt}\n\n${KB_BOUNDARY_INSTRUCTION}\n\n${bookingSummaryBlock(recentBooking)}${KB_KNOWLEDGE_HEADER}\n${textBlock}` }];
 
   for (const item of kbItems.filter((i) => i.type === 'file' && i.file_url)) {
     const file = await fetchKbFileBinary(item.file_url);
