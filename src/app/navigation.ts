@@ -61,8 +61,8 @@ export const navigation: NavSection[] = [
       {
         key: 'service', label: '客服與 AI', path: '/service', icon: Headphones, permission: 'service.view',
         children: [
-          { label: '客服工作台', path: '/service', permission: 'service.view', description: '處理進行中的真人對話請求與轉接歷史' },
-          { label: '對話紀錄', path: '/service/conversations', permission: 'service.view', description: '每位客人的完整對話，可展開每則訊息的處理過程' },
+          { label: '客服工作台', path: '/service', permission: 'service.view', description: '對話清單、對話內容與客戶脈絡；接手或轉回 AI、直接回覆客人' },
+          { label: '轉接紀錄', path: '/service/handovers', permission: 'service.view', description: '客人呼叫真人客服與客服接手的紀錄' },
           { label: '對話流程', path: '/service/flows', permission: 'service.config', description: '客人傳訊息時，依關鍵字啟動的自動對話流程' },
           { label: 'AI 知識庫', path: '/service/knowledge', permission: 'service.config', description: 'AI 回答問題時依據的民宿資訊' },
           { label: '客服規則', path: '/service/rules', permission: 'service.config', description: '真人客服轉接的關鍵字、逾時與通知對象' },
@@ -194,6 +194,7 @@ export const LEGACY_REDIRECTS: Record<string, string> = {
   '/room-pricing/formula': '/pricing/settings',
   '/room-pricing/quote': '/pricing/simulator',
   '/ai-service-center': '/service',
+  '/service/conversations': '/service',
   '/standard-messages': '/service/flows',
   '/message-variables': '/admin/message-variables',
   '/knowledge-base': '/service/knowledge',

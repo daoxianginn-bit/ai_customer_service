@@ -417,6 +417,7 @@ export default function RoomCalendar() {
           onNavigate={setCalendarDate}
           views={[Views.MONTH]}
           view={Views.MONTH}
+          onView={() => {}}
           toolbar={false}
           popup
           dayPropGetter={dayPropGetter}

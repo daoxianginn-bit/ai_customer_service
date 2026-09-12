@@ -141,6 +141,42 @@ const rawHandler: Handler = async (event) => {
       return { statusCode: 200, body: JSON.stringify({ results }) };
     }
 
+    // reply：客服工作台的單人回覆（V2 §30／§32）。跟 send 的差別：
+    //   1. 訊息會寫進 conversations（source=human_agent），對話紀錄裡才看得到真人說了什麼；
+    //   2. 回覆的同時把這位客人切成真人模式（AI 暫停），避免真人跟 AI 同時回同一句。
+    //      逾時規則跟 LINE 端插話一樣（handover_timeout_minutes），或由客服按「轉回 AI」結束。
+    if (body.action === 'reply') {
+      const lineUserId: string = String(body.lineUserId || '');
+      const text: string = String(body.text || '').trim();
+      if (!lineUserId) return { statusCode: 400, body: JSON.stringify({ error: '缺少客人的 LINE User ID' }) };
+      if (!text) return { statusCode: 400, body: JSON.stringify({ error: '訊息內容是空的' }) };
+
+      const { data: state } = await supabase
+        .from('user_states')
+        .select('channel_id, nickname')
+        .eq('line_user_id', lineUserId)
+        .order('last_message_at', { ascending: false, nullsFirst: false })
+        .limit(1)
+        .maybeSingle();
+      const channel = await fetchChannelById(body.channelId || state?.channel_id);
+      if (!channel?.channel_access_token) {
+        return { statusCode: 500, body: JSON.stringify({ error: '找不到這位客人所屬官方帳號的憑證' }) };
+      }
+
+      const lineClient = new Client({ channelAccessToken: channel.channel_access_token, channelSecret: channel.channel_secret });
+      await lineClient.pushMessage(lineUserId, { type: 'text', text });
+
+      const now = new Date().toISOString();
+      await supabase.from('conversations').insert({
+        channel_id: channel.id, line_user_id: lineUserId, nickname: state?.nickname || null,
+        direction: 'outbound', content: text, source: 'human_agent',
+      });
+      await supabase.from('user_states')
+        .update({ is_human_mode: true, last_human_interaction: now })
+        .eq('channel_id', channel.id).eq('line_user_id', lineUserId);
+      return { statusCode: 200, body: JSON.stringify({ ok: true, sentAt: now }) };
+    }
+
     return { statusCode: 400, body: JSON.stringify({ error: `未知的 action: ${body.action}` }) };
   } catch (e: any) {
     return { statusCode: 500, body: JSON.stringify({ error: e.message || '未知錯誤' }) };

@@ -27,7 +27,8 @@ import BookingConflictsPage from './features/booking/BookingConflictsPage';
 import TaskCenterPage from './features/tasks/TaskCenterPage';
 import RoomCalendar from './pages/RoomCalendar';
 // 客服與 AI
-import AiServiceCenter from './pages/AiServiceCenter';
+import ServiceWorkbenchPage from './features/service/ServiceWorkbenchPage';
+import HandoverHistoryPage from './features/service/HandoverHistoryPage';
 import StandardMessages from './pages/StandardMessages';
 import KnowledgeBase from './pages/KnowledgeBase';
 import HandoverRules from './pages/service/HandoverRules';
@@ -131,8 +132,8 @@ function AppRoutes() {
           <Route path=":id" element={guarded(<BookingDetailPage />)} />
         </Route>
         <Route path="/service" element={<ModuleShell />}>
-          <Route index element={guarded(<AiServiceCenter view="workbench" />)} />
-          <Route path="conversations" element={guarded(<AiServiceCenter view="conversations" />)} />
+          <Route index element={guarded(<ServiceWorkbenchPage />)} />
+          <Route path="handovers" element={guarded(<HandoverHistoryPage />)} />
           <Route path="flows" element={guarded(<StandardMessages />)} />
           <Route path="knowledge" element={guarded(<KnowledgeBase />)} />
           <Route path="rules" element={guarded(<HandoverRules />)} />
