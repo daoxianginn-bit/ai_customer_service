@@ -1,5 +1,5 @@
 import { useState, useEffect, ReactNode } from 'react';
-import { useLocation } from 'react-router-dom';
+import { Link as RouterLink, useLocation } from 'react-router-dom';
 import { supabase } from '../../lib/supabase';
 import {
   Box, Paper, Stack, Typography, Button, IconButton, TextField, MenuItem, Chip, Tooltip, Divider,
@@ -136,8 +136,6 @@ export default function FormulaSettings() {
   // 押金與訂金
   const [depositPercent, setDepositPercent] = useState(30);
   const [wholeHouseSecurityDeposit, setWholeHouseSecurityDeposit] = useState(3000);
-  const [editingDepositSettings, setEditingDepositSettings] = useState(false);
-  const [savingDepositSettings, setSavingDepositSettings] = useState(false);
 
   // 促銷方案（不鎖，永遠可編輯）
   const [activePromotionId, setActivePromotionId] = useState('');
@@ -340,21 +338,6 @@ export default function FormulaSettings() {
   };
   const handleCancelConsecutive = async () => { await fetchAll({ silent: true }); setEditingConsecutive(false); };
 
-  const handleSaveDepositSettings = async () => {
-    setSavingDepositSettings(true);
-    try {
-      const patch = { deposit_percent: depositPercent, whole_house_security_deposit: wholeHouseSecurityDeposit };
-      if (settingsId) await supabase.from('settings').update(patch).eq('id', settingsId);
-      await logSettingsPatch(patch);
-      await fetchAll({ silent: true });
-      setEditingDepositSettings(false);
-    } catch (e: any) {
-      alert(`儲存失敗：${e.message}`);
-    } finally {
-      setSavingDepositSettings(false);
-    }
-  };
-  const handleCancelDepositSettings = async () => { await fetchAll({ silent: true }); setEditingDepositSettings(false); };
 
   const queuePromotionDelete = (table: string, id: string) => setPendingPromotionDeletes((prev) => [...prev, { table, id }]);
   const addPromotion = () => setPromotions([...promotions, { id: newId(), name: '新促銷方案', discount_type: 'percent', discount_percent: 0, discount_amount: 0 }]);
@@ -619,34 +602,19 @@ export default function FormulaSettings() {
           }
         />
 
-        <EditableCard
-          title="押金與訂金"
-          tooltip="押金與訂金是兩筆獨立的錢，各自有自己的設定。押金：訂單勾選「是否包棟」時用這裡的包棟押金，沒勾選才是實際開的那幾間房押金加總（見上方「房型押金」）。訂金：房價的固定比例，不含押金。訂單總額 ＝ 房價 ＋ 押金。"
-          editing={editingDepositSettings}
-          saving={savingDepositSettings}
-          onEdit={() => setEditingDepositSettings(true)}
-          onCancel={handleCancelDepositSettings}
-          onSave={handleSaveDepositSettings}
-          view={
-            <Typography variant="body2" color="text.secondary">
-              包棟押金 <strong>NT$ {wholeHouseSecurityDeposit.toLocaleString()}</strong>　·　訂金比例 <strong>{depositPercent}%</strong>
-            </Typography>
-          }
-          edit={
-            <Stack direction="row" flexWrap="wrap" gap={2}>
-              <TextField
-                label="包棟押金（金額）"
-                type="number"
-                size="small"
-                value={wholeHouseSecurityDeposit}
-                onChange={(e) => setWholeHouseSecurityDeposit(Number(e.target.value))}
-                sx={{ width: 200 }}
-                InputProps={{ endAdornment: <InfoHint text="訂單勾選「是否包棟」時，押金欄位直接帶入這個金額——LINE 自動報價與「訂單管理」手動建單都一樣（仍可在訂單上手動改）。沒勾選包棟的訂單才用各房型押金的加總。" /> }}
-              />
-              <TextField label="訂金比例（房價的 %）" type="number" size="small" value={depositPercent} onChange={(e) => setDepositPercent(Number(e.target.value))} sx={{ width: 180 }} />
+        {/* 押金與訂金改到「系統管理 → 訂房規則」維護（V2 §4.10）；這裡只顯示，避免兩個地方都能改、改完對不起來 */}
+        <Paper variant="outlined" sx={{ p: 3 }}>
+          <Stack direction="row" justifyContent="space-between" alignItems="center" flexWrap="wrap" useFlexGap sx={{ mb: 1 }}>
+            <Stack direction="row" alignItems="center" spacing={0.5}>
+              <Typography fontWeight={600}>押金與訂金</Typography>
+              <InfoHint text="押金與訂金是兩筆獨立的錢。押金：訂單勾選「是否包棟」時用包棟押金，沒勾選才是實際開的那幾間房押金加總（見上方「房型押金」）。訂金：房價的固定比例，不含押金。訂單總額 ＝ 房價 ＋ 押金。" />
             </Stack>
-          }
-        />
+            <Button size="small" variant="outlined" color="inherit" component={RouterLink} to="/admin/booking-rules">到訂房規則修改</Button>
+          </Stack>
+          <Typography variant="body2" color="text.secondary">
+            包棟押金 <strong>NT$ {wholeHouseSecurityDeposit.toLocaleString()}</strong>　·　訂金比例 <strong>{depositPercent}%</strong>
+          </Typography>
+        </Paper>
       </Box>
 
       <Paper variant="outlined" sx={{ p: 3 }}>

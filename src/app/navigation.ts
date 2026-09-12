@@ -76,10 +76,12 @@ export const navigation: NavSection[] = [
         ],
       },
       {
-        key: 'housekeeping', label: '房務管理', path: '/housekeeping/linens', icon: Shirt, permission: 'housekeeping.view',
+        key: 'housekeeping', label: '房務管理', path: '/housekeeping', icon: Shirt, permission: 'housekeeping.view',
         children: [
+          { label: '房務總覽', path: '/housekeeping', permission: 'housekeeping.view', description: '今日退房、今日入住、待洗布巾、低庫存耗材' },
           { label: '布巾', path: '/housekeeping/linens', permission: 'housekeeping.view', description: '重複使用、每次送洗依件計價的布巾' },
           { label: '耗材', path: '/housekeeping/consumables', permission: 'housekeeping.view', description: '會被用掉、需要補貨的耗材' },
+          { label: '洗滌', path: '/housekeeping/laundry', permission: 'housekeeping.view', description: '某天入住訂單要交給洗滌廠的布巾清單' },
           { label: '房務統計', path: '/housekeeping/statistics', permission: 'housekeeping.view', description: '洗滌成本統計與核對' },
         ],
       },
@@ -210,7 +212,6 @@ export const LEGACY_REDIRECTS: Record<string, string> = {
   '/accounts': '/admin/accounts',
   '/operation-logs': '/admin/audit',
   // 模組入口沒有自己內容的，導到第一個頁籤
-  '/housekeeping': '/housekeeping/linens',
   '/inventory': '/inventory/rooms',
   '/integrations': '/integrations/line',
   '/automation': '/automation/rules',

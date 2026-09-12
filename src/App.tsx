@@ -33,10 +33,13 @@ import StandardMessages from './pages/StandardMessages';
 import KnowledgeBase from './pages/KnowledgeBase';
 import HandoverRules from './pages/service/HandoverRules';
 // 客戶與行銷
-import CustomerDirectory from './pages/CustomerDirectory';
+import CustomerListPage from './features/customers/CustomerListPage';
+import CustomerDetailPage from './features/customers/CustomerDetailPage';
 import CustomMessageSending from './pages/CustomMessageSending';
 // 房務
 import LinenManagement from './pages/LinenManagement';
+import HousekeepingOverviewPage from './features/housekeeping/HousekeepingOverviewPage';
+import LaundryPage from './features/housekeeping/LaundryPage';
 // 房型與空間
 import RoomSpaceManagement from './pages/RoomSpaceManagement';
 // 價格中心
@@ -139,13 +142,16 @@ function AppRoutes() {
           <Route path="rules" element={guarded(<HandoverRules />)} />
         </Route>
         <Route path="/customers" element={<ModuleShell />}>
-          <Route index element={guarded(<CustomerDirectory />)} />
+          <Route index element={guarded(<CustomerListPage />)} />
+          <Route path=":id" element={guarded(<CustomerDetailPage />)} />
         </Route>
         <Route path="/marketing" element={<ModuleShell />}>
           <Route path="send" element={guarded(<CustomMessageSending />)} />
         </Route>
         <Route path="/housekeeping" element={<ModuleShell />}>
+          <Route index element={guarded(<HousekeepingOverviewPage />)} />
           <Route path="linens" element={guarded(<LinenManagement view="items" />)} />
+          <Route path="laundry" element={guarded(<LaundryPage />)} />
           <Route path="consumables" element={guarded(<LinenManagement view="consumables" />)} />
           <Route path="statistics" element={guarded(<LinenManagement view="report" />)} />
         </Route>
