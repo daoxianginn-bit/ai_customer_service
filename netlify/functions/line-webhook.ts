@@ -12,7 +12,7 @@ import {
   parseTriggerRules,
   matchTriggerRules,
   computeOrderAmounts,
-  computeTodayTomorrowFields,
+  computeTodayTomorrowFields, parseKeywordRules,
 } from '../../src/lib/messageVariables';
 import { bookingStatusLabel, flowStepIndex, OCCUPYING_STATUSES } from '../../src/lib/bookingStatus';
 import { writeOperationLog, withErrorLogging, LOG_FEATURES, SYSTEM_ACTOR } from '../../src/lib/operationLog';
@@ -582,8 +582,10 @@ async function processLineEvent(
     // AI 忽略關鍵字：訊息只要含有其中一個字，整則完全跳過——不進訂房流程、不轉真人、也不呼叫
     // AI，只留一筆對話紀錄。給不該被系統/AI 接住的雜訊訊息用（例如特定貼圖轉出來的固定文字、
     // 測試用字串），跟上面「轉真人客服」的關鍵字用途相反，兩者互相獨立、不要合併判斷。
-    if (!isImageMessage && matchKeyword(userMessage, parseCsvKeywords(settings.ai_ignore_keywords))) {
-      traceStep('命中「AI 忽略關鍵字」，整則略過，不回覆');
+    // 每一條規則可以各自是「包含」或「整句相等」（後台「AI 引擎 → 忽略關鍵字」）；舊的逗號格式照舊解讀。
+    const ignoredBy = isImageMessage ? undefined : matchTriggerRules(userMessage, parseKeywordRules(settings.ai_ignore_keywords));
+    if (ignoredBy) {
+      traceStep(`命中「AI 忽略關鍵字」${ignoredBy.keyword}（${ignoredBy.match === 'exact' ? '整句相等' : '包含'}），整則略過，不回覆`);
       return;
     }
 

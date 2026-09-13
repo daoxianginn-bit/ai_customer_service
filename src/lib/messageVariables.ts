@@ -336,6 +336,23 @@ export function serializeTriggerRules(rules: TriggerRule[]): string {
   return rules.map((r) => r.keyword).join(',');
 }
 
+// 存在單一 TEXT 欄位裡的關鍵字規則（settings.ai_ignore_keywords 這類）：
+// 新格式是 JSON 陣列 [{"keyword":"測試","match":"exact"}]，每一條可以各自選「包含」或「整句相等」；
+// 舊資料是逗號分隔的純文字，照舊規則解讀（單一字＝整句相等、其餘＝包含），不用搬資料。
+// 不另開欄位或資料表：這個設定一輩子就幾個字串，塞在原欄位就夠，也不會影響退版。
+export function parseKeywordRules(raw: string | null | undefined): TriggerRule[] {
+  const text = (raw || '').trim();
+  if (text.startsWith('[')) {
+    try { return parseTriggerRules(JSON.parse(text)); } catch { /* 不是合法 JSON 就當舊格式 */ }
+  }
+  return parseTriggerRules(null, text);
+}
+
+export function serializeKeywordRules(rules: TriggerRule[]): string {
+  const cleaned = rules.map((r) => ({ keyword: r.keyword.trim(), match: r.match === 'exact' ? 'exact' : 'contains' })).filter((r) => r.keyword);
+  return cleaned.length ? JSON.stringify(cleaned) : '';
+}
+
 export function matchTriggerRules(userMessage: string, rules: TriggerRule[]): TriggerRule | undefined {
   const trimmed = (userMessage || '').trim();
   return rules.find((r) => (r.match === 'exact' ? trimmed === r.keyword : trimmed.includes(r.keyword)));

@@ -7,6 +7,7 @@ import { supabase } from '../../lib/supabase';
 import { useSettings } from '../../lib/useSettings';
 import SettingsShell, { SettingsSection } from '../../components/ui-mui/SettingsShell';
 import SecretField from '../../components/ui-mui/SecretField';
+import KeywordRulesField from '../../components/ui-mui/KeywordRulesField';
 
 // ========================================================================
 // AI 引擎（V2 §66–67）：供應商 → 模型與金鑰 → 該供應商專屬參數 → 系統指令 → 忽略關鍵字。
@@ -147,8 +148,8 @@ export default function AiEngineSettings() {
         <TextField fullWidth multiline minRows={4} name="system_prompt" value={settings.system_prompt || ''} onChange={handleChange} />
       </SettingsSection>
 
-      <SettingsSection title="忽略關鍵字" description="客人訊息含有其中一個關鍵字就整則跳過——不進訂房流程、不轉真人、不呼叫 AI，只留對話紀錄。給貼圖轉出的固定文字、測試字串用。">
-        <TextField fullWidth name="ai_ignore_keywords" value={settings.ai_ignore_keywords || ''} onChange={handleChange} placeholder="例如：測試,廣告" helperText="逗號分隔" />
+      <SettingsSection title="忽略關鍵字" description="命中任一條規則的訊息整則跳過——不進訂房流程、不轉真人、不呼叫 AI，只留對話紀錄。給貼圖轉出的固定文字、測試字串用；「包含」要小心太短的字會誤傷正常問題（例如「房型」會擋掉「房型有哪些」）。">
+        <KeywordRulesField value={settings.ai_ignore_keywords} onChange={(v) => setField('ai_ignore_keywords', v)} placeholder="例如：測試、廣告" />
       </SettingsSection>
       </>)}
     </SettingsShell>
