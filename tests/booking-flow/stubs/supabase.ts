@@ -65,7 +65,9 @@ class Builder implements PromiseLike<any> {
     if (this.op === 'update') {
       const hit = this.matches();
       for (const r of hit) Object.assign(r, this.payload);
-      return { data: this.wantSelect ? hit : null, error: null };
+      // update().select().maybeSingle()（acquireFlowLock 用）要回單一列，不是陣列
+      const data = this.wantSelect ? (this.singleMode !== 'none' ? hit[0] ?? null : hit) : null;
+      return { data, error: null };
     }
     if (this.op === 'upsert') {
       const list = Array.isArray(this.payload) ? this.payload : [this.payload];

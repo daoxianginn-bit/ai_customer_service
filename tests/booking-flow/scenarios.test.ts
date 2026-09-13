@@ -3,7 +3,7 @@ import { __reset, __db } from './stubs/supabase';
 import { __sent, Client } from './stubs/line';
 import { addDaysIso } from '../../src/lib/bookingIntent';
 
-const { handleQuoteConversation, runTurn, takeTurnReminder, setActiveChannelId } = __quoteFlowTesting;
+const { handleQuoteConversation, runTurn, takeTurnReminder, processLineEvent, setActiveChannelId } = __quoteFlowTesting;
 
 // ---------------- 假的重機械：只記錄被呼叫 ----------------
 const calls: { fn: string; args: any }[] = [];
@@ -230,6 +230,42 @@ const arg = (r: any, fn: string, i: number) => r.calls.find((c: any) => c.fn ===
 
   r = await cold('你好');
   t('冷啟動｜閒聊 → 不開流程', r.handled === false, r);
+
+
+  // ===== 整條 processLineEvent：流程中途丟例外，客人不能已讀不回 =====
+  // 真實案例：客人在報價待確認階段又問了一句，流程處理時出錯，以前 handled 預設 true → 直接 return，
+  // 客人什麼都沒收到、客服也沒被通知（只有「處理過程」裡有一行錯誤）。
+  {
+    const flowRow = { id: 'flow1', name: 'AI報價', is_active: true, display_order: 1, flow_type: 'quote', reply_mode: 'ai', trigger_rules: [{ keyword: '我要訂房', match: 'contains' }] };
+    const flowStepRow = { id: 's1', flow_id: 'flow1', step_order: 1, message_template: '請提供日期人數房數', fields: [...fields, notesField] };
+    const session = mkSession('awaiting_confirmation', four);
+    __reset({
+      booking_flows: [flowRow], booking_flow_steps: [flowStepRow], processed_events: [], settings: [], knowledge_base_items: [], conversations: [], message_variables: [],
+      user_states: [{ channel_id: 'ch1', line_user_id: 'U1', nickname: '客人', booking_session: JSON.stringify(session), flow_lock_at: null }],
+      bookings: [{ id: 'b1', channel_id: 'ch1', line_user_id: 'U1', status: 'awaiting_deposit', collected_answers: four }],
+    });
+    __sent.length = 0; calls.length = 0;
+    aiReply = '{"intent":"modify","slots":{"headcount":"10"}}';
+    const boom = quoteFlowDeps.requoteWithCollected;
+    quoteFlowDeps.requoteWithCollected = async () => { throw new Error('引擎爆炸'); };
+    const e2eSettings = { ...settings, is_ai_enabled: true, ai_ignore_keywords: '', handover_keywords: '' };
+    let errors: string[] = [];
+    await runTurn(async () => {
+      await processLineEvent(
+        { type: 'message', message: { type: 'text', text: '改成10個人' }, source: { type: 'user', userId: 'U1' }, replyToken: 'tok', webhookEventId: 'evt-1' } as any,
+        e2eSettings, new Client({}) as any, { id: 'ch1', name: '客戶用', role: 'customer' } as any,
+      );
+    });
+    await flushPendingWrites();
+    quoteFlowDeps.requoteWithCollected = boom;
+    const replies = __sent.filter((x) => x.kind === 'reply').map((x) => x.text);
+    const pushes = __sent.filter((x) => x.kind === 'push').map((x) => x.text);
+    const inbound = (__db.conversations || []).find((c: any) => c.direction === 'inbound');
+    errors = inbound?.meta?.errors || [];
+    t('流程丟例外 → 客人收到保底回覆（稍後再試／真人客服）', replies.length === 1 && /系統忙線中/.test(replies[0]), { replies });
+    t('流程丟例外 → 客服收到通知，含錯誤訊息', pushes.some((x) => /訂房流程處理失敗/.test(x) && /引擎爆炸/.test(x)), { pushes });
+    t('流程丟例外 → 處理過程留下錯誤、session 不動', errors.some((x) => /引擎爆炸/.test(x)) && !!__db.user_states[0].booking_session, { errors, session: __db.user_states[0].booking_session });
+  }
 
   let ok = true;
   for (const [k, v, d] of checks) { console.log((v ? '✓ ' : '✗ ') + k + (d ? `\n     ${d.slice(0, 400)}` : '')); if (!v) ok = false; }

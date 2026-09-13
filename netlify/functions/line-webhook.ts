@@ -405,6 +405,32 @@ async function recordGroupMember(lineEvent: any, lineClient: Client, channel: Li
   }
 }
 
+// 流程或問答中途出錯時的保底：回一句「稍後再試／找真人」並通知客服，不讓客人已讀不回。
+// reply token 可能已經被用掉（錯誤發生在回覆之後），送不出去就只記錄，不再丟例外。
+async function replyFallbackAndNotify(
+  lineClient: Client,
+  lineEvent: any,
+  settings: any,
+  userId: string,
+  nickname: string | null,
+  userMessage: string,
+  context: string,
+  err: any
+): Promise<void> {
+  const fallback = '不好意思，目前系統忙線中，麻煩您稍後再試一次，或點選「真人客服」由專人為您服務 🙏';
+  let delivered = true;
+  await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: fallback }).catch((e: any) => {
+    delivered = false;
+    traceError(`保底回覆也送不出去：${e?.message || e}`);
+  });
+  if (delivered) await logConversation(userId, nickname, 'outbound', fallback, 'system');
+  await notifyHandover(
+    settings,
+    lineClient,
+    `⚠️ ${context}：【${nickname || '匿名用戶'}】\n客人訊息：${userMessage}\n錯誤：${err?.message || err}\n${delivered ? '已回覆客人稍後再試' : '客人沒有收到任何回覆'}，請人工接手查看。`
+  ).catch(() => {});
+}
+
 async function processLineEvent(
   lineEvent: WebhookEvent,
   settings: any,
@@ -598,11 +624,21 @@ async function processLineEvent(
         if (existingSession) {
           traceStep(`有進行中的訂房流程 session（階段 ${existingSession.phase}，第 ${existingSession.stepIndex + 1} 步），交給流程處理`);
           let handled = true;
+          let flowError: any = null;
           try {
             handled = await continueBookingFlow(lineClient, lineEvent, settings, userId, nickname, userMessage, existingSession, isImageMessage);
           } catch (e: any) {
+            flowError = e;
             console.error('[Booking] continue flow failed:', e.message);
             traceError(`訂房流程處理失敗：${e.message}`);
+          }
+          // 流程本身出錯（AI 回了讀不懂的東西、引擎算不出、資料庫寫失敗…）不能讓客人已讀不回：
+          // 以前這裡 handled 預設 true，例外被吃掉後直接 return，客人什麼都收不到、客服也不知道，
+          // 「處理過程」裡雖然有錯誤但沒人會主動去看。改成回一句保底訊息並推播通知客服接手；
+          // session 保持原樣，客服處理完或客人重新回覆時流程還接得上。
+          if (flowError) {
+            await replyFallbackAndNotify(lineClient, lineEvent, settings, userId, nickname, userMessage, '訂房流程處理失敗', flowError);
+            return;
           }
           // handled=false 代表流程判斷這則訊息不歸它管，直接往下走一般 AI／知識庫問答照實回答。
           // 這裡刻意不再比對觸發關鍵字、也不能掉進下面那段「逾時」判斷——session 明明還活著，
@@ -628,6 +664,7 @@ async function processLineEvent(
             } catch (e: any) {
               console.error('[Booking] start flow failed:', e.message);
               traceError(`開始流程失敗：${e.message}`);
+              await replyFallbackAndNotify(lineClient, lineEvent, settings, userId, nickname, userMessage, '開始訂房流程失敗', e);
             }
             return;
           }
@@ -715,6 +752,11 @@ async function processLineEvent(
   } catch (e: any) {
     console.error(`[Event] Unhandled error processing event ${eventId}:`, e.message);
     traceError(`處理過程發生未預期的錯誤：${e.message}`);
+    // 走到這裡代表前面沒有任何一段成功回覆過；reply token 若已用掉，helper 會自己吞掉錯誤只留紀錄。
+    try {
+      const state = await supabase.from('user_states').select('nickname').eq('channel_id', channel.id).eq('line_user_id', userId).maybeSingle();
+      await replyFallbackAndNotify(lineClient, lineEvent, settings, userId, state.data?.nickname || null, userMessage, '訊息處理發生未預期的錯誤', e);
+    } catch {}
   }
 }
 
@@ -3201,7 +3243,7 @@ export const quoteFlowDeps = {
 };
 
 // 情境測試用的出口：只在測試 harness 匹配。
-export const __quoteFlowTesting = { handleQuoteConversation, tryStartQuoteFromCompleteInfo, extractStepFieldsWithoutAi, runTurn, takeTurnReminder, setActiveChannelId: (id: string | null) => { activeChannelId = id; } };
+export const __quoteFlowTesting = { handleQuoteConversation, tryStartQuoteFromCompleteInfo, extractStepFieldsWithoutAi, runTurn, takeTurnReminder, processLineEvent, setActiveChannelId: (id: string | null) => { activeChannelId = id; } };
 
 // ------------------------------------------------------------------------
 // 流程測試模擬器（V2 §36）：後台「對話流程」頁輸入一句話，看系統會判成什麼意圖、抓到哪些欄位。
