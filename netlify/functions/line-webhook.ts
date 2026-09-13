@@ -3799,6 +3799,40 @@ const KB_BOUNDARY_INSTRUCTION =
 // 知識庫檔案型附件過去每一則訊息都重新下載一次內容，短 TTL 記憶體快取避免重複下載
 // （管理員換檔案後最多晚 5 分鐘生效，跟 quote sheet header 快取用同一個 TTL）。
 const KB_FILE_CACHE_TTL_MS = 5 * 60 * 1000;
+
+// 民宿有哪些房間是系統本來就知道的（房型與空間），不該讓 AI 去猜、更不該拿客人這次報價配到的
+// 幾間房當成「我們的全部房型」回答——實際發生過：客人問「有哪些房間」，AI 只列了報價單上那三間。
+// 這段自動接在知識庫前面，當成民宿的事實給 AI；管理員不用另外在知識庫重打一份。
+// 跟知識庫檔案一樣 5 分鐘快取，房間資料改了最多晚 5 分鐘生效。
+let roomInventoryCache: { text: string; fetchedAt: number } | null = null;
+async function roomInventoryBlock(settings: any): Promise<string> {
+  // 包棟開放與否是「訂房規則」的設定，不進快取，每次套
+  const wholeHouseNote = settings?.booking_whole_house_enabled === false ? '' : '；也可以包棟（整棟一起出租）';
+  if (roomInventoryCache && Date.now() - roomInventoryCache.fetchedAt < KB_FILE_CACHE_TTL_MS) return roomInventoryCache.text.replace('{{WHOLE_HOUSE}}', wholeHouseNote);
+  let text = '';
+  try {
+    const { data } = await supabase
+      .from('room_types')
+      .select('name, floor, capacity, type, equipment, is_active')
+      .order('display_order');
+    const rows: any[] = data || [];
+    const rooms = rows.filter((r) => r.type === '房間' && r.is_active !== false);
+    const spaces = rows.filter((r) => r.type !== '房間' && r.is_active !== false);
+    if (rooms.length) {
+      const totalCapacity = rooms.reduce((sum, r) => sum + Number(r.capacity || 0), 0);
+      const lines = rooms.map((r) => `  - ${roomLabel(r)}${r.equipment ? `：${String(r.equipment).slice(0, 120)}` : ''}`);
+      text += `【我們的房間】共 ${rooms.length} 間，全部一起最多可接待 ${totalCapacity} 人{{WHOLE_HOUSE}}。\n${lines.join('\n')}\n`;
+    }
+    if (spaces.length) {
+      text += `【公共空間】${spaces.map((r) => r.name + (r.equipment ? `（${String(r.equipment).slice(0, 60)}）` : '')).join('、')}\n`;
+    }
+    if (text) text += '\n';
+  } catch (e: any) {
+    console.error('[KB] room inventory fetch failed:', e.message);
+  }
+  roomInventoryCache = { text, fetchedAt: Date.now() };
+  return text.replace('{{WHOLE_HOUSE}}', wholeHouseNote);
+}
 const kbFileTextCache = new Map<string, { text: string; fetchedAt: number }>();
 const kbFileBinaryCache = new Map<string, { data: string; mimeType: string; fetchedAt: number }>();
 
@@ -3847,12 +3881,12 @@ function bookingSummaryBlock(recentBooking: any | null | undefined): string {
     recentBooking.order_number ? `訂單編號 ${recentBooking.order_number}` : null,
     recentBooking.checkin_date && recentBooking.checkout_date ? `入住 ${recentBooking.checkin_date} 至 ${recentBooking.checkout_date}` : null,
     recentBooking.headcount ? `人數 ${recentBooking.headcount}` : null,
-    recentBooking.whole_house ? '包棟' : (recentBooking.room_type_label || null),
+    recentBooking.whole_house ? '包棟' : (recentBooking.room_type_label ? `這次安排的房間 ${recentBooking.room_type_label}` : null),
     recentBooking.total_amount != null ? `總價 NT$${recentBooking.total_amount}` : null,
     recentBooking.status ? `狀態 ${bookingStatusLabel(recentBooking.status)}` : null,
   ].filter(Boolean).join('、');
   if (!parts) return '';
-  return `這位客人最近一筆詢問／訂單資料（僅供回答問題時參考背景，不代表要重新確認或重新計價）：${parts}\n\n`;
+  return `這位客人最近一筆詢問／訂單資料（僅供回答問題時參考背景，不代表要重新確認或重新計價；「這次安排的房間」只是這筆報價配到的房間，不是民宿全部的房間，客人問有哪些房型時請看下面的房間清單）：${parts}\n\n`;
 }
 
 // OpenAI Responses API（GPT-5 系列走這個）的回應裡，文字藏在 output 陣列的 message 項目底下：
@@ -3894,7 +3928,7 @@ export async function callGPT(
       const text = await fetchKbFileText(item.file_url);
       if (text) fileContent += `\n\n【${item.title}】\n${text}`;
     }
-    systemContent = `${settings.system_prompt}\n\n${KB_BOUNDARY_INSTRUCTION}\n\n${bookingSummaryBlock(recentBooking)}${KB_KNOWLEDGE_HEADER}\n${textBlock}${fileContent}`;
+    systemContent = `${settings.system_prompt}\n\n${KB_BOUNDARY_INSTRUCTION}\n\n${bookingSummaryBlock(recentBooking)}${KB_KNOWLEDGE_HEADER}\n${await roomInventoryBlock(settings)}${textBlock}${fileContent}`;
   }
 
   const historyMessages = overrideSystemPrompt ? [] : buildHistoryMessages(history);
@@ -3959,7 +3993,7 @@ export async function callGemini(
   }
 
   const textBlock = kbItems.filter((i) => i.type === 'text' && i.content).map((i) => `【${i.title}】\n${i.content}`).join('\n\n');
-  const systemParts: any[] = [{ text: `System: ${settings.system_prompt}\n\n${KB_BOUNDARY_INSTRUCTION}\n\n${bookingSummaryBlock(recentBooking)}${KB_KNOWLEDGE_HEADER}\n${textBlock}` }];
+  const systemParts: any[] = [{ text: `System: ${settings.system_prompt}\n\n${KB_BOUNDARY_INSTRUCTION}\n\n${bookingSummaryBlock(recentBooking)}${KB_KNOWLEDGE_HEADER}\n${await roomInventoryBlock(settings)}${textBlock}` }];
 
   for (const item of kbItems.filter((i) => i.type === 'file' && i.file_url)) {
     const file = await fetchKbFileBinary(item.file_url);
