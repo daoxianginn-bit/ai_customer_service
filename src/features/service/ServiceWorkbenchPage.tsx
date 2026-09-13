@@ -168,13 +168,13 @@ function MetaValue({ value }: { value: unknown }) {
   );
 }
 
-const META_SECTION_LABEL: Record<string, string> = { flow: '訂房流程', extracted: '抓到的欄位', ai_extract: 'AI 欄位擷取', ai_chat: 'AI 問答', intent: '意圖判斷' };
+const META_SECTION_LABEL: Record<string, string> = { flow: '訂房流程', extracted: '抓到的欄位', slots_applied: '套用的欄位', ai_extract: 'AI 欄位擷取', ai_chat: 'AI 問答', intent: '意圖判斷', intent_ai: 'AI 意圖分類原文', ai_review: 'AI 無法回答（已開待人工、通知客服）' };
 
 function AiDiagnostics({ meta, canSeeRaw }: { meta: TurnMeta | null; canSeeRaw: boolean }) {
   const [showRaw, setShowRaw] = useState(false);
   if (!meta) return <Typography variant="caption" color="text.secondary">點客人訊息旁的 ⓘ 查看那一句的判斷過程。</Typography>;
   const hasError = meta.errors?.length > 0;
-  const rawKeys = ['ai_extract', 'ai_chat'];
+  const rawKeys = ['ai_extract', 'ai_chat', 'intent_ai'];
   const otherKeys = Object.keys(meta).filter((k) => !['elapsed_ms', 'steps', 'errors'].includes(k) && !rawKeys.includes(k));
   const intent = (meta as any).intent;
   return (

@@ -2,7 +2,7 @@ import { Handler } from '@netlify/functions';
 import { createClient } from '@supabase/supabase-js';
 import { withErrorLogging } from '../../src/lib/operationLog';
 import { requireRole } from '../../src/lib/requireRole';
-import { callGPT, callGemini } from './line-webhook';
+import { callGPT, callGemini, splitNeedsHumanMarker } from './line-webhook';
 
 const supabaseAdmin = createClient(process.env.SUPABASE_URL || '', process.env.SUPABASE_SERVICE_ROLE_KEY || '');
 
@@ -29,10 +29,12 @@ const rawHandler: Handler = async (event) => {
 
   const startedAt = Date.now();
   try {
-    const reply = settings.active_ai === 'gpt'
+    const raw = settings.active_ai === 'gpt'
       ? (await callGPT(settings, message, kbItems || [], undefined, [], null)).text
       : await callGemini(settings, message, kbItems || [], undefined, [], null);
-    return { statusCode: 200, body: JSON.stringify({ reply, provider: settings.active_ai, model: settings.active_ai === 'gpt' ? settings.gpt_model_name : settings.gemini_model_name, knowledgeCount: (kbItems || []).length, latency_ms: Date.now() - startedAt }) };
+    // 跟正式對話一樣拿掉「需專人」標記；needsHuman 讓測試畫面標出「這題知識庫沒有、正式對話會通知客服」
+    const { text: reply, needsHuman } = splitNeedsHumanMarker(raw);
+    return { statusCode: 200, body: JSON.stringify({ reply, needsHuman, provider: settings.active_ai, model: settings.active_ai === 'gpt' ? settings.gpt_model_name : settings.gemini_model_name, knowledgeCount: (kbItems || []).length, latency_ms: Date.now() - startedAt }) };
   } catch (e: any) {
     return { statusCode: 502, body: JSON.stringify({ error: `AI 呼叫失敗：${e.message}`, latency_ms: Date.now() - startedAt }) };
   }

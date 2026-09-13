@@ -126,26 +126,39 @@ export async function fetchTaskBookings(): Promise<BookingRow[]> {
   return (data || []) as BookingRow[];
 }
 
-/** 真人客服待處理：user_states.is_human_mode。回傳筆數與最近幾位，做成一張待辦。 */
+/**
+ * 真人客服待處理：兩種來源合併——user_states.is_human_mode（真人模式中）與 open 的 handover_logs
+ * （客人喊了找真人、或 AI 答不出來開的「AI 無法回答」）。同一位客人只算一次。
+ */
 export async function fetchHandoverTask(): Promise<Task | null> {
-  const { data, count } = await supabase
-    .from('user_states')
-    .select('line_user_id, nickname, last_human_interaction', { count: 'exact' })
-    .eq('is_human_mode', true)
-    .order('last_human_interaction', { ascending: false })
-    .limit(3);
-  const n = count ?? (data || []).length;
+  const [humanRes, openRes] = await Promise.all([
+    supabase.from('user_states').select('line_user_id, nickname, last_human_interaction').eq('is_human_mode', true).order('last_human_interaction', { ascending: false }).limit(20),
+    supabase.from('handover_logs').select('line_user_id, nickname, triggered_keyword, started_at').eq('status', 'open').order('started_at', { ascending: false }).limit(50),
+  ]);
+  const seen = new Map<string, { name: string; why: string; at: string | null }>();
+  for (const h of (openRes.data || []) as any[]) {
+    if (seen.has(h.line_user_id)) continue;
+    seen.set(h.line_user_id, { name: h.nickname || h.line_user_id, why: h.triggered_keyword === 'AI 無法回答' ? 'AI 答不出來' : `喊了「${h.triggered_keyword || '找真人'}」`, at: h.started_at });
+  }
+  for (const u of (humanRes.data || []) as any[]) {
+    if (seen.has(u.line_user_id)) continue;
+    seen.set(u.line_user_id, { name: u.nickname || u.line_user_id, why: '真人模式中', at: u.last_human_interaction });
+  }
+  const n = seen.size;
   if (!n) return null;
+  const list = [...seen.values()];
+  const aiCount = list.filter((x) => x.why === 'AI 答不出來').length;
   return {
     id: 'HANDOVER',
     type: 'HANDOVER',
     group: 'service',
     severity: 'warning',
     title: TASK_TYPE_LABELS.HANDOVER,
-    detail: `${n} 位客人在真人模式：${(data || []).map((u: any) => u.nickname || u.line_user_id).join('、')}${n > 3 ? '…' : ''}`,
-    href: '/service',
+    detail: `${n} 位客人在等真人：${list.slice(0, 3).map((x) => `${x.name}（${x.why}）`).join('、')}${n > 3 ? '…' : ''}`,
+    meta: aiCount ? `其中 ${aiCount} 位是 AI 答不出來、已跟客人說會由專人回覆` : undefined,
+    href: '/service?filter=handover',
     actionLabel: '開啟客服工作台',
-    dueAt: (data || [])[0]?.last_human_interaction || null,
+    dueAt: list.map((x) => x.at).filter(Boolean).sort()[0] || null,
   };
 }
 

@@ -28,7 +28,11 @@ export async function fetchKpis(): Promise<DashboardKpis> {
     head(supabase.from('bookings').select('id', { count: 'exact', head: true }).eq('checkin_date', today).in('status', OCCUPYING_STATUSES)),
     head(supabase.from('bookings').select('id', { count: 'exact', head: true }).eq('checkout_date', today).in('status', OCCUPYING_STATUSES)),
     head(supabase.from('bookings').select('id', { count: 'exact', head: true }).eq('status', 'awaiting_confirmation')),
-    head(supabase.from('user_states').select('line_user_id', { count: 'exact', head: true }).eq('is_human_mode', true)),
+    // 待客服＝真人模式中的客人＋open 的轉接紀錄（喊真人、AI 答不出來），同一人只算一次
+    Promise.all([
+      supabase.from('user_states').select('line_user_id').eq('is_human_mode', true),
+      supabase.from('handover_logs').select('line_user_id').eq('status', 'open'),
+    ]).then(([a, b]) => new Set([...(a.data || []), ...(b.data || [])].map((r: any) => r.line_user_id)).size),
     head(supabase.from('bookings').select('id', { count: 'exact', head: true }).eq('status', 'awaiting_balance')),
     head(supabase.from('bookings').select('id', { count: 'exact', head: true }).eq('status', 'deposit_processing')),
     head(supabase.from('bookings').select('id', { count: 'exact', head: true }).eq('status', 'awaiting_refund')),

@@ -254,6 +254,53 @@ async function notifyHandover(settings: any, customerClient: Client, text: strin
   }
 }
 
+// AI 呼叫失敗除了留在該則訊息的「處理過程」與推播客服之外，也寫一筆到「錯誤紀錄」（operation_logs）：
+// 處理過程要找到那一則對話才看得到，錯誤紀錄與工作台的「系統錯誤」待辦才是管理員平常會看的地方。
+// 寫紀錄失敗不影響對話（writeOperationLog 自己吞錯）。
+async function logAiFailure(context: string, nickname: string | null, userMessage: string, err: any): Promise<void> {
+  await writeOperationLog(supabase, {
+    feature: 'line-webhook',
+    action: `AI 呼叫失敗（${context}）`,
+    target: nickname || null,
+    actorType: 'system',
+    actorName: SYSTEM_ACTOR,
+    level: 'error',
+    errorMessage: `${err?.message || err}｜客人訊息：${String(userMessage).slice(0, 200)}`,
+  });
+}
+
+// AI「答不出來」的標記。KB_BOUNDARY_INSTRUCTION 要求模型在民宿資訊裡沒有答案時，回覆句尾加上這個
+// 標記；webhook 送出前會拿掉，客人看不到。有標記＝這題要真人接手：開一筆待人工的轉接紀錄、通知客服，
+// 不然 AI 說「稍後由專人回覆您」之後根本沒有人會知道要回。
+// 模型偶爾會漏掉標記，所以另外用制式句子的關鍵片語當備援判斷。
+export const NEEDS_HUMAN_MARKER = '[[需專人]]';
+const NEEDS_HUMAN_PHRASES = ['稍後由專人回覆', '請專人為您確認', '由專人為您回覆', '幫您確認一下，稍後'];
+export function splitNeedsHumanMarker(text: string): { text: string; needsHuman: boolean } {
+  const hasMarker = text.includes(NEEDS_HUMAN_MARKER);
+  const cleaned = text.split(NEEDS_HUMAN_MARKER).join('').replace(/[ \t]+\n/g, '\n').trim();
+  const needsHuman = hasMarker || NEEDS_HUMAN_PHRASES.some((ph) => cleaned.includes(ph));
+  return { text: cleaned, needsHuman };
+}
+
+// AI 答不出來 → 當成客人在等真人：開一筆 open 的轉接紀錄（工作台「待人工」會列出來、工作台與待辦會算到），
+// 並推播客服。同一位客人已經有 open 的轉接就不重複開，只推播。
+async function flagAiNeedsHuman(settings: any, lineClient: Client, channelId: string, userId: string, nickname: string | null, question: string, aiReply: string): Promise<void> {
+  traceStep('AI 表示這題不在民宿資訊裡（需專人），開轉接紀錄並通知客服');
+  traceData('ai_review', { question, reply: clipForTrace(aiReply, 300) });
+  const { data: existing } = await supabase.from('handover_logs').select('id').eq('line_user_id', userId).eq('status', 'open').limit(1);
+  if (!existing?.length) {
+    await supabase.from('handover_logs').insert({
+      channel_id: channelId,
+      line_user_id: userId,
+      nickname,
+      triggered_keyword: 'AI 無法回答',
+      started_at: new Date().toISOString(),
+      status: 'open',
+    });
+  }
+  await notifyHandover(settings, lineClient, `🤖 AI 答不出來，請人工回覆：【${nickname || '匿名用戶'}】\n客人問：${question}\nAI 回：${aiReply.slice(0, 120)}`);
+}
+
 const rawHandler: Handler = async (event) => {
   if (event.httpMethod !== 'POST') return { statusCode: 405, body: 'Method Not Allowed' };
 
@@ -733,10 +780,20 @@ async function processLineEvent(
       // 客服也不會自動知道 AI 掛了，所以額外推播通知，不能只靠客人截圖來問才發現。
       console.error('[AI] call failed:', e.message);
       aiResult = '不好意思，目前系統忙線中，麻煩您稍後再試一次，或點選「真人客服」由專人為您服務 🙏';
+      await logAiFailure('一般問答', nickname, userMessage, e);
       for (const id of parseCsvKeywords(settings.agent_user_ids)) {
         try {
           await lineClient.pushMessage(id, { type: 'text', text: `⚠️ AI 呼叫失敗：【${nickname || '匿名用戶'}】\n錯誤訊息：${e.message}` });
         } catch {}
+      }
+    }
+
+    // AI 說這題民宿資訊裡沒有、要請專人回覆：拿掉標記後照送，另外開待人工＋通知客服。
+    if (aiResult) {
+      const split = splitNeedsHumanMarker(aiResult);
+      aiResult = split.text;
+      if (split.needsHuman) {
+        try { await flagAiNeedsHuman(settings, lineClient, channel.id, userId, nickname, userMessage, aiResult); } catch (e: any) { traceError(`開待人工紀錄失敗：${e.message}`); }
       }
     }
 
@@ -1959,8 +2016,10 @@ async function tryStartQuoteFromCompleteInfo(
     // 不該因為 AI 這次抽風就整個放棄、把客人丟回給一般問答。
     let collected = gate;
     if (flow.replyMode !== 'system') {
-      const aiExtracted = await extractStepFields(settings, userMessage, allFields).catch((e: any) => {
+      const aiExtracted = await extractStepFields(settings, userMessage, allFields).catch(async (e: any) => {
         console.error('[Booking] direct-info extraction failed:', e.message);
+        traceError(`AI 欄位擷取失敗，改用規則解析：${e.message}`);
+        await logAiFailure('整組訂房資訊擷取', nickname, userMessage, e);
         return {} as Record<string, string>;
       });
       const aiCollected = normalizeInto(aiExtracted, allFields);
@@ -2128,6 +2187,7 @@ async function continueBookingFlow(
       // function log 裡等客人截圖來問才發現。以前這裡只有 console.error，客人會一直被回
       // 「還需要麻煩您補充：（全部欄位）」，怎麼填都過不了，客服端卻一點動靜都沒有。
       console.error('[Booking] step extraction failed:', e.message);
+      await logAiFailure('訂房流程欄位擷取', nickname, userMessage, e);
       for (const id of parseCsvKeywords(settings.agent_user_ids)) {
         try {
           await lineClient.pushMessage(id, {
@@ -2952,7 +3012,8 @@ async function classifyBookingIntent(settings: any, flow: FlowDef, message: stri
     traceData('intent_ai', { provider: settings.active_ai, latency_ms: Date.now() - startedAt, error: e.message });
     traceError(`意圖分類 AI 呼叫失敗：${e.message}`);
     console.error('[Booking] intent classification failed:', e.message);
-    // lineClient 為 null＝流程測試模擬器在呼叫，不要真的推播通知客服
+    // lineClient 為 null＝流程測試模擬器在呼叫，不要真的推播通知客服、也不寫錯誤紀錄
+    if (lineClient) await logAiFailure('訂房意圖判斷', nickname, message, e);
     if (lineClient) for (const id of parseCsvKeywords(settings.agent_user_ids)) {
       try {
         await lineClient.pushMessage(id, {
@@ -3712,7 +3773,7 @@ const KB_KNOWLEDGE_HEADER = '【本民宿的實際資訊】';
 const KB_BOUNDARY_INSTRUCTION =
   `重要規則：你是這間民宿的客服人員，下面${KB_KNOWLEDGE_HEADER}裡的內容就是我們自己的規定與事實，請直接以「我們」的口吻回答，例如「我們的入住時間是下午三點」。` +
   '回答時絕對不要提到「參考資料」「資料」「知識庫」「文件」「提供的資訊」這類字眼，客人不需要知道你是從哪裡讀到的。' +
-  '如果客人問的事情在上面的資訊裡完全沒有寫到，不要用自己的知識猜測或編造，即使聽起來很合理也一樣；請回答「不好意思，這部分我幫您確認一下，稍後由專人回覆您 🙏」。';
+  '如果客人問的事情在上面的資訊裡完全沒有寫到，不要用自己的知識猜測或編造，即使聽起來很合理也一樣；請回答「不好意思，這部分我幫您確認一下，稍後由專人回覆您 🙏」，並在整段回覆的最後另起一行加上 [[需專人]] 這個標記（系統會處理，客人不會看到）。回答得出來的問題絕對不要加這個標記。';
 
 // 知識庫檔案型附件過去每一則訊息都重新下載一次內容，短 TTL 記憶體快取避免重複下載
 // （管理員換檔案後最多晚 5 分鐘生效，跟 quote sheet header 快取用同一個 TTL）。

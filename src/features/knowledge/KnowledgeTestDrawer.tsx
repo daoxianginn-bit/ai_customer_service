@@ -8,7 +8,7 @@ import { supabase } from '../../lib/supabase';
 // 走 knowledge-test function（跟正式問答同一條路），不寫對話紀錄、不推播。
 // ========================================================================
 
-interface Turn { question: string; reply?: string; meta?: string; error?: string }
+interface Turn { question: string; reply?: string; meta?: string; needsHuman?: boolean; error?: string }
 
 export default function KnowledgeTestDrawer() {
   const [open, setOpen] = useState(false);
@@ -34,7 +34,7 @@ export default function KnowledgeTestDrawer() {
       let parsed: any = null;
       try { parsed = raw ? JSON.parse(raw) : null; } catch { parsed = null; }
       if (!res.ok) throw new Error(parsed?.error || `HTTP ${res.status}`);
-      setTurns((t) => t.map((x) => (x === turn ? { ...x, reply: parsed.reply, meta: `${parsed.model || parsed.provider}・知識庫 ${parsed.knowledgeCount} 條・${parsed.latency_ms} ms` } : x)));
+      setTurns((t) => t.map((x) => (x === turn ? { ...x, reply: parsed.reply, needsHuman: !!parsed.needsHuman, meta: `${parsed.model || parsed.provider}・知識庫 ${parsed.knowledgeCount} 條・${parsed.latency_ms} ms` } : x)));
     } catch (e: any) {
       setTurns((t) => t.map((x) => (x === turn ? { ...x, error: e.message } : x)));
     } finally {
@@ -66,7 +66,10 @@ export default function KnowledgeTestDrawer() {
                     <Stack alignItems="flex-start" sx={{ mt: 1 }}>
                       <Paper variant="outlined" sx={{ px: 1.5, py: 1, maxWidth: '90%' }}>
                         <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>{t.reply}</Typography>
-                        {t.meta && <Chip size="small" label={t.meta} sx={{ mt: 1, height: 20, fontSize: 11 }} />}
+                        <Stack direction="row" spacing={0.5} sx={{ mt: 1 }} flexWrap="wrap" useFlexGap>
+                          {t.meta && <Chip size="small" label={t.meta} sx={{ height: 20, fontSize: 11 }} />}
+                          {t.needsHuman && <Chip size="small" color="warning" label="知識庫沒有答案：正式對話會開待人工並通知客服" sx={{ height: 20, fontSize: 11 }} />}
+                        </Stack>
                       </Paper>
                     </Stack>
                   )}
