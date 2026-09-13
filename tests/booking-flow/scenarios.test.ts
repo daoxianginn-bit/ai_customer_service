@@ -267,6 +267,19 @@ const arg = (r: any, fn: string, i: number) => r.calls.find((c: any) => c.fn ===
     t('流程丟例外 → 處理過程留下錯誤、session 不動', errors.some((x) => /引擎爆炸/.test(x)) && !!__db.user_states[0].booking_session, { errors, session: __db.user_states[0].booking_session });
   }
 
+
+  // ===== reply token 失效（客人連續傳訊、這一則等太久）→ 改用 push，客人還是收得到 =====
+  {
+    const originalReply = Client.prototype.replyMessage;
+    Client.prototype.replyMessage = async () => { throw new Error('Invalid reply token'); };
+    try {
+      r = await turn({ mode: 'ai', phase: 'awaiting_confirmation', collected: four, msg: '嗨', ai: '{"intent":"unclear","slots":{}}' });
+      t('reply token 失效 → 同一句改用 push 送到客人（U1），不是丟例外', r.replies.length === 0 && r.pushes.some((x: string) => /請專人為您確認/.test(x)) && __sent.some((x) => x.kind === 'push' && x.to === 'U1'), { replies: r.replies, pushes: r.pushes });
+    } finally {
+      Client.prototype.replyMessage = originalReply;
+    }
+  }
+
   let ok = true;
   for (const [k, v, d] of checks) { console.log((v ? '✓ ' : '✗ ') + k + (d ? `\n     ${d.slice(0, 400)}` : '')); if (!v) ok = false; }
   console.log(`\n${checks.filter((x) => x[1]).length}/${checks.length} passed`);

@@ -452,6 +452,29 @@ async function recordGroupMember(lineEvent: any, lineClient: Client, channel: Li
   }
 }
 
+// 回覆客人：先用 reply token（免費），失敗再改用 push（吃每月額度，但一定送得到）。
+// reply token 只能用一次、而且有時效（約一分鐘）：客人連續丟訊息時，這一則可能先等前一則的流程鎖、
+// 再跑兩次 AI（意圖分類＋知識庫問答），加起來超過時效，LINE 就回 400「Invalid reply token」——
+// 以前這個錯誤會一路冒上去被吞掉，客人等了半天什麼都沒收到。改成退回 push 之後，慢歸慢、至少送得到。
+// 回傳 'reply'｜'push'｜null（兩種都失敗）。
+async function replyOrPush(lineClient: Client, replyToken: string | undefined, userId: string, text: string): Promise<'reply' | 'push' | null> {
+  if (replyToken) {
+    try {
+      await lineClient.replyMessage(replyToken, { type: 'text', text });
+      return 'reply';
+    } catch (e: any) {
+      traceStep(`reply 送不出去（${e?.message || e}），改用 push 送給客人`);
+    }
+  }
+  try {
+    await lineClient.pushMessage(userId, { type: 'text', text });
+    return 'push';
+  } catch (e: any) {
+    traceError(`push 也送不出去：${e?.message || e}`);
+    return null;
+  }
+}
+
 // 流程或問答中途出錯時的保底：回一句「稍後再試／找真人」並通知客服，不讓客人已讀不回。
 // reply token 可能已經被用掉（錯誤發生在回覆之後），送不出去就只記錄，不再丟例外。
 async function replyFallbackAndNotify(
@@ -465,11 +488,7 @@ async function replyFallbackAndNotify(
   err: any
 ): Promise<void> {
   const fallback = '不好意思，目前系統忙線中，麻煩您稍後再試一次，或點選「真人客服」由專人為您服務 🙏';
-  let delivered = true;
-  await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: fallback }).catch((e: any) => {
-    delivered = false;
-    traceError(`保底回覆也送不出去：${e?.message || e}`);
-  });
+  const delivered = !!(await replyOrPush(lineClient, lineEvent.replyToken, userId, fallback));
   if (delivered) await logConversation(userId, nickname, 'outbound', fallback, 'system');
   await notifyHandover(
     settings,
@@ -803,7 +822,8 @@ async function processLineEvent(
     if (aiResult && reminder) aiResult += `\n\n${reminder}`;
 
     if (aiResult) {
-      await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text: aiResult });
+      const via = await replyOrPush(lineClient, lineEvent.replyToken, userId, aiResult);
+      if (!via) throw new Error('AI 回覆送不出去（reply 與 push 都失敗）');
       await logConversation(userId, nickname, 'outbound', aiResult, settings.active_ai === 'gpt' ? 'ai_gpt' : 'ai_gemini');
     }
   } catch (e: any) {
@@ -3079,7 +3099,8 @@ async function handleQuoteConversation(a: QuoteConversationArgs): Promise<boolea
   const phase = sessionPhaseToIntentPhase(session.phase);
   const allFields = flow.steps.flatMap((s) => s.fields);
   const reply = async (text: string) => {
-    await lineClient.replyMessage(lineEvent.replyToken, { type: 'text', text });
+    const via = await replyOrPush(lineClient, lineEvent.replyToken, userId, text);
+    if (!via) throw new Error('回覆送不出去（reply 與 push 都失敗）');
     await logConversation(userId, nickname, 'outbound', text, 'system');
   };
   const notifyAgents = async (text: string) => {
