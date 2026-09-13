@@ -2,7 +2,7 @@ import { Handler } from '@netlify/functions';
 import { createClient } from '@supabase/supabase-js';
 import fetch from 'node-fetch';
 import { withErrorLogging } from '../../src/lib/operationLog';
-import { requireRole } from '../../src/lib/requireRole';
+import { requirePermission } from '../../src/lib/requireRole';
 
 // ========================================================================
 // 即時查詢單一顧客的 LINE 大頭貼與狀態消息（客戶資料頁「LINE 資訊查詢」用）。
@@ -18,7 +18,7 @@ const rawHandler: Handler = async (event) => {
   // 查 LINE 個人資料是「客戶資料」頁的功能，三種角色都用得到，所以放行所有已核准帳號。
   // 但仍要走 requireRole 而不是只驗登入——待審核／已停用的帳號雖然可能還握有有效的登入權杖，
   // 也不該讀得到客人的暱稱與大頭貼。
-  const guard = await requireRole(supabase, event as any, ['admin', 'staff', 'viewer']);
+  const guard = await requirePermission(supabase, event as any, 'customer.edit');
   if ('error' in guard) return { statusCode: guard.error.statusCode, body: JSON.stringify({ error: guard.error.body }) };
 
   let body: any;

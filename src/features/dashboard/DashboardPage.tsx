@@ -3,7 +3,7 @@ import { Link as RouterLink } from 'react-router-dom';
 import { Box, Button, Chip, Grid, Link, Paper, Skeleton, Stack, Typography } from '@mui/material';
 import { ArrowRight, RefreshCw } from 'lucide-react';
 import { useAuth } from '../../lib/AuthContext';
-import { hasPermission } from '../../app/permissions';
+import { usePermissions } from '../../app/PermissionContext';
 import { formatDate, formatShortDate, todayIso, addDaysIso } from '../../lib/format';
 import { useBreakpoint } from '../../app/useBreakpoint';
 import PageHeaderV2 from '../../components/ui-mui/PageHeaderV2';
@@ -65,10 +65,12 @@ function greeting(): string {
 }
 
 export default function DashboardPage() {
-  const { role, profile } = useAuth();
+  const { profile } = useAuth();
+  const { hasPermission } = usePermissions();
   const { isMobile } = useBreakpoint();
-  const canSeeHealth = hasPermission(role, 'integration.view');
-  const canSeeErrors = hasPermission(role, 'audit.view');
+  // 系統健康要讀 settings／line_channels（含金鑰的列），RLS 只給得起「能改串接」的人
+  const canSeeHealth = hasPermission('integration.manage');
+  const canSeeErrors = hasPermission('error_log.view');
 
   const [kpis, setKpis] = useState<DashboardKpis | null>(null);
   const [convStats, setConvStats] = useState<{ conversations: number; handovers: number } | null>(null);

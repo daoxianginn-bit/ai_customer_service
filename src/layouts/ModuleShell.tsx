@@ -1,7 +1,6 @@
 import { Outlet, Link as RouterLink, useLocation } from 'react-router-dom';
 import { Box, Tab, Tabs } from '@mui/material';
-import { useAuth } from '../lib/AuthContext';
-import { hasPermission } from '../app/permissions';
+import { usePermissions } from '../app/PermissionContext';
 import { resolveNav } from '../app/navigation';
 
 // ========================================================================
@@ -13,9 +12,9 @@ import { resolveNav } from '../app/navigation';
 // ========================================================================
 export default function ModuleShell() {
   const location = useLocation();
-  const { role } = useAuth();
+  const { hasPermission } = usePermissions();
   const resolved = resolveNav(location.pathname);
-  const tabs = (resolved?.item.children || []).filter((c) => hasPermission(role, c.permission));
+  const tabs = (resolved?.item.children || []).filter((c) => hasPermission(c.permission));
 
   // 只有一個頁籤（或沒有）就不顯示頁籤列，畫面留給內容
   if (tabs.length <= 1) return <Outlet />;

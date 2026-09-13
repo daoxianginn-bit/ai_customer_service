@@ -1,7 +1,7 @@
 import { Handler } from '@netlify/functions';
 import { createClient } from '@supabase/supabase-js';
 import { withErrorLogging } from '../../src/lib/operationLog';
-import { requireRole } from '../../src/lib/requireRole';
+import { requirePermission } from '../../src/lib/requireRole';
 import { callGPT, callGemini, splitNeedsHumanMarker } from './line-webhook';
 
 const supabaseAdmin = createClient(process.env.SUPABASE_URL || '', process.env.SUPABASE_SERVICE_ROLE_KEY || '');
@@ -13,7 +13,7 @@ const supabaseAdmin = createClient(process.env.SUPABASE_URL || '', process.env.S
 // ========================================================================
 const rawHandler: Handler = async (event) => {
   if (event.httpMethod !== 'POST') return { statusCode: 405, body: 'Method Not Allowed' };
-  const guard = await requireRole(supabaseAdmin, event as any, ['admin']);
+  const guard = await requirePermission(supabaseAdmin, event as any, 'knowledge.test');
   if ('error' in guard) return { statusCode: guard.error.statusCode, body: JSON.stringify({ error: guard.error.body }) };
 
   let body: any = {};

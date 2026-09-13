@@ -303,12 +303,12 @@ export default function RoomCalendar() {
       <PageHeaderV2
         secondary={
           <Stack direction="row" spacing={1} alignItems="center" useFlexGap flexWrap="wrap">
-            <Can permission="pricing.manage">
+            <Can permission="calendar.manage">
               <Button variant="outlined" color="inherit" startIcon={<SlidersHorizontal size={16} />} onClick={() => setDateRangeModalOpen(true)}>
                 {isMobile ? '旺季/連假' : '旺季/連假日期設定'}
               </Button>
             </Can>
-            <Can permission="integration.manage">
+            <Can permission="integration.ota.sync">
               <Tooltip title={syncTaskId ? '手動抓取第三方平台行事曆、同步進系統並推播到 Google 行事曆' : '請先到「自動化排程」新增一筆「行事曆整合同步」排程'}>
                 <span>
                   <Button

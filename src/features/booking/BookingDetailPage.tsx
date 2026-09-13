@@ -6,8 +6,6 @@ import {
 } from '@mui/material';
 import { useSnackbar } from 'notistack';
 import { ChevronDown, ChevronLeft, MoreVertical, Pencil, Trash2, X } from 'lucide-react';
-import { useAuth } from '../../lib/AuthContext';
-import { canDeleteBookings } from '../../lib/permissions';
 import {
   FLOW_STEP_STATUSES, MANUAL_ACTION_STATUSES, bookingStatusLabel, bookingStatusMeta, flowStepIndex, nextFlowStatus,
 } from '../../lib/bookingStatus';
@@ -70,11 +68,15 @@ export default function BookingDetailPage() {
   const { enqueueSnackbar } = useSnackbar();
   const confirm = useConfirm();
   const { isMobile } = useBreakpoint();
-  const { role } = useAuth();
-  const canDelete = canDeleteBookings(role);
+  const canDelete = usePermission('booking.delete');
   const canEdit = usePermission('booking.edit');
   const canCancel = usePermission('booking.cancel');
-  const canAudit = usePermission('audit.view');
+  const canAdvance = usePermission('booking.payment.verify');
+  const canRefund = usePermission('booking.refund.process');
+  // 訂單時間軸讀 operation_logs（RLS：audit.view）；booking.history.view 是介面上的開關
+  const canHistory = usePermission('booking.history.view');
+  const canAuditLogs = usePermission('audit.view');
+  const canAudit = canHistory && canAuditLogs;
 
   const [booking, setBooking] = useState<BookingRow | null>(null);
   const [loading, setLoading] = useState(true);
@@ -166,9 +168,14 @@ export default function BookingDetailPage() {
   const breakdown = [b.adults != null ? `大人 ${b.adults}` : '', b.kids != null ? `小孩 ${b.kids}` : '', b.infants != null ? `嬰兒 ${b.infants}` : ''].filter(Boolean);
   const headcountText = b.headcount != null ? `${b.headcount} 人${breakdown.length ? `（${breakdown.join('・')}）` : ''}` : null;
 
-  const primaryAction = canEdit && next && !isOta
-    ? <Button variant="contained" onClick={() => setAdvanceTarget({ order: b, nextStatus: next })} fullWidth={isMobile}>下一步：{bookingStatusLabel(next)}</Button>
-    : canEdit ? <Button variant="contained" startIcon={<Pencil size={16} />} onClick={() => setEditOpen(true)} fullWidth={isMobile}>編輯訂單</Button> : null;
+  // 推進狀態＝確認付款（booking.payment.verify）；待退款 → 已退款是另一個權限（booking.refund.process）
+  const canStep = canAdvance && !!next && !isOta;
+  const canMarkRefunded = canRefund && b.status === 'awaiting_refund';
+  const primaryAction = canStep
+    ? <Button variant="contained" onClick={() => setAdvanceTarget({ order: b, nextStatus: next! })} fullWidth={isMobile}>下一步：{bookingStatusLabel(next)}</Button>
+    : canMarkRefunded
+      ? <Button variant="contained" onClick={() => setAdvanceTarget({ order: b, nextStatus: 'refunded' })} fullWidth={isMobile}>標記已退款</Button>
+      : canEdit ? <Button variant="contained" startIcon={<Pencil size={16} />} onClick={() => setEditOpen(true)} fullWidth={isMobile}>編輯訂單</Button> : null;
 
   const bookingInfo = (
     <Grid container spacing={2}>
@@ -253,8 +260,11 @@ export default function BookingDetailPage() {
 
       {!isMobile && (
         <Stack spacing={1}>
-          {canEdit && next && !isOta && (
-            <Button variant="contained" fullWidth onClick={() => setAdvanceTarget({ order: b, nextStatus: next })}>下一步：{bookingStatusLabel(next)}</Button>
+          {canStep && (
+            <Button variant="contained" fullWidth onClick={() => setAdvanceTarget({ order: b, nextStatus: next! })}>下一步：{bookingStatusLabel(next)}</Button>
+          )}
+          {canMarkRefunded && (
+            <Button variant="contained" fullWidth onClick={() => setAdvanceTarget({ order: b, nextStatus: 'refunded' })}>標記已退款</Button>
           )}
           {canCancel && !meta.isFinal && !isOta && b.status !== 'awaiting_refund' && (
             <Button variant="outlined" color="error" fullWidth startIcon={<X size={16} />} onClick={() => setAdvanceTarget({ order: b, nextStatus: 'cancelled' })}>取消訂單</Button>
@@ -329,7 +339,7 @@ export default function BookingDetailPage() {
         {!isMobile && (
           <Stack direction="row" spacing={1}>
             {canEdit && <Button variant="outlined" color="inherit" startIcon={<Pencil size={16} />} onClick={() => setEditOpen(true)}>編輯</Button>}
-            {canEdit && next && !isOta && primaryAction}
+            {(canStep || canMarkRefunded) && primaryAction}
           </Stack>
         )}
         {(canDelete || (isMobile && canCancel)) && (

@@ -17,6 +17,7 @@ import {
 import { RoomOption, roomLabel } from '../../lib/rooms';
 import { formatDateTime, formatMoney } from '../../lib/format';
 import { useBreakpoint } from '../../app/useBreakpoint';
+import { usePermission } from '../../app/Can';
 import StatusBadge from '../../components/ui-mui/StatusBadge';
 import { fetchLinenSetup, fetchMoneyDefaults, fetchRooms, fetchBookingLinen, type BookingRow } from './bookingQueries';
 import { logBookingSaveFailed, logBookingSaved, saveBookingLinen, upsertBooking } from './bookingActions';
@@ -113,6 +114,9 @@ interface Props {
 
 export default function BookingEditDialog({ open, booking, onClose, onSaved }: Props) {
   const { isMobile } = useBreakpoint();
+  // 狀態相關的按鈕依權限顯示：推進／指定狀態＝確認付款、取消＝取消訂單；沒有權限的人只能改資料
+  const canAdvance = usePermission('booking.payment.verify');
+  const canCancel = usePermission('booking.cancel');
   const editingId = booking?.id ?? null;
 
   // 查詢用的參考資料：房間、布巾、押金／訂金比例預設。掛載時抓一次，之後每次開啟共用。
@@ -348,26 +352,28 @@ export default function BookingEditDialog({ open, booking, onClose, onSaved }: P
         )}
 
         <Stack spacing={1}>
-          {next && (
+          {canAdvance && next && (
             <Button fullWidth variant="contained" onClick={() => saveForm(next)} disabled={saving}>
               儲存並前往「{bookingStatusLabel(next)}」
             </Button>
           )}
-          {form.status !== 'cancelled' && (
+          {canCancel && form.status !== 'cancelled' && (
             <Button fullWidth variant="outlined" color="error" startIcon={<X size={16} />} onClick={() => saveForm('cancelled')} disabled={saving}>
               取消訂單
             </Button>
           )}
         </Stack>
 
-        <TextField
-          select fullWidth size="small" label="直接指定狀態"
-          value={form.status}
-          onChange={(e) => setForm({ ...form, status: e.target.value })}
-          helperText={formStatusOptions.find((o) => o.value === form.status)?.description}
-        >
-          {formStatusOptions.map((o) => <MenuItem key={o.value} value={o.value}>{o.label}</MenuItem>)}
-        </TextField>
+        {canAdvance && (
+          <TextField
+            select fullWidth size="small" label="直接指定狀態"
+            value={form.status}
+            onChange={(e) => setForm({ ...form, status: e.target.value })}
+            helperText={formStatusOptions.find((o) => o.value === form.status)?.description}
+          >
+            {formStatusOptions.map((o) => <MenuItem key={o.value} value={o.value}>{o.label}</MenuItem>)}
+          </TextField>
+        )}
 
         {editingId && (
           <>

@@ -10,6 +10,11 @@
 import { hasPermission } from '../app/permissions';
 import { navigation, permissionForPath } from '../app/navigation';
 
+/**
+ * 舊的三級角色。權限管理 V2 之後真正的判斷依據是「權限集合」（app/permissions.ts＋PermissionContext），
+ * 這個值只剩兩個用途：資料庫還沒升級時的對照來源、以及 is_owner()／舊 RLS 函式仍讀它。
+ * 指派角色時由 legacyRoleFromPermissions() 反推寫回，不要再拿它做業務判斷（§59、§80）。
+ */
 export type AdminRole = 'admin' | 'staff' | 'viewer';
 
 // 帳號狀態機（對應 supabase_schema.sql 第 9 節）：
@@ -60,50 +65,26 @@ export function roleLabel(role?: string | null): string {
 // 失誤的方向是「管理員以外的人進不去」，而不是「所有人都看得到不該看的東西」。
 // V2：路徑的權限由 app/navigation.ts 宣告（每個入口／頁籤各自的 permission），這裡只是轉接，
 // 讓既有呼叫端（RequireAccess、defaultRouteFor）不用改。沒登記的路徑預設只有管理員能進。
-export function canAccessRoute(role: AdminRole | null | undefined, path: string): boolean {
-  if (!role) return false;
+/**
+ * 路徑層級的守衛（權限管理 V2 §30、§56）：路徑的權限由 app/navigation.ts 宣告；
+ * 沒登記的路徑一律 default deny——只有 system.manage 可進，之後有人加頁面忘了設權限時，
+ * 失誤的方向是「進不去」而不是「大家都看得到」。
+ */
+export function canAccessRoute(granted: ReadonlySet<string> | readonly string[] | null | undefined, path: string): boolean {
+  if (!granted) return false;
   const permission = permissionForPath(path);
-  if (!permission) return role === 'admin';
-  return hasPermission(role, permission);
+  if (!permission) return hasPermission(granted, 'system.manage');
+  return hasPermission(granted, permission);
 }
 
 /** 使用者登入後該落在哪一頁：優先工作台，沒權限就找第一個進得去的入口。 */
-export function defaultRouteFor(role: AdminRole | null | undefined): string {
-  if (!role) return '/';
-  if (canAccessRoute(role, '/')) return '/';
+export function defaultRouteFor(granted: ReadonlySet<string> | readonly string[] | null | undefined): string {
+  if (!granted) return '/';
+  if (canAccessRoute(granted, '/')) return '/';
   for (const section of navigation) {
     for (const item of section.items) {
-      if (hasPermission(role, item.permission)) return item.path;
+      if (hasPermission(granted, item.permission)) return item.path;
     }
   }
   return '/';
-}
-
-/** 唯讀角色不能寫入任何資料（跟 RLS 的 can_operate() 對應）。 */
-export function canWrite(role: AdminRole | null | undefined): boolean {
-  return role === 'admin' || role === 'staff';
-}
-
-/**
- * 可以永久刪除訂單嗎？（跟 RLS 的 bookings DELETE 政策 is_admin() 對應）
- *
- * 刻意跟 canWrite() 分開：客服日常處理的是狀態機——客人取消就把狀態改成「取消訂單」，
- * 紀錄留著。這裡的刪除是把整筆連同房間、房夜、布巾用量一起消失（CASCADE），
- * 救不回來，屬於管理員層級的動作。
- */
-export function canDeleteBookings(role: AdminRole | null | undefined): boolean {
-  return role === 'admin';
-}
-
-/**
- * 可以清除某位客戶在系統裡的所有資料嗎？只有主帳號。
- * 主帳號不是 role 的值，是 settings.primary_admin_id 指到的那個人，所以要多帶一個參數。
- * 跟 RLS 的 is_owner()、以及 delete-customer-data function 裡的檢查對應。
- */
-export function canPurgeCustomerData(
-  role: AdminRole | null | undefined,
-  currentUserId: string | null | undefined,
-  primaryAdminId: string | null | undefined,
-): boolean {
-  return role === 'admin' && !!currentUserId && currentUserId === primaryAdminId;
 }

@@ -2,8 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link as RouterLink, useSearchParams } from 'react-router-dom';
 import { Box, Button, Chip, Paper, Skeleton, Stack, Typography } from '@mui/material';
 import { ArrowRight, RefreshCw } from 'lucide-react';
-import { useAuth } from '../../lib/AuthContext';
-import { hasPermission } from '../../app/permissions';
+import { usePermissions } from '../../app/PermissionContext';
 import { useBreakpoint } from '../../app/useBreakpoint';
 import PageHeaderV2 from '../../components/ui-mui/PageHeaderV2';
 import StatusBadge from '../../components/ui-mui/StatusBadge';
@@ -29,9 +28,9 @@ const SEVERITY_TONE: Record<TaskSeverity, 'danger' | 'warning' | 'info'> = { cri
 const SEVERITY_LABEL: Record<TaskSeverity, string> = { critical: '緊急', warning: '待處理', normal: '例行' };
 
 export default function TaskCenterPage() {
-  const { role } = useAuth();
+  const { hasPermission } = usePermissions();
   const { isMobile } = useBreakpoint();
-  const canSeeErrors = hasPermission(role, 'audit.view');
+  const canSeeErrors = hasPermission('error_log.view');
   const [params, setParams] = useSearchParams();
   const group = (GROUP_TABS.some((g) => g.value === params.get('group')) ? params.get('group') : 'all') as 'all' | TaskGroup;
   const typeFilter = params.get('type') || '';

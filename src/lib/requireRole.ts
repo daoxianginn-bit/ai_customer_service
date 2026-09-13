@@ -88,3 +88,55 @@ export async function requireRole(
 
   return { user: { id: user.id, email: user.email }, role: profile.role as AdminRole };
 }
+
+// ========================================================================
+// 權限管理 V2：requirePermission()（§32、§35）。
+// 驗證流程跟 requireRole 一樣（token、active、aal2），最後一步改問「這個人有沒有這個權限」：
+// 走資料庫的 has_permission_for()（多角色聯集、停用角色排除、主帳號全給、沒指派角色的舊帳號用舊角色對照），
+// 跟 RLS 用同一個函式，兩邊永遠一致。資料庫還沒升級（函式不存在）時退回程式裡的舊角色對照（§76）。
+// 403 的訊息固定寫出缺哪個權限（§33），各 Function 照既有慣例包成 { error: message } 回去。
+// ========================================================================
+
+import { legacyRolePermissions, permissionName } from '../app/permissions';
+
+interface PermissionGuardOk extends GuardOk {
+  permissions: { has: (code: string) => Promise<boolean> };
+  isOwner: boolean;
+}
+
+export function forbiddenMessage(permission: string): string {
+  return `FORBIDDEN：您沒有「${permissionName(permission)}」的權限（${permission}）`;
+}
+
+async function userHasPermission(supabaseAdmin: SupabaseClient, userId: string, legacyRole: string, code: string): Promise<boolean> {
+  const { data, error } = await supabaseAdmin.rpc('has_permission_for', { p_user_id: userId, p_code: code });
+  if (!error) return data === true;
+  // 函式不存在（PGRST202／42883）＝資料庫尚未升級：用舊角色對照；其他錯誤一律當沒有權限（default deny）
+  const missing = /PGRST202|42883|could not find the function|does not exist/i.test(`${error.code || ''} ${error.message || ''}`);
+  if (!missing) return false;
+  return legacyRolePermissions(legacyRole).includes(code);
+}
+
+export async function requirePermission(
+  supabaseAdmin: SupabaseClient,
+  event: { headers: Record<string, string | undefined> },
+  permission: string | string[]
+): Promise<PermissionGuardOk | GuardFail> {
+  // 先過通用的身分檢查（任何角色都可以，權限在下面判斷）
+  const guard = await requireRole(supabaseAdmin, event, ['admin', 'staff', 'viewer']);
+  if ('error' in guard) return guard;
+
+  const codes = Array.isArray(permission) ? permission : [permission];
+  let allowed = false;
+  for (const code of codes) {
+    if (await userHasPermission(supabaseAdmin, guard.user.id, guard.role, code)) { allowed = true; break; }
+  }
+  if (!allowed) return { error: { statusCode: 403, body: forbiddenMessage(codes[0]) } };
+
+  const { data: settings } = await supabaseAdmin.from('settings').select('primary_admin_id').limit(1).maybeSingle();
+  return {
+    ...guard,
+    isOwner: !!settings?.primary_admin_id && settings.primary_admin_id === guard.user.id,
+    permissions: { has: (code: string) => userHasPermission(supabaseAdmin, guard.user.id, guard.role, code) },
+  };
+}

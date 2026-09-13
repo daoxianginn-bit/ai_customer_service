@@ -7,7 +7,7 @@ import {
 import { useSnackbar } from 'notistack';
 import { ArrowLeft, Bot, Info, PanelRightOpen, RefreshCw, Search, Send, UserCheck, X } from 'lucide-react';
 import { useAuth } from '../../lib/AuthContext';
-import { hasPermission } from '../../app/permissions';
+import { usePermissions } from '../../app/PermissionContext';
 import { useBreakpoint } from '../../app/useBreakpoint';
 import { formatDateRange, formatDateTime, formatMoney, formatRelative, formatTime } from '../../lib/format';
 import PageHeaderV2 from '../../components/ui-mui/PageHeaderV2';
@@ -292,13 +292,15 @@ function ContextPane({ user, bookings, selectedMeta, canSeeRaw }: { user: Conver
 
 // ---------------------------------------------------------------- 頁面
 export default function ServiceWorkbenchPage() {
-  const { role, profile } = useAuth();
+  const { profile } = useAuth();
+  const { hasPermission } = usePermissions();
   const { enqueueSnackbar } = useSnackbar();
   const confirm = useConfirm();
   const { isMobile, isDesktop } = useBreakpoint();
-  const canReply = hasPermission(role, 'service.reply');
-  const canHandover = hasPermission(role, 'service.handover');
-  const canSeeRaw = role === 'admin';
+  const canReply = hasPermission('service.reply');
+  const canHandover = hasPermission('service.handover');
+  const canDiagnose = hasPermission('conversation.diagnostic');
+  const canSeeRaw = hasPermission('conversation.raw_ai_output');
 
   const [params, setParams] = useSearchParams();
   const selectedId = params.get('user');
@@ -484,7 +486,7 @@ export default function ServiceWorkbenchPage() {
       {!msgLoading && msgHasMore && <Button size="small" color="inherit" fullWidth onClick={loadEarlier}>載入更早的訊息</Button>}
       {!msgLoading && messages.length === 0 && <Typography variant="body2" color="text.secondary" sx={{ textAlign: 'center', py: 4 }}>沒有對話紀錄（依保留天數設定自動清除）。</Typography>}
       {messages.map((m) => (
-        <Bubble key={m.id} m={m} selected={m.id === selectedTurnId} onInspect={m.meta ? () => { setSelectedTurnId(m.id); if (!isDesktop) setContextOpen(true); } : undefined} />
+        <Bubble key={m.id} m={m} selected={m.id === selectedTurnId} onInspect={m.meta && canDiagnose ? () => { setSelectedTurnId(m.id); if (!isDesktop) setContextOpen(true); } : undefined} />
       ))}
     </Box>
   );

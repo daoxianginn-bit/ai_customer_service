@@ -8,8 +8,8 @@ import {
 import { styled, type CSSObject, type Theme } from '@mui/material/styles';
 import { ChevronLeft, LogOut, Menu as MenuIcon, PanelLeftClose, PanelLeftOpen, Eye } from 'lucide-react';
 import { useAuth } from '../lib/AuthContext';
-import { canWrite, roleLabel } from '../lib/permissions';
-import { hasPermission } from '../app/permissions';
+import { usePermissions } from '../app/PermissionContext';
+import { hasPermission, hasAnyPermission, WRITE_PERMISSIONS } from '../app/permissions';
 import { navigation, resolveNav, type NavItem } from '../app/navigation';
 import { layout as L } from '../app/tokens';
 import { useBreakpoint } from '../app/useBreakpoint';
@@ -65,8 +65,11 @@ function AppLayoutInner() {
   const onClickCapture = useInterceptInternalLinks();
   const navigate = useNavigate();
   const location = useLocation();
-  const { role, profile, signOut } = useAuth();
+  const { profile, signOut } = useAuth();
+  const { permissions, roles, preview, setPreview } = usePermissions();
   const { isDesktop, isMobile } = useBreakpoint();
+  const roleText = preview ? `預覽：${preview.roleName}` : roles.map((r) => r.name).join('、') || '尚未指派角色';
+  const readOnly = !hasAnyPermission(permissions, WRITE_PERMISSIONS);
 
   const [collapsed, setCollapsedState] = useState(readCollapsed);
   const setCollapsed = (v: boolean) => {
@@ -79,9 +82,9 @@ function AppLayoutInner() {
   // 依權限過濾：進不去的入口不顯示（§9-4）；整區都沒有可見入口時分區標題也拿掉
   const visibleSections = useMemo(
     () => navigation
-      .map((s) => ({ ...s, items: s.items.filter((i) => hasPermission(role, i.permission)) }))
+      .map((s) => ({ ...s, items: s.items.filter((i) => hasPermission(permissions, i.permission)) }))
       .filter((s) => s.items.length > 0),
-    [role]
+    [permissions]
   );
 
   const resolved = resolveNav(location.pathname);
@@ -160,7 +163,7 @@ function AppLayoutInner() {
         {!compact && (
           <Box sx={{ minWidth: 0, flex: 1 }}>
             <Typography fontSize={13} fontWeight={600} noWrap>{profile?.display_name || profile?.email}</Typography>
-            <Typography fontSize={11} color="text.secondary" noWrap>{roleLabel(role)}</Typography>
+            <Typography fontSize={11} color="text.secondary" noWrap>{roleText}</Typography>
           </Box>
         )}
         {!compact && (
@@ -226,7 +229,7 @@ function AppLayoutInner() {
         <Menu anchorEl={accountAnchor} open={!!accountAnchor} onClose={() => setAccountAnchor(null)} anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }} transformOrigin={{ vertical: 'top', horizontal: 'right' }}>
           <Box sx={{ px: 2, py: 1 }}>
             <Typography fontSize={13} fontWeight={600}>{profile?.display_name || profile?.email}</Typography>
-            <Typography fontSize={12} color="text.secondary">{profile?.email} · {roleLabel(role)}</Typography>
+            <Typography fontSize={12} color="text.secondary">{profile?.email} · {roleText}</Typography>
           </Box>
           <Divider />
           <MenuItem onClick={handleLogout} sx={{ fontSize: 14, color: 'error.main' }}><LogOut size={16} style={{ marginRight: 8 }} />登出</MenuItem>
@@ -251,7 +254,15 @@ function AppLayoutInner() {
       {/* --sidebar-offset 給頁面內 position:fixed 的元素（設定頁底部儲存列）避開側欄用 */}
       <Box component="main" sx={{ flexGrow: 1, minWidth: 0, display: 'flex', flexDirection: 'column', '--sidebar-offset': isDesktop ? `${collapsed ? L.sidebarCollapsedWidth : L.sidebarWidth}px` : '0px' } as any}>
         <Toolbar sx={{ minHeight: `${L.topbarHeight}px !important` }} />
-        {!canWrite(role) && (
+        {/* 角色預覽（權限管理 V2 §44）：只換前端看到的東西，寫入 API 與資料庫仍是本人身分 */}
+        {preview && (
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, px: { xs: 1.5, md: 3 }, py: 1, bgcolor: 'info.light', color: 'info.dark', borderBottom: '1px solid', borderColor: 'divider' }}>
+            <Eye size={15} style={{ flexShrink: 0 }} />
+            <Typography fontSize={13} sx={{ flex: 1 }}>角色預覽：{preview.roleName}——側欄、頁籤與按鈕依此角色顯示；預覽中無法代表該角色執行任何寫入。</Typography>
+            <Typography component="button" fontSize={13} onClick={() => setPreview(null)} sx={{ border: 'none', bgcolor: 'transparent', color: 'inherit', cursor: 'pointer', textDecoration: 'underline' }}>結束預覽</Typography>
+          </Box>
+        )}
+        {!preview && readOnly && (
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, px: { xs: 1.5, md: 3 }, py: 1, bgcolor: 'warning.light', color: 'warning.dark', borderBottom: '1px solid', borderColor: 'divider' }}>
             <Eye size={15} style={{ flexShrink: 0 }} />
             <Typography fontSize={13}>目前是唯讀模式，可以查看資料但無法新增或修改。需要調整權限請聯繫管理員。</Typography>

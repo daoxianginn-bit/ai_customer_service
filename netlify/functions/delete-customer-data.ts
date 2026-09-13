@@ -1,7 +1,7 @@
 import { Handler } from '@netlify/functions';
 import { createClient } from '@supabase/supabase-js';
 import { withErrorLogging } from '../../src/lib/operationLog';
-import { requireRole } from '../../src/lib/requireRole';
+import { requirePermission } from '../../src/lib/requireRole';
 
 // ========================================================================
 // 清除單一客人在系統裡的所有個資（個資法「刪除請求」用）：訂單、對話紀錄、
@@ -20,7 +20,7 @@ const rawHandler: Handler = async (event) => {
   // 一律走 requireRole()，不要自己拼認證流程：這支原本只驗「權杖有效 + 是主帳號」，
   // 少了 aal2（2FA）與帳號狀態檢查，等於只過了 Google、還沒輸入 TOTP 的 session
   // 就能呼叫這個全系統破壞力最大的端點——2FA 在最需要它的地方失效。
-  const guard = await requireRole(supabaseAdmin, event as any, ['admin']);
+  const guard = await requirePermission(supabaseAdmin, event as any, 'customer.personal_data.delete');
   if ('error' in guard) return { statusCode: guard.error.statusCode, body: JSON.stringify({ error: guard.error.body }) };
 
   // 管理員還不夠，這個動作限主帳號本人。跟資料庫的 is_owner() 政策一致。

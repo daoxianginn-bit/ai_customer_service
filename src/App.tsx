@@ -7,6 +7,8 @@ import { SnackbarProvider } from 'notistack';
 import { appTheme } from './muiTheme';
 import ConfirmDialogProvider from './components/ui-mui/ConfirmDialogProvider';
 import { AuthProvider, useAuth } from './lib/AuthContext';
+import { PermissionProvider, usePermissions } from './app/PermissionContext';
+import ResultState from './components/ui-mui/ResultState';
 import { canAccessRoute, defaultRouteFor } from './lib/permissions';
 import { LEGACY_REDIRECTS } from './app/navigation';
 import AppLayout from './layouts/AppLayout';
@@ -58,7 +60,10 @@ import AutomationHistory from './pages/automation/AutomationHistory';
 import PropertySettings from './pages/admin/PropertySettings';
 import AiEngineSettings from './pages/admin/AiEngineSettings';
 import BookingRulesSettings from './pages/admin/BookingRulesSettings';
-import AdminAccounts from './pages/AdminAccounts';
+import UsersPage from './features/admin/UsersPage';
+import UserDetailPage from './features/admin/UserDetailPage';
+import RolesPage from './features/admin/RolesPage';
+import RoleEditorPage from './features/admin/RoleEditorPage';
 import SecuritySettings from './pages/admin/SecuritySettings';
 import MessageVariables from './pages/MessageVariables';
 import OperationLogs from './pages/OperationLogs';
@@ -90,10 +95,18 @@ function FullScreenSpinner({ message }: { message: string }) {
  * 這只是介面層的引導，不是安全防線。真正擋住資料的是資料庫的 RLS（§74、§129-13）。
  */
 function RequireAccess({ children }: { children: ReactNode }) {
-  const { role } = useAuth();
+  const { permissions } = usePermissions();
   const location = useLocation();
-  if (!canAccessRoute(role, location.pathname)) {
-    return <Navigate to={defaultRouteFor(role)} replace />;
+  // 直接輸入網址沒權限：明確顯示 403，不要默默導回首頁（權限管理 V2 §30）
+  if (!canAccessRoute(permissions, location.pathname)) {
+    return (
+      <ResultState
+        status={403}
+        title="您沒有權限查看此頁面"
+        description="如需使用此功能，請聯絡系統管理員調整角色權限。"
+        backTo={defaultRouteFor(permissions)}
+      />
+    );
   }
   return <>{children}</>;
 }
@@ -102,11 +115,14 @@ const guarded = (el: ReactNode) => <RequireAccess>{el}</RequireAccess>;
 
 function AppRoutes() {
   const { phase } = useAuth();
+  const { loaded: permissionsLoaded } = usePermissions();
   const location = useLocation();
   const path = location.pathname;
 
   if (phase === 'loading') return <FullScreenSpinner message="系統載入中..." />;
   if (phase === 'accepting-invite') return <FullScreenSpinner message="確認邀請資格中..." />;
+  // 權限還沒取回前不畫側欄：避免先顯示全部入口再逐一消失（§72）
+  if (phase === 'ready' && !permissionsLoaded) return <FullScreenSpinner message="驗證帳號與權限..." />;
 
   if (phase === 'anonymous' || phase === 'blocked') {
     if (!PUBLIC_PATHS.includes(path)) return <Navigate to="/login" replace />;
@@ -184,7 +200,11 @@ function AppRoutes() {
           <Route path="property" element={guarded(<PropertySettings />)} />
           <Route path="ai" element={guarded(<AiEngineSettings />)} />
           <Route path="booking-rules" element={guarded(<BookingRulesSettings />)} />
-          <Route path="accounts" element={guarded(<AdminAccounts />)} />
+          <Route path="accounts" element={guarded(<UsersPage />)} />
+          <Route path="accounts/:id" element={guarded(<UserDetailPage />)} />
+          <Route path="roles" element={guarded(<RolesPage />)} />
+          <Route path="roles/new" element={guarded(<RoleEditorPage />)} />
+          <Route path="roles/:id" element={guarded(<RoleEditorPage />)} />
           <Route path="security" element={guarded(<SecuritySettings />)} />
           <Route path="message-variables" element={guarded(<MessageVariables />)} />
           <Route path="audit" element={guarded(<OperationLogs />)} />
@@ -230,9 +250,11 @@ function App() {
     {/* 二次確認對話框：Promise 形式提供給各頁（useConfirm），放在 Router 外層 */}
     <ConfirmDialogProvider>
     <AuthProvider>
+    <PermissionProvider>
     <BrowserRouter>
       <AppRoutes />
     </BrowserRouter>
+    </PermissionProvider>
     </AuthProvider>
     </ConfirmDialogProvider>
     </SnackbarProvider>

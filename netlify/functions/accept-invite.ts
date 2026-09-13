@@ -54,7 +54,7 @@ const rawHandler: Handler = async (event) => {
   // 找一筆屬於這個 email、仍然有效的邀請
   const { data: invitation, error: invitationError } = await supabaseAdmin
     .from('admin_invitations')
-    .select('id, role, expires_at, accepted_at, revoked_at')
+    .select('id, role, role_ids, expires_at, accepted_at, revoked_at')
     .ilike('email', email)
     .is('accepted_at', null)
     .is('revoked_at', null)
@@ -97,6 +97,12 @@ const rawHandler: Handler = async (event) => {
     .from('admin_invitations')
     .update({ accepted_at: nowIso, accepted_user_id: user.id })
     .eq('id', invitation.id);
+
+  // 權限管理 V2：邀請時指定的角色直接指派（沒有指定就維持舊角色對照，等管理員之後指派）
+  const roleIds: string[] = Array.isArray((invitation as any).role_ids) ? (invitation as any).role_ids : [];
+  if (roleIds.length) {
+    await supabaseAdmin.from('user_roles').upsert(roleIds.map((role_id) => ({ user_id: user.id, role_id })), { onConflict: 'user_id,role_id' });
+  }
 
   return { statusCode: 200, body: JSON.stringify({ status: 'pending_mfa', role: invitation.role }) };
 };

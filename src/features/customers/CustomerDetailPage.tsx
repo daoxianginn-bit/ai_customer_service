@@ -6,9 +6,6 @@ import {
 } from '@mui/material';
 import { useSnackbar } from 'notistack';
 import { ChevronDown, ChevronLeft, Copy, MessageSquare, RefreshCw, Trash2 } from 'lucide-react';
-import { supabase } from '../../lib/supabase';
-import { useAuth } from '../../lib/AuthContext';
-import { canPurgeCustomerData } from '../../lib/permissions';
 import { formatDate, formatDateRange, formatDateTime, formatMoney, formatRelative, formatTime } from '../../lib/format';
 import { useBreakpoint } from '../../app/useBreakpoint';
 import { usePermission } from '../../app/Can';
@@ -16,7 +13,7 @@ import StatusBadge from '../../components/ui-mui/StatusBadge';
 import ResultState from '../../components/ui-mui/ResultState';
 import { useConfirm } from '../../components/ui-mui/ConfirmDialogProvider';
 import { SOURCE_LABEL } from '../service/serviceQueries';
-import { CUSTOMER_STATUS_META, customerStatus, fetchCustomerDetail, fetchPrimaryAdminId, type CustomerDetail } from './customerQueries';
+import { CUSTOMER_STATUS_META, customerStatus, fetchCustomerDetail, type CustomerDetail } from './customerQueries';
 import { purgeCustomerData, refreshLineProfile, setMarketingOptOut } from './customerActions';
 
 // ========================================================================
@@ -60,21 +57,14 @@ export default function CustomerDetailPage() {
   const { enqueueSnackbar } = useSnackbar();
   const confirm = useConfirm();
   const { isMobile } = useBreakpoint();
-  const { role } = useAuth();
   const canEdit = usePermission('customer.edit');
-  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
-  const [primaryAdminId, setPrimaryAdminId] = useState<string | null>(null);
-  const canPurge = canPurgeCustomerData(role, currentUserId, primaryAdminId);
+  // 清除個資：權限模型裡只有主帳號拿得到 customer.personal_data.delete（後端 delete-customer-data 再驗一次）
+  const canPurge = usePermission('customer.personal_data.delete');
 
   const [data, setData] = useState<CustomerDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<'notfound' | string | null>(null);
   const [busy, setBusy] = useState(false);
-
-  useEffect(() => {
-    supabase.auth.getUser().then(({ data: d }) => setCurrentUserId(d.user?.id || null));
-    if (role === 'admin') fetchPrimaryAdminId().then(setPrimaryAdminId).catch(() => setPrimaryAdminId(null));
-  }, [role]);
 
   const load = useCallback(async () => {
     setLoading(true); setError(null);

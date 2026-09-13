@@ -43,6 +43,7 @@ export const LOG_FEATURES = {
   otaChannel: 'OTA 頻道管理',
   lineBooking: 'LINE 訂房流程',
   calendarSync: '行事曆同步',
+  permission: '帳號與權限',
 } as const;
 
 export const LOG_FEATURE_OPTIONS = Object.values(LOG_FEATURES);
@@ -63,6 +64,7 @@ export const LOG_FUNCTION_NAMES = [
   'ai-test',
   'flow-test',
   'knowledge-test',
+  'roles-admin',
 ];
 
 /** 系統自動異動時的固定異動者名稱。 */

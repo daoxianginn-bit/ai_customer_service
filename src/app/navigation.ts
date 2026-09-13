@@ -54,8 +54,8 @@ export const navigation: NavSection[] = [
         children: [
           { label: '訂單', path: '/bookings', permission: 'booking.view', description: '查看、搜尋及處理所有訂房' },
           { label: '房況行事曆', path: '/bookings/calendar', permission: 'calendar.view', description: '每個色塊是一筆訂單，點選可查看詳情' },
-          { label: '待辦事項', path: '/bookings/tasks', permission: 'booking.view', description: '所有需要人工處理的事項：核款、尾款、退款、押金、撞期、轉接' },
-          { label: '候補／衝突', path: '/bookings/conflicts', permission: 'booking.view', description: 'OTA 房況衝突、系統攔下的撞期、候補中的詢問' },
+          { label: '待辦事項', path: '/bookings/tasks', permission: 'conflict.view', description: '所有需要人工處理的事項：核款、尾款、退款、押金、撞期、轉接' },
+          { label: '候補／衝突', path: '/bookings/conflicts', permission: 'conflict.view', description: 'OTA 房況衝突、系統攔下的撞期、候補中的詢問' },
         ],
       },
       {
@@ -63,16 +63,16 @@ export const navigation: NavSection[] = [
         children: [
           { label: '客服工作台', path: '/service', permission: 'service.view', description: '對話清單、對話內容與客戶脈絡；接手或轉回 AI、直接回覆客人' },
           { label: '轉接紀錄', path: '/service/handovers', permission: 'service.view', description: '客人呼叫真人客服與客服接手的紀錄' },
-          { label: '對話流程', path: '/service/flows', permission: 'service.config', description: '客人傳訊息時，依關鍵字啟動的自動對話流程' },
-          { label: 'AI 知識庫', path: '/service/knowledge', permission: 'service.config', description: 'AI 回答問題時依據的民宿資訊' },
-          { label: '客服規則', path: '/service/rules', permission: 'service.config', description: '真人客服轉接的關鍵字、逾時與通知對象' },
+          { label: '對話流程', path: '/service/flows', permission: 'flow.view', description: '客人傳訊息時，依關鍵字啟動的自動對話流程' },
+          { label: 'AI 知識庫', path: '/service/knowledge', permission: 'knowledge.view', description: 'AI 回答問題時依據的民宿資訊' },
+          { label: '客服規則', path: '/service/rules', permission: 'service_rule.view', description: '真人客服轉接的關鍵字、逾時與通知對象' },
         ],
       },
       {
         key: 'customers', label: '客戶與行銷', path: '/customers', icon: Users, permission: 'customer.view',
         children: [
           { label: '客戶資料', path: '/customers', permission: 'customer.view', description: '所有跟官方帳號互動過的聯絡人' },
-          { label: '訊息發送', path: '/marketing/send', permission: 'marketing.send', description: '查詢客戶名單、套用範本、批次發送 LINE 訊息' },
+          { label: '訊息發送', path: '/marketing/send', permission: 'marketing.view', description: '查詢客戶名單、套用範本、批次發送 LINE 訊息' },
         ],
       },
       {
@@ -132,16 +132,17 @@ export const navigation: NavSection[] = [
     section: '管理',
     items: [
       {
-        key: 'admin', label: '系統管理', path: '/admin/property', icon: Settings, permission: 'system.manage',
+        key: 'admin', label: '系統管理', path: '/admin/property', icon: Settings, permission: 'system.view',
         children: [
-          { label: '民宿基本資料', path: '/admin/property', permission: 'system.manage', description: '民宿名稱、客服 LINE、禮金內容' },
-          { label: 'AI 引擎', path: '/admin/ai', permission: 'system.manage', description: 'AI 供應商、模型、金鑰與系統指令' },
-          { label: '訂房規則', path: '/admin/booking-rules', permission: 'system.manage', description: '訂金、押金、匯款期限、包棟開放' },
-          { label: '帳號與權限', path: '/admin/accounts', permission: 'account.view', description: '邀請同事、指派角色、停權與重置 2FA' },
-          { label: '安全性', path: '/admin/security', permission: 'system.manage', description: '登入政策、主帳號、對話紀錄保留' },
-          { label: '進階設定', path: '/admin/message-variables', permission: 'system.manage', description: '訊息變數從哪個欄位取值' },
+          { label: '民宿基本資料', path: '/admin/property', permission: 'system.view', description: '民宿名稱、客服 LINE、禮金內容' },
+          { label: 'AI 引擎', path: '/admin/ai', permission: 'ai_setting.view', description: 'AI 供應商、模型、金鑰與系統指令' },
+          { label: '訂房規則', path: '/admin/booking-rules', permission: 'system.view', description: '訂金、押金、匯款期限、包棟開放' },
+          { label: '使用者', path: '/admin/accounts', permission: 'account.view', description: '邀請同事、指派角色、停權與重置 2FA' },
+          { label: '角色與權限', path: '/admin/roles', permission: 'role.view', description: '自訂角色、勾選每個角色可以做的事' },
+          { label: '安全性', path: '/admin/security', permission: 'system.view', description: '登入政策、主帳號、對話紀錄保留' },
+          { label: '進階設定', path: '/admin/message-variables', permission: 'system.view', description: '訊息變數從哪個欄位取值' },
           { label: '操作紀錄', path: '/admin/audit', permission: 'audit.view', description: '誰在何時把什麼從什麼改成什麼' },
-          { label: '錯誤紀錄', path: '/admin/errors', permission: 'audit.view', description: '系統發生過的錯誤' },
+          { label: '錯誤紀錄', path: '/admin/errors', permission: 'error_log.view', description: '系統發生過的錯誤' },
         ],
       },
     ],
@@ -162,6 +163,16 @@ export function resolveNav(pathname: string): ResolvedNav | null {
       const child = item.children?.find((c) => c.path === pathname);
       if (child) return { section, item, child };
       if (item.path === pathname) return { section, item, child: item.children?.[0] };
+    }
+  }
+  // 子頁面（/admin/roles/:id、/admin/accounts/:id）：先用完整頁籤路徑比對，權限才會跟著頁籤
+  // （role.view）而不是模組入口（system.view）——否則有 system.view 的人守衛會放他進角色編輯器
+  for (const section of navigation) {
+    for (const item of section.items) {
+      const child = (item.children || [])
+        .filter((c) => c.path !== item.path && pathname.startsWith(c.path + '/'))
+        .sort((a, b) => b.path.length - a.path.length)[0];
+      if (child) return { section, item, child };
     }
   }
   // 前綴比對：詳情頁（/bookings/:id、/customers/:id）沒有自己的頁籤，歸到所屬入口

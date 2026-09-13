@@ -5,7 +5,7 @@ import fetch from 'node-fetch';
 import { buildMergeFields, MessageVariable, computeTodayTomorrowFields } from '../../src/lib/messageVariables';
 import { LineChannel } from '../../src/lib/lineChannels';
 import { withErrorLogging } from '../../src/lib/operationLog';
-import { requireRole } from '../../src/lib/requireRole';
+import { requirePermission } from '../../src/lib/requireRole';
 
 // ========================================================================
 // 客製訊息發送（客製訊息發送頁）專用 function：
@@ -28,15 +28,17 @@ const rawHandler: Handler = async (event) => {
 
   // 限管理員與客服：會實際發 LINE 訊息給客人並消耗官方帳號的訊息額度，
   // 唯讀角色不該能觸發。跟「客製訊息發送」頁面的權限一致（見 src/lib/permissions.ts）。
-  const guard = await requireRole(supabase, event as any, ['admin', 'staff']);
-  if ('error' in guard) return { statusCode: guard.error.statusCode, body: JSON.stringify({ error: guard.error.body }) };
-
   let body: any;
   try {
     body = JSON.parse(event.body || '{}');
   } catch {
     return { statusCode: 400, body: JSON.stringify({ error: '請求格式錯誤' }) };
   }
+
+  // 依動作要不同權限：發送要 marketing.send、客服回覆要 service.reply，其餘（查名單／額度／範本）只要能看訊息發送頁
+  const needed = body.action === 'send' ? 'marketing.send' : body.action === 'reply' ? 'service.reply' : ['marketing.view', 'service.view'];
+  const guard = await requirePermission(supabase, event as any, needed);
+  if ('error' in guard) return { statusCode: guard.error.statusCode, body: JSON.stringify({ error: guard.error.body }) };
 
   const { data: settings, error: settingsError } = await supabase.from('settings').select('*').single();
   if (settingsError || !settings) return { statusCode: 500, body: JSON.stringify({ error: '讀取系統設定失敗' }) };

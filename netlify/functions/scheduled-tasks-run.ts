@@ -9,7 +9,7 @@ import { parseIcsEvents } from '../../src/lib/icsParser';
 import { otaPlatformLabel } from '../../src/lib/otaChannels';
 import { classifyOtaEvent } from '../../src/lib/otaEventFilter';
 import { writeOperationLog, withErrorLogging, LOG_FEATURES, SYSTEM_ACTOR } from '../../src/lib/operationLog';
-import { requireRole } from '../../src/lib/requireRole';
+import { requirePermission } from '../../src/lib/requireRole';
 import { processWaitlist } from './line-webhook';
 
 // ========================================================================
@@ -1366,7 +1366,7 @@ export async function runTaskNow(event: any, taskId: string) {
   // 限管理員：排程會實際取消訂單、發 LINE 訊息給客人，屬於高風險操作，
   // 跟「排程管理」頁面本身的權限一致（見 src/lib/permissions.ts）。
   // 只驗「有沒有登入」不夠——客服/唯讀角色也有有效的登入權杖。
-  const guard = await requireRole(supabase, { headers: event.headers || {} }, ['admin']);
+  const guard = await requirePermission(supabase, { headers: event.headers || {} }, 'automation.run');
   if ('error' in guard) return { statusCode: guard.error.statusCode, body: JSON.stringify({ error: guard.error.body }) };
 
   const { data: task, error: taskError } = await supabase.from('scheduled_tasks').select('*').eq('id', taskId).maybeSingle();

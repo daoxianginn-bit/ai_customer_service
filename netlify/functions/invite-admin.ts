@@ -2,7 +2,9 @@ import { Handler } from '@netlify/functions';
 import { createClient } from '@supabase/supabase-js';
 import crypto from 'crypto';
 import { withErrorLogging } from '../../src/lib/operationLog';
-import { requireRole } from '../../src/lib/requireRole';
+import { requirePermission } from '../../src/lib/requireRole';
+import { loadUserPermissions } from '../../src/lib/rbacService';
+import { legacyRoleFromPermissions } from '../../src/app/permissions';
 import { ROLE_OPTIONS } from '../../src/lib/permissions';
 
 const supabaseAdmin = createClient(
@@ -32,14 +34,31 @@ const rawHandler: Handler = async (event) => {
   if (event.httpMethod !== 'POST') return { statusCode: 405, body: 'Method Not Allowed' };
 
   // 只有管理員能發邀請。少了這道檢查，任何登入者都能自己邀一個管理員帳號進來。
-  const guard = await requireRole(supabaseAdmin, event as any, ['admin']);
+  const guard = await requirePermission(supabaseAdmin, event as any, 'account.invite');
   if ('error' in guard) return guard.error;
 
-  const { email, role } = JSON.parse(event.body || '{}');
+  const { email, role, roleIds } = JSON.parse(event.body || '{}');
   if (!email || typeof email !== 'string') return { statusCode: 400, body: '請輸入 Email' };
   const normalizedEmail = email.trim().toLowerCase();
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(normalizedEmail)) return { statusCode: 400, body: 'Email 格式不正確' };
-  const assignedRole = VALID_ROLES.includes(role) ? role : 'staff';
+  // 權限管理 V2：邀請時直接指定角色（roleIds）。舊的三級 role 仍要填（舊邏輯與尚未升級的資料庫用），
+  // 有 roleIds 時依角色權限反推；沒帶 roleIds 就照舊用 role。
+  const requestedRoleIds: string[] = Array.isArray(roleIds) ? roleIds.map(String).filter(Boolean) : [];
+  let assignedRole = VALID_ROLES.includes(role) ? role : 'staff';
+  if (requestedRoleIds.length) {
+    const { data: roleRows } = await supabaseAdmin.from('roles').select('id, name, is_active, role_permissions(permissions(code))').in('id', requestedRoleIds);
+    if ((roleRows || []).length !== requestedRoleIds.length) return { statusCode: 400, body: '有角色不存在' };
+    if ((roleRows || []).some((r: any) => !r.is_active)) return { statusCode: 400, body: '已停用的角色不能指派' };
+    const codes = new Set<string>();
+    for (const r of roleRows || []) for (const rp of (r as any).role_permissions || []) if (rp.permissions?.code) codes.add(rp.permissions.code);
+    // 只能邀請成自己也有的權限（§40），主帳號例外
+    if (!guard.isOwner) {
+      const mine = await loadUserPermissions(supabaseAdmin, guard.user.id);
+      const beyond = [...codes].filter((c) => !mine.has(c));
+      if (beyond.length) return { statusCode: 403, body: `你不能指派含有你沒有的權限的角色（${beyond.join('、')}）` };
+    }
+    assignedRole = legacyRoleFromPermissions(codes);
+  }
 
   const siteUrl = resolveSiteUrl(event);
   if (!siteUrl) {
@@ -74,6 +93,7 @@ const rawHandler: Handler = async (event) => {
     token_hash: hashInviteToken(token),
     expires_at: expiresAt,
     invited_by: guard.user.id,
+    role_ids: requestedRoleIds,
   });
   if (inviteError) return { statusCode: 500, body: `建立邀請失敗：${inviteError.message}` };
 

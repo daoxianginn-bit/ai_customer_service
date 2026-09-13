@@ -99,7 +99,7 @@ export default function BookingConflictsPage() {
   const { enqueueSnackbar } = useSnackbar();
   const confirm = useConfirm();
   const { isMobile } = useBreakpoint();
-  const canEdit = usePermission('booking.edit');
+  const canEdit = usePermission('booking.override_conflict');
   const [data, setData] = useState<ConflictData | null>(null);
   const [error, setError] = useState('');
 

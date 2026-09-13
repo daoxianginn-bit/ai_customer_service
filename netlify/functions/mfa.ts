@@ -1,7 +1,7 @@
 import { Handler } from '@netlify/functions';
 import { createClient } from '@supabase/supabase-js';
 import { withErrorLogging } from '../../src/lib/operationLog';
-import { requireRole, getAalFromToken } from '../../src/lib/requireRole';
+import { requirePermission, getAalFromToken } from '../../src/lib/requireRole';
 
 const supabaseAdmin = createClient(
   process.env.SUPABASE_URL || '',
@@ -112,7 +112,7 @@ const rawHandler: Handler = async (event) => {
 
   // ---- 管理員重置他人的 2FA ----
   if (action === 'reset') {
-    const guard = await requireRole(supabaseAdmin, event as any, ['admin']);
+    const guard = await requirePermission(supabaseAdmin, event as any, 'account.reset_mfa');
     if ('error' in guard) return { statusCode: guard.error.statusCode, body: JSON.stringify({ error: guard.error.body }) };
 
     const targetUserId: string = body.userId;

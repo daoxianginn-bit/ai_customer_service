@@ -1456,108 +1456,526 @@ CREATE TRIGGER guard_primary_admin_id_trg
   BEFORE UPDATE ON public.settings
   FOR EACH ROW EXECUTE FUNCTION public.guard_primary_admin_id();
 
--- 9.7 依分層套用 RLS 政策。
--- 用迴圈而不是逐表手寫 CREATE POLICY：近 40 張表逐條寫容易漏掉一張（漏掉的那張就是資料外洩的破口），
--- 也方便之後新增表格時只要加進下面的分類清單即可。
--- 每次執行都先把該表所有既有政策清掉再重建，所以可以重複執行，
--- 也會確實移除舊版政策——PostgreSQL 的 permissive 政策是 OR 關係，
--- 舊政策只要留著一條，新的限制就完全失效。
+-- ========================================================================
+-- 9.7 權限管理 V2：自訂角色 RBAC（roles／permissions／role_permissions／user_roles）
+--
+-- 角色是給人看的（管理員自訂、可改名），權限是給程式判斷的（固定 code，只隨版本新增，
+-- 由 src/app/permissions.ts 產生下面的 seed）。使用者可有多個角色，有效權限＝聯集，不做 Deny。
+--
+-- 過渡策略（§75–76）：admin_profiles.role 保留。還沒被指派任何角色的帳號，has_permission()
+-- 用舊角色對照到範本角色（admin→sys_admin、staff→staff、viewer→viewer）取得權限；主帳號永遠全部。
+-- 所以這份腳本跑完當下，所有既有帳號的權限跟以前完全一樣，之後再逐一指派新角色。
+-- ========================================================================
+
+CREATE TABLE IF NOT EXISTS public.roles (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    code TEXT UNIQUE,                              -- 範本角色的固定代碼（super_admin／sys_admin…），自訂角色是 NULL
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    is_system BOOLEAN NOT NULL DEFAULT false,      -- 系統角色：不可刪除、不可停用、權限不可改（super_admin）
+    is_active BOOLEAN NOT NULL DEFAULT true,       -- 停用＝不能再指派、既有使用者立即失去這個角色的權限
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    version INTEGER NOT NULL DEFAULT 1,            -- 樂觀鎖：兩位管理員同時改同一個角色時，後存的會被擋下（§55）
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now(),
+    created_by UUID,
+    updated_by UUID
+);
+
+CREATE TABLE IF NOT EXISTS public.permissions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    code TEXT UNIQUE NOT NULL,                     -- booking.refund.process
+    module TEXT NOT NULL,                          -- 顯示分組（booking／service…）
+    resource TEXT NOT NULL,
+    action TEXT NOT NULL,
+    name TEXT NOT NULL,                            -- 中文名稱
+    description TEXT NOT NULL DEFAULT '',
+    risk_level TEXT NOT NULL DEFAULT 'low' CHECK (risk_level IN ('low', 'medium', 'high')),
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    is_active BOOLEAN NOT NULL DEFAULT true        -- registry 拿掉的權限標停用，不刪（保留歷史）
+);
+
+CREATE TABLE IF NOT EXISTS public.role_permissions (
+    role_id UUID NOT NULL REFERENCES public.roles(id) ON DELETE CASCADE,
+    permission_id UUID NOT NULL REFERENCES public.permissions(id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    created_by UUID,
+    PRIMARY KEY (role_id, permission_id)
+);
+
+CREATE TABLE IF NOT EXISTS public.user_roles (
+    user_id UUID NOT NULL REFERENCES public.admin_profiles(id) ON DELETE CASCADE,
+    role_id UUID NOT NULL REFERENCES public.roles(id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    created_by UUID,
+    PRIMARY KEY (user_id, role_id)
+);
+CREATE INDEX IF NOT EXISTS idx_user_roles_role ON public.user_roles(role_id);
+
+-- 未來多館 Scope（§7）：先保留設計不啟用。
+CREATE TABLE IF NOT EXISTS public.role_permission_scopes (
+    role_id UUID NOT NULL REFERENCES public.roles(id) ON DELETE CASCADE,
+    permission_id UUID NOT NULL REFERENCES public.permissions(id) ON DELETE CASCADE,
+    scope_type TEXT NOT NULL,
+    scope_id UUID NOT NULL,
+    PRIMARY KEY (role_id, permission_id, scope_type, scope_id)
+);
+
+-- 權限版本：角色或指派一有變動就 +1，前端用來判斷要不要重新取得權限（§26）
+ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS permission_version INTEGER NOT NULL DEFAULT 1;
+-- 邀請時直接指定角色（§52）；舊的 role 欄位保留給還沒升級的邏輯
+ALTER TABLE public.admin_invitations ADD COLUMN IF NOT EXISTS role_ids UUID[] NOT NULL DEFAULT '{}';
+
+-- BEGIN GENERATED PERMISSIONS
+-- （由 scripts/gen-permission-seed.mjs 從 src/app/permissions.ts 產生，不要手改）
+INSERT INTO public.permissions (code, module, resource, action, name, description, risk_level, sort_order, is_active) VALUES
+  ('dashboard.view', 'dashboard', 'dashboard', 'view', '查看工作台', '首頁的今日 KPI、待辦與未來入住。', 'low', 1, true),
+  ('booking.view', 'booking', 'booking', 'view', '查看訂單', '訂單列表與詳情的基本資料。', 'low', 2, true),
+  ('booking.create', 'booking', 'booking', 'create', '新增訂單', '後台手動建立訂單。', 'low', 3, true),
+  ('booking.edit', 'booking', 'booking', 'edit', '修改訂單', '修改客人資料、日期、房間、金額與備註。', 'low', 4, true),
+  ('booking.cancel', 'booking', 'booking', 'cancel', '取消訂單', '把訂單改成「取消」，紀錄保留。', 'medium', 5, true),
+  ('booking.delete', 'booking', 'booking', 'delete', '刪除訂單', '永久刪除訂單，連同房間與布巾用量，無法復原。', 'high', 6, true),
+  ('booking.payment.view', 'booking', 'booking', 'payment.view', '查看付款資料', '看得到匯款末五碼與入住密碼。', 'medium', 7, true),
+  ('booking.payment.verify', 'booking', 'booking', 'payment.verify', '確認付款／推進狀態', '核對訂金或尾款，依流程把訂單推到下一關。', 'medium', 8, true),
+  ('booking.refund.process', 'booking', 'booking', 'refund.process', '處理退款', '把待退款的訂單標記為已退款。會留下操作紀錄。', 'high', 9, true),
+  ('booking.override_conflict', 'booking', 'booking', 'override_conflict', '處理撞期／候補', '清除 OTA 撞期旗標、決定系統攔下的撞期訂單怎麼走。', 'high', 10, true),
+  ('booking.history.view', 'booking', 'booking', 'history.view', '查看訂單異動紀錄', '訂單詳情的操作紀錄時間軸（誰在何時改了什麼）。', 'low', 11, true),
+  ('calendar.view', 'booking', 'calendar', 'view', '查看房況行事曆', '月曆與手機列表檢視。', 'low', 12, true),
+  ('calendar.manage', 'booking', 'calendar', 'manage', '設定旺季／連假', '維護行事曆上的旺季與連假日期。', 'medium', 13, true),
+  ('conflict.view', 'booking', 'conflict', 'view', '查看待辦與候補／衝突', '待辦事項中心與候補／衝突頁。', 'low', 14, true),
+  ('service.view', 'service', 'service', 'view', '查看客服工作台', '對話清單、對話內容與客戶脈絡。', 'low', 15, true),
+  ('service.reply', 'service', 'service', 'reply', '回覆客人', '在工作台直接回覆客人（會用官方帳號推播）。', 'medium', 16, true),
+  ('service.handover', 'service', 'service', 'handover', '接手／轉回 AI', '把客人切成真人模式、轉回 AI、標記轉接已處理。', 'medium', 17, true),
+  ('conversation.diagnostic', 'service', 'conversation', 'diagnostic', '查看 AI 判斷過程', '客人訊息旁的 ⓘ：意圖、抓到的欄位、決策過程與錯誤。', 'low', 18, true),
+  ('conversation.raw_ai_output', 'service', 'conversation', 'raw_ai_output', '查看 AI 原文', 'AI 回覆的原始 JSON／文字（除錯用）。', 'medium', 19, true),
+  ('flow.view', 'service', 'flow', 'view', '查看對話流程', '對話流程的設定內容。', 'low', 20, true),
+  ('flow.manage', 'service', 'flow', 'manage', '編輯對話流程', '新增、修改、刪除對話流程與步驟。改壞會影響客人訂房。', 'medium', 21, true),
+  ('flow.test', 'service', 'flow', 'test', '測試對話', '用模擬器測試一句話會被判成什麼（會呼叫 AI）。', 'low', 22, true),
+  ('knowledge.view', 'service', 'knowledge', 'view', '查看知識庫', 'AI 知識庫的條目與檔案。', 'low', 23, true),
+  ('knowledge.manage', 'service', 'knowledge', 'manage', '編輯知識庫', '新增、修改、刪除、啟用／停用知識庫條目。', 'medium', 24, true),
+  ('knowledge.test', 'service', 'knowledge', 'test', '測試 AI 回答', '用目前知識庫實際問 AI 一次（會呼叫 AI）。', 'low', 25, true),
+  ('service_rule.view', 'service', 'service_rule', 'view', '查看客服規則', '轉接關鍵字、通知對象、逾時設定。', 'low', 26, true),
+  ('service_rule.manage', 'service', 'service_rule', 'manage', '修改客服規則', '修改轉接關鍵字、通知對象、逾時設定。', 'medium', 27, true),
+  ('customer.view', 'customer', 'customer', 'view', '查看客戶', '客戶列表與詳情、訂房紀錄、最近對話。', 'low', 28, true),
+  ('customer.edit', 'customer', 'customer', 'edit', '修改客戶', '重新抓取暱稱、行銷拒收開關。', 'low', 29, true),
+  ('customer.personal_data.delete', 'customer', 'customer', 'personal_data.delete', '清除客戶個資', '永久刪除客人的聯絡人、對話與轉接紀錄。無法復原，主帳號才可執行。', 'high', 30, true),
+  ('marketing.view', 'customer', 'marketing', 'view', '查看訊息發送', '訊息發送頁、名單查詢、LINE 額度。', 'low', 31, true),
+  ('marketing.send', 'customer', 'marketing', 'send', '發送訊息', '批次推播 LINE 訊息給客人（消耗官方帳號額度）。', 'medium', 32, true),
+  ('marketing.template.manage', 'customer', 'marketing', 'template.manage', '管理訊息範本', '新增、修改、刪除訊息範本。', 'low', 33, true),
+  ('housekeeping.view', 'housekeeping', 'housekeeping', 'view', '查看房務', '房務總覽、布巾、耗材、洗滌單。', 'low', 34, true),
+  ('housekeeping.manage', 'housekeeping', 'housekeeping', 'manage', '維護房務資料', '修改布巾品項、房型預設組合、耗材與庫存。', 'low', 35, true),
+  ('linen.cost.view', 'housekeeping', 'linen', 'cost.view', '查看洗滌成本統計', '房務統計的成本報表。', 'low', 36, true),
+  ('inventory.view', 'inventory', 'inventory', 'view', '查看房型與空間', '房間與公共空間的基本資料。', 'low', 37, true),
+  ('inventory.manage', 'inventory', 'inventory', 'manage', '維護房型與空間', '新增、修改、刪除房間與空間。影響計價與配房。', 'medium', 38, true),
+  ('pricing.view', 'pricing', 'pricing', 'view', '查看價格', '價格總覽與目前設定。', 'low', 39, true),
+  ('pricing.manage', 'pricing', 'pricing', 'manage', '修改價格', '基礎價、日期加價、特殊日期、包棟、加人、連住、促銷。直接影響報價。', 'high', 40, true),
+  ('pricing.simulate', 'pricing', 'pricing', 'simulate', '報價模擬', '用目前設定試算報價。', 'low', 41, true),
+  ('integration.view', 'integration', 'integration', 'view', '查看串接', 'LINE 官方帳號、OTA、Google 行事曆、通知對象的頁面入口（設定內容需搭配「修改串接」）。', 'low', 42, true),
+  ('integration.manage', 'integration', 'integration', 'manage', '修改串接', '新增、修改、停用官方帳號、OTA 頻道、行事曆與通知名單。', 'medium', 43, true),
+  ('integration.secret.view', 'integration', 'integration', 'secret.view', '顯示串接金鑰', '看見 LINE Token／Secret 等原文。', 'high', 44, true),
+  ('integration.ota.sync', 'integration', 'integration', 'ota.sync', '手動同步 OTA／行事曆', '立即抓取第三方行事曆並同步。', 'medium', 45, true),
+  ('automation.view', 'automation', 'automation', 'view', '查看排程', '自動化規則與執行結果。', 'low', 46, true),
+  ('automation.manage', 'automation', 'automation', 'manage', '修改排程', '新增、修改、停用、刪除排程。排程會自動改訂單狀態與發訊息。', 'high', 47, true),
+  ('automation.run', 'automation', 'automation', 'run', '立即執行排程', '不等排程時間直接跑一次。', 'high', 48, true),
+  ('system.view', 'system', 'system', 'view', '查看系統設定', '民宿基本資料、訂房規則、安全性、進階設定的頁面入口（設定內容需搭配「修改系統設定」）。', 'low', 49, true),
+  ('system.manage', 'system', 'system', 'manage', '修改系統設定', '修改民宿基本資料、訂房規則、安全性、訊息變數。', 'medium', 50, true),
+  ('ai_setting.view', 'system', 'ai_setting', 'view', '查看 AI 引擎設定', 'AI 引擎頁的入口（設定內容需搭配「修改 AI 引擎設定」）。', 'low', 51, true),
+  ('ai_setting.manage', 'system', 'ai_setting', 'manage', '修改 AI 引擎設定', '切換供應商、模型、金鑰、參數、系統指令。', 'medium', 52, true),
+  ('ai_setting.test', 'system', 'ai_setting', 'test', '測試 AI 連線', '用畫面上的模型與金鑰實際呼叫一次。', 'low', 53, true),
+  ('ai_setting.secret.view', 'system', 'ai_setting', 'secret.view', '顯示 AI 金鑰', '看見 OpenAI／Gemini API Key 原文。', 'high', 54, true),
+  ('account.view', 'account', 'account', 'view', '查看使用者', '使用者清單、狀態、2FA、最後登入。', 'low', 55, true),
+  ('account.invite', 'account', 'account', 'invite', '邀請使用者', '寄送邀請並指定角色。', 'medium', 56, true),
+  ('account.edit', 'account', 'account', 'edit', '修改使用者', '改顯示名稱、停權與恢復。', 'medium', 57, true),
+  ('account.reset_mfa', 'account', 'account', 'reset_mfa', '重置 2FA', '移除他人的驗證器，對方下次登入要重新綁定。', 'high', 58, true),
+  ('account.delete', 'account', 'account', 'delete', '移除使用者', '把使用者從系統移除。', 'high', 59, true),
+  ('role.view', 'account', 'role', 'view', '查看角色與權限', '角色清單與各角色的權限。', 'low', 60, true),
+  ('role.manage', 'account', 'role', 'manage', '建立／修改角色', '新增角色、勾選權限、停用或刪除角色。只能授予自己擁有的權限。', 'high', 61, true),
+  ('role.assign', 'account', 'role', 'assign', '指派角色', '把角色指派給使用者或移除。', 'high', 62, true),
+  ('primary_admin.manage', 'account', 'primary_admin', 'manage', '設定主帳號', '指定誰是主帳號（老闆本人）。', 'high', 63, true),
+  ('audit.view', 'audit', 'audit', 'view', '查看操作紀錄', '誰在何時把什麼從什麼改成什麼。', 'low', 64, true),
+  ('error_log.view', 'audit', 'error_log', 'view', '查看錯誤紀錄', '系統錯誤與 AI 呼叫失敗。', 'low', 65, true)
+ON CONFLICT (code) DO UPDATE SET module = EXCLUDED.module, resource = EXCLUDED.resource, action = EXCLUDED.action, name = EXCLUDED.name, description = EXCLUDED.description, risk_level = EXCLUDED.risk_level, sort_order = EXCLUDED.sort_order, is_active = true;
+-- 不在 registry 裡的舊權限停用（不刪：role_permissions 的歷史還在）
+UPDATE public.permissions SET is_active = false WHERE code NOT IN ('dashboard.view', 'booking.view', 'booking.create', 'booking.edit', 'booking.cancel', 'booking.delete', 'booking.payment.view', 'booking.payment.verify', 'booking.refund.process', 'booking.override_conflict', 'booking.history.view', 'calendar.view', 'calendar.manage', 'conflict.view', 'service.view', 'service.reply', 'service.handover', 'conversation.diagnostic', 'conversation.raw_ai_output', 'flow.view', 'flow.manage', 'flow.test', 'knowledge.view', 'knowledge.manage', 'knowledge.test', 'service_rule.view', 'service_rule.manage', 'customer.view', 'customer.edit', 'customer.personal_data.delete', 'marketing.view', 'marketing.send', 'marketing.template.manage', 'housekeeping.view', 'housekeeping.manage', 'linen.cost.view', 'inventory.view', 'inventory.manage', 'pricing.view', 'pricing.manage', 'pricing.simulate', 'integration.view', 'integration.manage', 'integration.secret.view', 'integration.ota.sync', 'automation.view', 'automation.manage', 'automation.run', 'system.view', 'system.manage', 'ai_setting.view', 'ai_setting.manage', 'ai_setting.test', 'ai_setting.secret.view', 'account.view', 'account.invite', 'account.edit', 'account.reset_mfa', 'account.delete', 'role.view', 'role.manage', 'role.assign', 'primary_admin.manage', 'audit.view', 'error_log.view');
+
+-- 範本角色：名稱與說明只在第一次建立時寫入（管理員之後可以改名），is_system 每次同步。
+INSERT INTO public.roles (code, name, description, is_system, sort_order) VALUES
+  ('super_admin', 'Super Admin', '系統最高權限，不可刪除、不可停用。只給老闆本人與備援帳號。', true, 10),
+  ('sys_admin', '系統管理員', '完整管理：設定、價格、串接、帳號都能改；不含清除客戶個資與設定主帳號。', false, 20),
+  ('staff', '客服人員', '訂單、確認付款、房況、客服對話與客戶；價格與房型只能看，不能改系統設定。', false, 30),
+  ('housekeeping', '房務人員', '房況、訂單查看、房務、布巾、耗材與洗滌單。', false, 40),
+  ('accounting', '會計', '訂單查看、付款確認、退款處理、洗滌成本。', false, 50),
+  ('marketing', '行銷人員', '客戶資料、訊息發送與範本、知識庫查看。', false, 60),
+  ('viewer', '唯讀主管', '只看不改：工作台、訂單、房況、客戶、價格、房務、排程狀態與操作紀錄。', false, 70)
+ON CONFLICT (code) DO UPDATE SET is_system = EXCLUDED.is_system;
+
+-- 範本角色的權限：角色剛建立（還沒有任何權限列）時才套範本，之後由後台維護，重跑不會蓋掉管理員的調整。
+-- super_admin 例外：每次都補齊全部啟用中的權限。
+DO $seed_roles$
+DECLARE r_id UUID;
+BEGIN
+  SELECT id INTO r_id FROM public.roles WHERE code = 'super_admin';
+  INSERT INTO public.role_permissions (role_id, permission_id) SELECT r_id, p.id FROM public.permissions p WHERE p.is_active ON CONFLICT DO NOTHING;
+  SELECT id INTO r_id FROM public.roles WHERE code = 'sys_admin';
+  IF NOT EXISTS (SELECT 1 FROM public.role_permissions WHERE role_id = r_id) THEN
+    INSERT INTO public.role_permissions (role_id, permission_id) SELECT r_id, p.id FROM public.permissions p WHERE p.code IN ('dashboard.view', 'booking.view', 'booking.create', 'booking.edit', 'booking.cancel', 'booking.delete', 'booking.payment.view', 'booking.payment.verify', 'booking.refund.process', 'booking.override_conflict', 'booking.history.view', 'calendar.view', 'calendar.manage', 'conflict.view', 'service.view', 'service.reply', 'service.handover', 'conversation.diagnostic', 'conversation.raw_ai_output', 'flow.view', 'flow.manage', 'flow.test', 'knowledge.view', 'knowledge.manage', 'knowledge.test', 'service_rule.view', 'service_rule.manage', 'customer.view', 'customer.edit', 'marketing.view', 'marketing.send', 'marketing.template.manage', 'housekeeping.view', 'housekeeping.manage', 'linen.cost.view', 'inventory.view', 'inventory.manage', 'pricing.view', 'pricing.manage', 'pricing.simulate', 'integration.view', 'integration.manage', 'integration.secret.view', 'integration.ota.sync', 'automation.view', 'automation.manage', 'automation.run', 'system.view', 'system.manage', 'ai_setting.view', 'ai_setting.manage', 'ai_setting.test', 'ai_setting.secret.view', 'account.view', 'account.invite', 'account.edit', 'account.reset_mfa', 'account.delete', 'role.view', 'role.manage', 'role.assign', 'audit.view', 'error_log.view') ON CONFLICT DO NOTHING;
+  END IF;
+  SELECT id INTO r_id FROM public.roles WHERE code = 'staff';
+  IF NOT EXISTS (SELECT 1 FROM public.role_permissions WHERE role_id = r_id) THEN
+    INSERT INTO public.role_permissions (role_id, permission_id) SELECT r_id, p.id FROM public.permissions p WHERE p.code IN ('dashboard.view', 'booking.view', 'booking.create', 'booking.edit', 'booking.cancel', 'booking.payment.view', 'booking.payment.verify', 'booking.history.view', 'calendar.view', 'conflict.view', 'service.view', 'service.reply', 'service.handover', 'conversation.diagnostic', 'customer.view', 'customer.edit', 'marketing.view', 'marketing.send', 'marketing.template.manage', 'housekeeping.view', 'housekeeping.manage', 'linen.cost.view', 'inventory.view', 'pricing.view', 'pricing.simulate') ON CONFLICT DO NOTHING;
+  END IF;
+  SELECT id INTO r_id FROM public.roles WHERE code = 'housekeeping';
+  IF NOT EXISTS (SELECT 1 FROM public.role_permissions WHERE role_id = r_id) THEN
+    INSERT INTO public.role_permissions (role_id, permission_id) SELECT r_id, p.id FROM public.permissions p WHERE p.code IN ('dashboard.view', 'calendar.view', 'booking.view', 'housekeeping.view', 'housekeeping.manage', 'linen.cost.view', 'inventory.view') ON CONFLICT DO NOTHING;
+  END IF;
+  SELECT id INTO r_id FROM public.roles WHERE code = 'accounting';
+  IF NOT EXISTS (SELECT 1 FROM public.role_permissions WHERE role_id = r_id) THEN
+    INSERT INTO public.role_permissions (role_id, permission_id) SELECT r_id, p.id FROM public.permissions p WHERE p.code IN ('dashboard.view', 'booking.view', 'booking.payment.view', 'booking.payment.verify', 'booking.refund.process', 'booking.history.view', 'customer.view', 'linen.cost.view', 'housekeeping.view') ON CONFLICT DO NOTHING;
+  END IF;
+  SELECT id INTO r_id FROM public.roles WHERE code = 'marketing';
+  IF NOT EXISTS (SELECT 1 FROM public.role_permissions WHERE role_id = r_id) THEN
+    INSERT INTO public.role_permissions (role_id, permission_id) SELECT r_id, p.id FROM public.permissions p WHERE p.code IN ('dashboard.view', 'customer.view', 'marketing.view', 'marketing.send', 'marketing.template.manage', 'knowledge.view') ON CONFLICT DO NOTHING;
+  END IF;
+  SELECT id INTO r_id FROM public.roles WHERE code = 'viewer';
+  IF NOT EXISTS (SELECT 1 FROM public.role_permissions WHERE role_id = r_id) THEN
+    INSERT INTO public.role_permissions (role_id, permission_id) SELECT r_id, p.id FROM public.permissions p WHERE p.code IN ('dashboard.view', 'booking.view', 'booking.history.view', 'calendar.view', 'conflict.view', 'customer.view', 'pricing.view', 'housekeeping.view', 'linen.cost.view', 'inventory.view', 'automation.view', 'audit.view') ON CONFLICT DO NOTHING;
+  END IF;
+END
+$seed_roles$;
+-- END GENERATED PERMISSIONS
+
+-- ------------------------------------------------------------------
+-- 判斷函式。全部 SECURITY DEFINER：權限表本身也受 RLS，判斷時不能被自己擋住。
+-- STABLE：同一個查詢裡對常數參數只算一次，RLS 逐列檢查時不會每列都重新 join。
+-- ------------------------------------------------------------------
+
+-- 某個帳號有沒有某個權限（不看 2FA——給 Functions 用，Functions 自己驗 aal2）。
+CREATE OR REPLACE FUNCTION public.has_permission_for(p_user_id UUID, p_code TEXT)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $has_permission_for$
+DECLARE
+  v_status TEXT;
+  v_role TEXT;
+  v_legacy_code TEXT;
+BEGIN
+  IF p_user_id IS NULL OR p_code IS NULL THEN RETURN false; END IF;
+  SELECT status, role INTO v_status, v_role FROM public.admin_profiles WHERE id = p_user_id;
+  IF v_status IS DISTINCT FROM 'active' THEN RETURN false; END IF;
+  -- 主帳號（老闆本人）永遠全部：這是最後一道「不會把自己鎖在門外」的保險
+  IF p_user_id = (SELECT s.primary_admin_id FROM public.settings s LIMIT 1) THEN RETURN true; END IF;
+  -- 新模型：使用者的啟用中角色 ∪ 角色的啟用中權限
+  IF EXISTS (
+    SELECT 1
+    FROM public.user_roles ur
+    JOIN public.roles r ON r.id = ur.role_id AND r.is_active
+    JOIN public.role_permissions rp ON rp.role_id = r.id
+    JOIN public.permissions p ON p.id = rp.permission_id AND p.is_active
+    WHERE ur.user_id = p_user_id AND p.code = p_code
+  ) THEN RETURN true; END IF;
+  -- 已經指派過角色的人不再看舊角色（只有「完全沒指派」的帳號走過渡對照）
+  IF EXISTS (SELECT 1 FROM public.user_roles WHERE user_id = p_user_id) THEN RETURN false; END IF;
+  v_legacy_code := CASE v_role WHEN 'admin' THEN 'sys_admin' WHEN 'staff' THEN 'staff' WHEN 'viewer' THEN 'viewer' ELSE NULL END;
+  IF v_legacy_code IS NULL THEN RETURN false; END IF;
+  RETURN EXISTS (
+    SELECT 1
+    FROM public.roles r
+    JOIN public.role_permissions rp ON rp.role_id = r.id
+    JOIN public.permissions p ON p.id = rp.permission_id AND p.is_active
+    WHERE r.code = v_legacy_code AND p.code = p_code
+  );
+END
+$has_permission_for$;
+
+-- 目前登入者有沒有某個權限（RLS 用）：帳號啟用 ＋ 本次登入已過 2FA ＋ 權限
+CREATE OR REPLACE FUNCTION public.has_permission(p_code TEXT)
+RETURNS BOOLEAN
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $has_permission$
+  SELECT public.is_mfa_verified() AND public.has_permission_for(auth.uid(), p_code);
+$has_permission$;
+
+-- 目前登入者的角色與有效權限（前端 PermissionProvider 用；§27 的 /me/permissions）
+CREATE OR REPLACE FUNCTION public.my_permissions()
+RETURNS JSONB
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $my_permissions$
+DECLARE
+  v_uid UUID := auth.uid();
+  v_status TEXT;
+  v_role TEXT;
+  v_owner BOOLEAN := false;
+  v_roles JSONB := '[]'::jsonb;
+  v_perms JSONB := '[]'::jsonb;
+  v_legacy TEXT;
+  v_version INTEGER;
+BEGIN
+  SELECT permission_version INTO v_version FROM public.settings LIMIT 1;
+  IF v_uid IS NULL OR NOT public.is_mfa_verified() THEN
+    RETURN jsonb_build_object('roles', v_roles, 'permissions', v_perms, 'is_owner', false, 'version', v_version);
+  END IF;
+  SELECT status, role INTO v_status, v_role FROM public.admin_profiles WHERE id = v_uid;
+  IF v_status IS DISTINCT FROM 'active' THEN
+    RETURN jsonb_build_object('roles', v_roles, 'permissions', v_perms, 'is_owner', false, 'version', v_version);
+  END IF;
+  v_owner := v_uid = (SELECT s.primary_admin_id FROM public.settings s LIMIT 1);
+
+  IF EXISTS (SELECT 1 FROM public.user_roles WHERE user_id = v_uid) THEN
+    SELECT COALESCE(jsonb_agg(jsonb_build_object('id', r.id, 'code', r.code, 'name', r.name, 'is_active', r.is_active) ORDER BY r.sort_order, r.name), '[]'::jsonb)
+      INTO v_roles
+      FROM public.user_roles ur JOIN public.roles r ON r.id = ur.role_id
+      WHERE ur.user_id = v_uid;
+    SELECT COALESCE(jsonb_agg(DISTINCT p.code), '[]'::jsonb)
+      INTO v_perms
+      FROM public.user_roles ur
+      JOIN public.roles r ON r.id = ur.role_id AND r.is_active
+      JOIN public.role_permissions rp ON rp.role_id = r.id
+      JOIN public.permissions p ON p.id = rp.permission_id AND p.is_active
+      WHERE ur.user_id = v_uid;
+  ELSE
+    v_legacy := CASE v_role WHEN 'admin' THEN 'sys_admin' WHEN 'staff' THEN 'staff' WHEN 'viewer' THEN 'viewer' ELSE NULL END;
+    SELECT COALESCE(jsonb_agg(jsonb_build_object('id', r.id, 'code', r.code, 'name', r.name, 'is_active', r.is_active, 'legacy', true)), '[]'::jsonb)
+      INTO v_roles FROM public.roles r WHERE r.code = v_legacy;
+    SELECT COALESCE(jsonb_agg(DISTINCT p.code), '[]'::jsonb)
+      INTO v_perms
+      FROM public.roles r
+      JOIN public.role_permissions rp ON rp.role_id = r.id
+      JOIN public.permissions p ON p.id = rp.permission_id AND p.is_active
+      WHERE r.code = v_legacy;
+  END IF;
+
+  IF v_owner THEN
+    SELECT COALESCE(jsonb_agg(p.code), '[]'::jsonb) INTO v_perms FROM public.permissions p WHERE p.is_active;
+  END IF;
+  RETURN jsonb_build_object('roles', v_roles, 'permissions', v_perms, 'is_owner', v_owner, 'version', v_version);
+END
+$my_permissions$;
+
+REVOKE ALL ON FUNCTION public.my_permissions() FROM anon;
+GRANT EXECUTE ON FUNCTION public.my_permissions() TO authenticated;
+REVOKE ALL ON FUNCTION public.has_permission_for(UUID, TEXT) FROM anon, authenticated;
+
+-- 版本號：角色／權限／指派任何變動 → settings.permission_version +1；角色本身的 version 也 +1
+CREATE OR REPLACE FUNCTION public.bump_permission_version()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $bump_permission_version$
+BEGIN
+  UPDATE public.settings SET permission_version = permission_version + 1;
+  IF TG_TABLE_NAME = 'role_permissions' THEN
+    UPDATE public.roles SET updated_at = now() WHERE id = COALESCE(NEW.role_id, OLD.role_id);
+  END IF;
+  RETURN NULL;
+END
+$bump_permission_version$;
+
+DROP TRIGGER IF EXISTS bump_permission_version_roles ON public.roles;
+CREATE TRIGGER bump_permission_version_roles AFTER INSERT OR UPDATE OR DELETE ON public.roles
+  FOR EACH STATEMENT EXECUTE FUNCTION public.bump_permission_version();
+DROP TRIGGER IF EXISTS bump_permission_version_role_permissions ON public.role_permissions;
+CREATE TRIGGER bump_permission_version_role_permissions AFTER INSERT OR UPDATE OR DELETE ON public.role_permissions
+  FOR EACH ROW EXECUTE FUNCTION public.bump_permission_version();
+DROP TRIGGER IF EXISTS bump_permission_version_user_roles ON public.user_roles;
+CREATE TRIGGER bump_permission_version_user_roles AFTER INSERT OR UPDATE OR DELETE ON public.user_roles
+  FOR EACH STATEMENT EXECUTE FUNCTION public.bump_permission_version();
+
+-- 系統角色保護：super_admin 不能停用、不能刪除、不能拿掉權限（§8）
+CREATE OR REPLACE FUNCTION public.guard_system_role()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $guard_system_role$
+BEGIN
+  IF TG_TABLE_NAME = 'roles' THEN
+    IF TG_OP = 'DELETE' AND OLD.is_system THEN RAISE EXCEPTION '系統角色不可刪除'; END IF;
+    IF TG_OP = 'UPDATE' AND OLD.is_system AND NEW.is_active = false THEN RAISE EXCEPTION '系統角色不可停用'; END IF;
+    RETURN COALESCE(NEW, OLD);
+  END IF;
+  IF TG_TABLE_NAME = 'role_permissions' AND TG_OP = 'DELETE' THEN
+    IF EXISTS (SELECT 1 FROM public.roles WHERE id = OLD.role_id AND is_system) THEN RAISE EXCEPTION '系統角色的權限不可移除'; END IF;
+  END IF;
+  RETURN COALESCE(NEW, OLD);
+END
+$guard_system_role$;
+DROP TRIGGER IF EXISTS guard_system_role_roles ON public.roles;
+CREATE TRIGGER guard_system_role_roles BEFORE UPDATE OR DELETE ON public.roles FOR EACH ROW EXECUTE FUNCTION public.guard_system_role();
+DROP TRIGGER IF EXISTS guard_system_role_perms ON public.role_permissions;
+CREATE TRIGGER guard_system_role_perms BEFORE DELETE ON public.role_permissions FOR EACH ROW EXECUTE FUNCTION public.guard_system_role();
+
+-- 最後管理者保護（§39）：不能把系統唯一一位「能管角色與帳號」的啟用帳號停權。
+-- 停權是前端直接 UPDATE admin_profiles（RLS：account.edit），所以防線要在資料庫；主帳號另有 guard 不可停權。
+CREATE OR REPLACE FUNCTION public.guard_last_admin()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $guard_last_admin$
+DECLARE
+  v_owner UUID := (SELECT s.primary_admin_id FROM public.settings s LIMIT 1);
+BEGIN
+  IF OLD.status = 'active' AND NEW.status <> 'active' THEN
+    IF NEW.id = v_owner THEN RAISE EXCEPTION '主帳號不能被停權'; END IF;
+    IF NOT EXISTS (
+      SELECT 1 FROM public.admin_profiles p
+      WHERE p.id <> NEW.id AND p.status = 'active'
+        AND public.has_permission_for(p.id, 'role.manage') AND public.has_permission_for(p.id, 'account.edit')
+    ) THEN
+      RAISE EXCEPTION '這是系統唯一能管理角色與帳號的管理員，不能停權';
+    END IF;
+  END IF;
+  RETURN NEW;
+END
+$guard_last_admin$;
+DROP TRIGGER IF EXISTS guard_last_admin_trg ON public.admin_profiles;
+CREATE TRIGGER guard_last_admin_trg BEFORE UPDATE OF status ON public.admin_profiles FOR EACH ROW EXECUTE FUNCTION public.guard_last_admin();
+
+-- 一次性搬遷（§75 Phase 2）：還沒有任何角色的既有帳號依舊角色指派範本角色；主帳號給 super_admin。
+-- 可重複執行：已經有角色的人不動。
+DO $migrate_roles$
+DECLARE
+  prof RECORD;
+  v_role_id UUID;
+  v_owner UUID := (SELECT s.primary_admin_id FROM public.settings s LIMIT 1);
+BEGIN
+  FOR prof IN SELECT id, role FROM public.admin_profiles LOOP
+    IF EXISTS (SELECT 1 FROM public.user_roles WHERE user_id = prof.id) THEN CONTINUE; END IF;
+    IF prof.id = v_owner THEN
+      SELECT id INTO v_role_id FROM public.roles WHERE code = 'super_admin';
+    ELSE
+      SELECT id INTO v_role_id FROM public.roles WHERE code = CASE prof.role WHEN 'admin' THEN 'sys_admin' WHEN 'staff' THEN 'staff' WHEN 'viewer' THEN 'viewer' ELSE 'viewer' END;
+    END IF;
+    IF v_role_id IS NOT NULL THEN
+      INSERT INTO public.user_roles (user_id, role_id) VALUES (prof.id, v_role_id) ON CONFLICT DO NOTHING;
+    END IF;
+  END LOOP;
+END
+$migrate_roles$;
+
+-- 9.8 依權限套用 RLS 政策（權限管理 V2 §34）。
+-- 每張表宣告四個動作各需要哪些權限（任一個即可，逗號分隔）；特殊值：
+--   ANY   ＝任何已啟用且過 2FA 的帳號（can_view()）
+--   OWNER ＝主帳號（is_owner()）
+--   NONE  ＝前端完全不能做（只有 service role 的 Functions 能做）
+-- 用迴圈而不是逐表手寫 CREATE POLICY：近 40 張表逐條寫容易漏掉一張（漏掉的那張就是資料外洩的破口）。
+-- 每次執行都先把該表所有既有政策清掉再重建，所以可以重複執行，也會確實移除舊版政策——
+-- PostgreSQL 的 permissive 政策是 OR 關係，舊政策只要留著一條，新的限制就完全失效。
+-- 沒列在這裡的表格＝沒有政策＝前端全部拒絕（default deny）。
 DO $rls$
 DECLARE
-  tbl text;
-  pol record;
-  -- 機密／系統控制：只有管理員能碰。settings 與 line_channels 存著 API 金鑰與 LINE 權杖；
-  -- scheduled_tasks 能觸發系統動作；operation_logs 是稽核軌跡；processed_events 是內部去重表；
-  -- admin_invitations 是邀請名單（能改就等於能自己邀自己進來）。
-  admin_only text[] := ARRAY[
-    'settings', 'line_channels', 'scheduled_tasks', 'operation_logs', 'processed_events',
-    'admin_invitations'
-  ];
-  -- 設定類：管理員可改，客服/唯讀只能看（客服需要看得到房型與價格才能回答客人）
-  config_tables text[] := ARRAY[
-    'room_types', 'room_pricing', 'room_extra_person_pricing', 'room_capacity_pricing', 'special_prices',
-    'whole_house_packages', 'whole_house_package_pricing', 'whole_house_package_rooms', 'whole_house_extra_person_rules',
-    'promotions', 'booking_date_ranges', 'knowledge_base_items',
-    'booking_flows', 'booking_flow_steps', 'message_variables',
-    'linen_items', 'room_type_linen_defaults', 'ota_channels',
-    'notification_recipient_groups', 'line_groups', 'line_group_members'
-  ];
-  -- 營運類：客服日常要異動的資料，唯讀角色只能看。
-  -- 注意 booking_rooms／booking_room_nights／booking_linen_usage 也在這裡：編輯訂單時
-  -- 房間與布巾用量是「先全刪再插入」重寫的（OrderManagement 的 saveLinen），
-  -- 把它們的 DELETE 收緊會讓客服連存檔都失敗。
-  operational_tables text[] := ARRAY[
-    'bookings', 'booking_rooms', 'booking_room_nights', 'booking_linen_usage',
-    'user_states', 'conversations', 'handover_logs',
-    'custom_message_templates', 'consumables', 'consumable_spaces'
-  ];
-  -- 刪除要另外收緊的表。DELETE 跟 INSERT/UPDATE 分開給：客服日常跑的是狀態機
-  -- （取消訂單是把 status 改成 cancelled），不是把紀錄移除。
-  --
-  -- 只有管理員能刪：訂單。刪掉會連帶 CASCADE 掉房間、房夜、布巾用量，
-  -- 而且是真的消失，不是取消。
-  delete_admin_only text[] := ARRAY['bookings'];
-  -- 只有主帳號能刪：客戶的身分與對話足跡。
-  -- 前端從來不刪這三張表（查證過：0 處），只有背景程式會動它們，
-  -- 而背景程式用 service role、本來就不受 RLS 管，所以收緊不影響任何現有功能。
-  -- 這條是為了讓「只有主帳號能清除客戶資料」真的成立——在此之前那只是
-  -- delete-customer-data function 裡的檢查，任何管理員直接打表格 API 就繞過去了。
-  delete_owner_only text[] := ARRAY['user_states', 'conversations', 'handover_logs'];
-  every_table text[];
-  delete_check text;
+  spec RECORD;
+  pol RECORD;
+  -- 把 'a.b,c.d' 轉成 (has_permission('a.b') OR has_permission('c.d'))
+  perm_expr TEXT;
 BEGIN
-  every_table := admin_only || config_tables || operational_tables
-                 || ARRAY['admin_profiles', 'mfa_login_attempts'];
-
-  FOREACH tbl IN ARRAY every_table LOOP
-    IF to_regclass('public.' || quote_ident(tbl)) IS NULL THEN
+  FOR spec IN
+    SELECT * FROM (VALUES
+      -- 表格,                              查看,                                              新增,                                   修改,                                                                                      刪除
+      -- 機密／系統控制
+      -- settings 與 line_channels 的列裡就有 API 金鑰／LINE 權杖，RLS 擋不了欄位：讀整列＝看得到密鑰。
+      -- 所以讀取門檻是「能改」或「能看密鑰」的權限，純 *.view 讀不到整列（設定頁因此需要 manage 才開得起來，見 registry 說明）。
+      ('settings',                          'system.manage,ai_setting.manage,integration.manage,ai_setting.secret.view,integration.secret.view', 'NONE', 'system.manage,ai_setting.manage,integration.manage', 'NONE'),
+      ('line_channels',                     'integration.manage,integration.secret.view',      'integration.manage',                   'integration.manage',                                                                       'integration.manage'),
+      ('scheduled_tasks',                   'automation.view',                                 'automation.manage',                    'automation.manage',                                                                        'automation.manage'),
+      -- 操作紀錄：任何帳號都能寫自己的異動（以前只有管理員能寫，客服的操作等於沒留痕），但只有稽核權限能讀
+      ('operation_logs',                    'audit.view,error_log.view',                       'ANY',                                  'NONE',                                                                                     'NONE'),
+      ('processed_events',                  'NONE',                                            'NONE',                                 'NONE',                                                                                     'NONE'),
+      ('admin_invitations',                 'account.view',                                    'account.invite',                       'account.invite',                                                                           'account.invite'),
+      -- 設定類：所有人可讀（客服要看得到房型與價格才能回答客人），改動看各自的權限
+      ('room_types',                        'ANY', 'inventory.manage,pricing.manage', 'inventory.manage,pricing.manage', 'inventory.manage'),
+      ('room_pricing',                      'ANY', 'pricing.manage', 'pricing.manage', 'pricing.manage'),
+      ('room_extra_person_pricing',         'ANY', 'pricing.manage', 'pricing.manage', 'pricing.manage'),
+      ('room_capacity_pricing',             'ANY', 'pricing.manage', 'pricing.manage', 'pricing.manage'),
+      ('special_prices',                    'ANY', 'pricing.manage', 'pricing.manage', 'pricing.manage'),
+      ('whole_house_packages',              'ANY', 'pricing.manage', 'pricing.manage', 'pricing.manage'),
+      ('whole_house_package_pricing',       'ANY', 'pricing.manage', 'pricing.manage', 'pricing.manage'),
+      ('whole_house_package_rooms',         'ANY', 'pricing.manage', 'pricing.manage', 'pricing.manage'),
+      ('whole_house_extra_person_rules',    'ANY', 'pricing.manage', 'pricing.manage', 'pricing.manage'),
+      ('promotions',                        'ANY', 'pricing.manage', 'pricing.manage', 'pricing.manage'),
+      ('booking_date_ranges',               'ANY', 'calendar.manage,pricing.manage', 'calendar.manage,pricing.manage', 'calendar.manage,pricing.manage'),
+      ('knowledge_base_items',              'ANY', 'knowledge.manage', 'knowledge.manage', 'knowledge.manage'),
+      ('booking_flows',                     'ANY', 'flow.manage', 'flow.manage', 'flow.manage'),
+      ('booking_flow_steps',                'ANY', 'flow.manage', 'flow.manage', 'flow.manage'),
+      ('message_variables',                 'ANY', 'system.manage', 'system.manage', 'system.manage'),
+      ('linen_items',                       'ANY', 'housekeeping.manage', 'housekeeping.manage', 'housekeeping.manage'),
+      ('room_type_linen_defaults',          'ANY', 'housekeeping.manage', 'housekeeping.manage', 'housekeeping.manage'),
+      ('ota_channels',                      'ANY', 'integration.manage', 'integration.manage', 'integration.manage'),
+      ('notification_recipient_groups',     'ANY', 'integration.manage', 'integration.manage', 'integration.manage'),
+      ('line_groups',                       'ANY', 'integration.manage', 'integration.manage', 'integration.manage'),
+      ('line_group_members',                'ANY', 'integration.manage', 'integration.manage', 'integration.manage'),
+      -- 營運類：依動作分開，取消／推進／退款都是 UPDATE，狀態機的細部規則在程式裡（授權 ≠ 業務規則，§67）
+      ('bookings',                          'booking.view', 'booking.create', 'booking.edit,booking.payment.verify,booking.cancel,booking.refund.process,booking.override_conflict', 'booking.delete'),
+      ('booking_rooms',                     'booking.view', 'booking.create,booking.edit', 'booking.create,booking.edit', 'booking.create,booking.edit'),
+      ('booking_room_nights',               'booking.view', 'booking.create,booking.edit', 'booking.create,booking.edit', 'booking.create,booking.edit'),
+      ('booking_linen_usage',               'booking.view', 'booking.create,booking.edit', 'booking.create,booking.edit', 'booking.create,booking.edit'),
+      ('user_states',                       'customer.view,service.view,marketing.view', 'customer.edit,service.handover', 'customer.edit,service.handover', 'OWNER'),
+      ('conversations',                     'service.view,customer.view', 'NONE', 'NONE', 'OWNER'),
+      ('handover_logs',                     'service.view,customer.view', 'service.handover', 'service.handover', 'OWNER'),
+      ('custom_message_templates',          'marketing.view', 'marketing.template.manage', 'marketing.template.manage', 'marketing.template.manage'),
+      ('consumables',                       'housekeeping.view', 'housekeeping.manage', 'housekeeping.manage', 'housekeeping.manage'),
+      ('consumable_spaces',                 'housekeeping.view', 'housekeeping.manage', 'housekeeping.manage', 'housekeeping.manage'),
+      -- 權限表本身：角色名稱與權限目錄不是機密（側欄、邀請對話框都要用），寫入一律走 Functions
+      ('roles',                             'ANY', 'NONE', 'NONE', 'NONE'),
+      ('permissions',                       'ANY', 'NONE', 'NONE', 'NONE'),
+      ('role_permissions',                  'ANY', 'NONE', 'NONE', 'NONE'),
+      ('user_roles',                        'account.view,role.view', 'NONE', 'NONE', 'NONE'),
+      ('role_permission_scopes',            'NONE', 'NONE', 'NONE', 'NONE'),
+      -- 帳號：讀自己那一列另外有政策（見下方）；新增／刪除只由 Functions 做
+      ('admin_profiles',                    'account.view', 'NONE', 'account.edit,role.assign', 'NONE'),
+      ('mfa_login_attempts',                'NONE', 'NONE', 'NONE', 'NONE')
+    ) AS t(tbl, sel, ins, upd, del)
+  LOOP
+    IF to_regclass('public.' || quote_ident(spec.tbl)) IS NULL THEN
       CONTINUE; -- 表格不存在就跳過，讓腳本在不同版本的資料庫上都能跑完
     END IF;
 
-    FOR pol IN SELECT policyname FROM pg_policies WHERE schemaname = 'public' AND tablename = tbl LOOP
-      EXECUTE format('DROP POLICY IF EXISTS %I ON public.%I', pol.policyname, tbl);
+    FOR pol IN SELECT policyname FROM pg_policies WHERE schemaname = 'public' AND tablename = spec.tbl LOOP
+      EXECUTE format('DROP POLICY IF EXISTS %I ON public.%I', pol.policyname, spec.tbl);
     END LOOP;
+    EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', spec.tbl);
 
-    EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', tbl);
-  END LOOP;
-
-  FOREACH tbl IN ARRAY admin_only LOOP
-    IF to_regclass('public.' || quote_ident(tbl)) IS NULL THEN CONTINUE; END IF;
-    EXECUTE format(
-      'CREATE POLICY "admin_full_access" ON public.%I FOR ALL USING (public.is_admin()) WITH CHECK (public.is_admin())', tbl);
-  END LOOP;
-
-  FOREACH tbl IN ARRAY config_tables LOOP
-    IF to_regclass('public.' || quote_ident(tbl)) IS NULL THEN CONTINUE; END IF;
-    EXECUTE format(
-      'CREATE POLICY "approved_can_read" ON public.%I FOR SELECT USING (public.can_view())', tbl);
-    EXECUTE format(
-      'CREATE POLICY "admin_can_write" ON public.%I FOR ALL USING (public.is_admin()) WITH CHECK (public.is_admin())', tbl);
-  END LOOP;
-
-  -- 營運表不能用 FOR ALL：permissive 政策之間是 OR 關係，只要留著一條涵蓋 DELETE 的
-  -- can_operate() 政策，下面依角色收緊的 DELETE 就完全失效。所以動作要逐個寫開。
-  FOREACH tbl IN ARRAY operational_tables LOOP
-    IF to_regclass('public.' || quote_ident(tbl)) IS NULL THEN CONTINUE; END IF;
-    EXECUTE format(
-      'CREATE POLICY "approved_can_read" ON public.%I FOR SELECT USING (public.can_view())', tbl);
-    EXECUTE format(
-      'CREATE POLICY "staff_can_insert" ON public.%I FOR INSERT WITH CHECK (public.can_operate())', tbl);
-    EXECUTE format(
-      'CREATE POLICY "staff_can_update" ON public.%I FOR UPDATE USING (public.can_operate()) WITH CHECK (public.can_operate())', tbl);
-
-    IF tbl = ANY(delete_owner_only) THEN
-      delete_check := 'public.is_owner()';
-    ELSIF tbl = ANY(delete_admin_only) THEN
-      delete_check := 'public.is_admin()';
-    ELSE
-      delete_check := 'public.can_operate()';
+    -- SELECT
+    IF spec.sel <> 'NONE' THEN
+      perm_expr := CASE spec.sel WHEN 'ANY' THEN 'public.can_view()' WHEN 'OWNER' THEN 'public.is_owner()'
+        ELSE '(' || (SELECT string_agg('public.has_permission(' || quote_literal(trim(c)) || ')', ' OR ') FROM unnest(string_to_array(spec.sel, ',')) AS c) || ')' END;
+      EXECUTE format('CREATE POLICY "perm_select" ON public.%I FOR SELECT USING (%s)', spec.tbl, perm_expr);
     END IF;
-    EXECUTE format(
-      'CREATE POLICY "delete_by_role" ON public.%I FOR DELETE USING (%s)', tbl, delete_check);
+    -- INSERT
+    IF spec.ins <> 'NONE' THEN
+      perm_expr := CASE spec.ins WHEN 'ANY' THEN 'public.can_view()' WHEN 'OWNER' THEN 'public.is_owner()'
+        ELSE '(' || (SELECT string_agg('public.has_permission(' || quote_literal(trim(c)) || ')', ' OR ') FROM unnest(string_to_array(spec.ins, ',')) AS c) || ')' END;
+      EXECUTE format('CREATE POLICY "perm_insert" ON public.%I FOR INSERT WITH CHECK (%s)', spec.tbl, perm_expr);
+    END IF;
+    -- UPDATE
+    IF spec.upd <> 'NONE' THEN
+      perm_expr := CASE spec.upd WHEN 'ANY' THEN 'public.can_view()' WHEN 'OWNER' THEN 'public.is_owner()'
+        ELSE '(' || (SELECT string_agg('public.has_permission(' || quote_literal(trim(c)) || ')', ' OR ') FROM unnest(string_to_array(spec.upd, ',')) AS c) || ')' END;
+      EXECUTE format('CREATE POLICY "perm_update" ON public.%I FOR UPDATE USING (%s) WITH CHECK (%s)', spec.tbl, perm_expr, perm_expr);
+    END IF;
+    -- DELETE
+    IF spec.del <> 'NONE' THEN
+      perm_expr := CASE spec.del WHEN 'ANY' THEN 'public.can_view()' WHEN 'OWNER' THEN 'public.is_owner()'
+        ELSE '(' || (SELECT string_agg('public.has_permission(' || quote_literal(trim(c)) || ')', ' OR ') FROM unnest(string_to_array(spec.del, ',')) AS c) || ')' END;
+      EXECUTE format('CREATE POLICY "perm_delete" ON public.%I FOR DELETE USING (%s)', spec.tbl, perm_expr);
+    END IF;
   END LOOP;
 END
 $rls$;
+
+-- admin_profiles 另外補「讀自己那一列」，而且刻意不要求 aal2：使用者剛通過 Google 驗證、還沒綁 2FA 時
+-- 是 aal1，前端必須讀得到自己的 status 才知道該把他導去綁定頁還是驗證頁。
+CREATE POLICY "read_own_profile" ON public.admin_profiles FOR SELECT USING (id = auth.uid());
+-- user_roles 也讓使用者讀自己的（角色頁「有效權限」與側欄顯示角色名用）
+CREATE POLICY "read_own_roles" ON public.user_roles FOR SELECT USING (user_id = auth.uid());
 
 -- ------------------------------------------------------------------
 -- 營運用設定的唯讀視圖。
@@ -1584,15 +2002,7 @@ CREATE OR REPLACE VIEW public.operational_settings AS
 REVOKE ALL ON public.operational_settings FROM anon;
 GRANT SELECT ON public.operational_settings TO authenticated;
 
--- admin_profiles 要單獨處理，而且「讀自己那一列」刻意不要求 aal2：
--- 使用者剛通過 Google 驗證、還沒綁 2FA 時是 aal1，前端必須讀得到自己的 status
--- 才知道該把他導去綁定頁還是驗證頁。如果這條也要求 aal2，會變成
--- 「要先過 2FA 才能知道自己需不需要過 2FA」的死結。
--- 這一列只包含自己的角色與狀態，不含任何業務資料，讀得到不構成風險。
-DROP POLICY IF EXISTS "read_own_profile" ON public.admin_profiles;
-CREATE POLICY "read_own_profile" ON public.admin_profiles FOR SELECT USING (id = auth.uid());
-DROP POLICY IF EXISTS "admin_manage_profiles" ON public.admin_profiles;
-CREATE POLICY "admin_manage_profiles" ON public.admin_profiles FOR ALL USING (public.is_admin()) WITH CHECK (public.is_admin());
+-- admin_profiles／user_roles 的政策由上面 9.8 的迴圈建立（含讀自己那一列）。
 
 -- mfa_login_attempts 只由後端以 service role 讀寫，前端完全不需要碰。
 -- 不建立任何政策＝除了 service role 之外誰都存取不到（RLS 預設拒絕）。
@@ -1609,11 +2019,11 @@ CREATE POLICY "Allow Public Select" ON storage.objects FOR SELECT TO public USIN
 -- 上傳／覆寫／刪除限管理員：知識庫內容會直接影響 AI 對客人的回答，屬於設定類而非日常營運，
 -- 跟 knowledge_base_items 資料表的權限分層保持一致（否則檔案這條路會變成繞過表格權限的破口）。
 DROP POLICY IF EXISTS "Allow Auth Insert" ON storage.objects;
-CREATE POLICY "Allow Auth Insert" ON storage.objects FOR INSERT TO authenticated WITH CHECK (bucket_id = 'knowledge_base' AND public.is_admin());
+CREATE POLICY "Allow Auth Insert" ON storage.objects FOR INSERT TO authenticated WITH CHECK (bucket_id = 'knowledge_base' AND public.has_permission('knowledge.manage'));
 DROP POLICY IF EXISTS "Allow Auth Update" ON storage.objects;
-CREATE POLICY "Allow Auth Update" ON storage.objects FOR UPDATE TO authenticated USING (bucket_id = 'knowledge_base' AND public.is_admin());
+CREATE POLICY "Allow Auth Update" ON storage.objects FOR UPDATE TO authenticated USING (bucket_id = 'knowledge_base' AND public.has_permission('knowledge.manage'));
 DROP POLICY IF EXISTS "Allow Auth Delete" ON storage.objects;
-CREATE POLICY "Allow Auth Delete" ON storage.objects FOR DELETE TO authenticated USING (bucket_id = 'knowledge_base' AND public.is_admin());
+CREATE POLICY "Allow Auth Delete" ON storage.objects FOR DELETE TO authenticated USING (bucket_id = 'knowledge_base' AND public.has_permission('knowledge.manage'));
 
 -- ========================================================================
 -- 12. 既有資料補正

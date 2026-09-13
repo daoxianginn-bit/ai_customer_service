@@ -1,7 +1,7 @@
 import { Handler } from '@netlify/functions';
 import { createClient } from '@supabase/supabase-js';
 import { withErrorLogging } from '../../src/lib/operationLog';
-import { requireRole } from '../../src/lib/requireRole';
+import { requirePermission } from '../../src/lib/requireRole';
 
 const supabaseAdmin = createClient(
   process.env.SUPABASE_URL || '',
@@ -12,7 +12,7 @@ const rawHandler: Handler = async (event) => {
   if (event.httpMethod !== 'GET') return { statusCode: 405, body: 'Method Not Allowed' };
 
   // 帳號清單會列出所有人的 Email，屬於管理員才該看到的資料
-  const guard = await requireRole(supabaseAdmin, event as any, ['admin']);
+  const guard = await requirePermission(supabaseAdmin, event as any, 'account.view');
   if ('error' in guard) return guard.error;
 
   const { data, error } = await supabaseAdmin.auth.admin.listUsers();
@@ -22,7 +22,7 @@ const rawHandler: Handler = async (event) => {
   // 前端就不用自己再打一次 Supabase 查 profile。
   const { data: profiles, error: profileError } = await supabaseAdmin
     .from('admin_profiles')
-    .select('id, role, status, display_name, approved_at');
+    .select('id, role, status, display_name, approved_at, mfa_enrolled_at');
   if (profileError) return { statusCode: 500, body: profileError.message };
 
   const profileById = new Map((profiles || []).map((p: any) => [p.id, p]));
@@ -41,6 +41,7 @@ const rawHandler: Handler = async (event) => {
       role: p?.role || 'staff',
       status: p?.status || 'invited',
       approved_at: p?.approved_at || null,
+      mfa_enrolled_at: p?.mfa_enrolled_at || null,
     };
   });
 

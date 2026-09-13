@@ -6,8 +6,6 @@ import {
 } from '@mui/material';
 import { useSnackbar } from 'notistack';
 import { ChevronLeft, ChevronRight, ListFilter, Pencil, Plus, RefreshCw, RotateCcw, Search, Trash2 } from 'lucide-react';
-import { useAuth } from '../../lib/AuthContext';
-import { canDeleteBookings } from '../../lib/permissions';
 import {
   BOOKING_STATUS_OPTIONS, SYSTEM_ONLY_STATUSES, FLOW_STEP_STATUSES, MANUAL_ACTION_FLOW_STATUSES, MANUAL_ACTION_STATUSES,
   bookingStatusLabel, nextFlowStatus,
@@ -79,9 +77,9 @@ export default function BookingListPage() {
   const { enqueueSnackbar } = useSnackbar();
   const confirm = useConfirm();
   const { isMobile, isWide } = useBreakpoint();
-  const { role } = useAuth();
-  const canDelete = canDeleteBookings(role);
+  const canDelete = usePermission('booking.delete');
   const canEdit = usePermission('booking.edit');
+  const canAdvance = usePermission('booking.payment.verify');
 
   const [params, setParams] = useSearchParams();
   const urlState = useMemo(() => readFilters(params), [params]);
@@ -294,7 +292,7 @@ export default function BookingListPage() {
     const next = nextFlowStatus(r.status);
     return (
       <>
-        {canEdit && next && (
+        {canAdvance && next && (
           <Button size="small" variant="text" onClick={() => setAdvanceTarget({ order: r, nextStatus: next })} sx={{ whiteSpace: 'nowrap' }}>
             → {bookingStatusLabel(next)}
           </Button>
