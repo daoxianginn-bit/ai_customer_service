@@ -1820,7 +1820,9 @@ SECURITY DEFINER
 SET search_path = public
 AS $bump_permission_version$
 BEGIN
-  UPDATE public.settings SET permission_version = permission_version + 1;
+  -- settings 只有一列，但 Supabase 的 API 連線開著 pg-safeupdate：沒有 WHERE 的 UPDATE 一律被擋
+  -- （「UPDATE requires a WHERE clause」），連觸發器裡的也一樣，所以一定要帶條件。
+  UPDATE public.settings SET permission_version = permission_version + 1 WHERE id IS NOT NULL;
   IF TG_TABLE_NAME = 'role_permissions' THEN
     UPDATE public.roles SET updated_at = now() WHERE id = COALESCE(NEW.role_id, OLD.role_id);
   END IF;
