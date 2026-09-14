@@ -160,6 +160,8 @@ export const REQUIRES_REMIT_LAST5_STATUS = 'reserved';
 
 // 選這個狀態時才能填寫「入住密碼」欄位（前端表單驗證），其餘狀態這個欄位鎖住不可編輯。
 export const REQUIRES_CHECKIN_PASSWORD_STATUS = 'awaiting_checkin';
+// 2026-09 訂單處理：入住中也要能改密碼（客人住到一半換密碼、或入住當天才設定），其餘狀態一律清空。
+export const CHECKIN_PASSWORD_STATUSES = ['awaiting_checkin', 'checked_in'];
 
 // 訂單管理頁「訂單流程狀態」進度列用的 9 步驟正常流程，依序前進；取消/待退款/已退款/待人工確認
 // 是例外流程，不在這個序列裡（flowStepIndex 對它們回傳 null，畫面上另外用例外樣式呈現，

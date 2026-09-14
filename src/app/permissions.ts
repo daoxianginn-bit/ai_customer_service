@@ -63,6 +63,7 @@ export const PERMISSION_CATALOG: readonly PermissionDef[] = [
   P('booking.refund.process', 'booking', '處理退款', '把待退款的訂單標記為已退款。會留下操作紀錄。', 'high', ['booking.view', 'booking.payment.view']),
   P('booking.override_conflict', 'booking', '處理撞期／候補', '清除 OTA 撞期旗標、決定系統攔下的撞期訂單怎麼走。', 'high', ['booking.view', 'conflict.view']),
   P('booking.history.view', 'booking', '查看訂單異動紀錄', '訂單詳情的操作紀錄時間軸（誰在何時改了什麼）。', 'low', ['booking.view']),
+  P('booking.notify', 'booking', '發送訂單通知', '訂單處理各關卡確認後，用範本推播 LINE 訊息給這筆訂單的客人。', 'medium', ['booking.view']),
   P('calendar.view', 'booking', '查看房況行事曆', '月曆與手機列表檢視。'),
   P('calendar.manage', 'booking', '設定旺季／連假', '維護行事曆上的旺季與連假日期。', 'medium', ['calendar.view']),
   P('conflict.view', 'booking', '查看待辦與候補／衝突', '待辦事項中心與候補／衝突頁。', 'low', ['booking.view']),
@@ -218,7 +219,7 @@ export const ROLE_TEMPLATES: readonly RoleTemplate[] = [
   {
     code: 'staff', name: '客服人員', description: '訂單、確認付款、房況、客服對話與客戶；價格與房型只能看，不能改系統設定。', isSystem: false,
     permissions: [...withDependencies([
-      'dashboard.view', 'booking.view', 'booking.create', 'booking.edit', 'booking.cancel', 'booking.payment.view', 'booking.payment.verify', 'booking.history.view',
+      'dashboard.view', 'booking.view', 'booking.create', 'booking.edit', 'booking.cancel', 'booking.payment.view', 'booking.payment.verify', 'booking.history.view', 'booking.notify',
       'calendar.view', 'conflict.view',
       'service.view', 'service.reply', 'service.handover', 'conversation.diagnostic',
       'customer.view', 'customer.edit', 'marketing.view', 'marketing.send', 'marketing.template.manage',
@@ -232,7 +233,7 @@ export const ROLE_TEMPLATES: readonly RoleTemplate[] = [
   },
   {
     code: 'accounting', name: '會計', description: '訂單查看、付款確認、退款處理、洗滌成本。', isSystem: false,
-    permissions: [...withDependencies(['dashboard.view', 'booking.view', 'booking.payment.view', 'booking.payment.verify', 'booking.refund.process', 'booking.history.view', 'customer.view', 'linen.cost.view'])],
+    permissions: [...withDependencies(['dashboard.view', 'booking.view', 'booking.payment.view', 'booking.payment.verify', 'booking.refund.process', 'booking.history.view', 'booking.notify', 'customer.view', 'linen.cost.view'])],
   },
   {
     code: 'marketing', name: '行銷人員', description: '客戶資料、訊息發送與範本、知識庫查看。', isSystem: false,

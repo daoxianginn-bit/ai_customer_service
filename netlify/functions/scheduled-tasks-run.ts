@@ -267,6 +267,26 @@ async function advanceToCheckedIn(config: Record<string, any>, settings: any): P
   return { ok: true, summary: `${data.length} 筆訂單已轉為入住中${laundry ? `；${laundry}` : ''}` };
 }
 
+/**
+ * 重發洗滌單（訂單處理頁的「重發洗滌單」）：客服在入住當天改了某筆訂單的布巾數量，
+ * 但 13:00 的排程已經把當天的洗滌單發出去了，洗滌廠手上是舊數字。這裡用同一份排程設定
+ * （範本＋收件人）把當天入住訂單重新加總再發一次，開頭加「【更新】」讓收件人知道要以這份為準。
+ * 不改任何訂單狀態。找不到設定好的排程（沒範本或沒收件人）就回報原因，不會靜默失敗。
+ */
+export async function resendLaundrySheet(dateIso: string): Promise<{ ok: boolean; summary: string }> {
+  const { data: settings } = await supabase.from('settings').select('*').single();
+  if (!settings) return { ok: false, summary: '讀取系統設定失敗' };
+  const { data: tasks } = await supabase.from('scheduled_tasks').select('config, is_active').eq('task_type', 'advance_to_checked_in').order('is_active', { ascending: false }).limit(1);
+  const config = tasks?.[0]?.config || {};
+  if (!readNoticeSetup(config)) return { ok: false, summary: '「待入住→入住中（含洗滌單）」排程還沒設定洗滌單內容或發送對象，無法重發' };
+  const { data, error } = await supabase.from('bookings').select('*').eq('checkin_date', dateIso).in('status', ['awaiting_checkin', 'checked_in']);
+  if (error) return { ok: false, summary: `查詢失敗：${error.message}` };
+  if (!data?.length) return { ok: false, summary: '這一天沒有入住的訂單，沒有洗滌單可重發' };
+  const template = String(config.notice_template ?? config.laundry_template ?? '');
+  const result = await sendLaundryNotice({ ...config, notice_template: `【更新】\n${template}` }, dateIso, data, settings);
+  return { ok: !!result && !result.includes('未發送'), summary: result || '未發送' };
+}
+
 // 洗滌單：把這批訂單用到的布巾品項數量加總，套進管理員自己編的範本，發到指定的 LINE 群組。
 //
 // 品項名稱優先用「洗滌單簡稱」（例如「床包(中)紅線」）——linen_items 的 category＋spec 是給成本

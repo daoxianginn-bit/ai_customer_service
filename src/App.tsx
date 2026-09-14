@@ -22,6 +22,7 @@ import Verify2FA from './pages/auth/Verify2FA';
 
 // 工作台
 import DashboardPage from './features/dashboard/DashboardPage';
+import ProcessPage from './features/process/ProcessPage';
 // 訂房營運
 import BookingListPage from './features/booking/BookingListPage';
 import BookingDetailPage from './features/booking/BookingDetailPage';
@@ -144,6 +145,7 @@ function AppRoutes() {
 
         {/* 營運 */}
         <Route path="/bookings" element={<ModuleShell />}>
+          <Route path="process" element={guarded(<ProcessPage />)} />
           <Route index element={guarded(<BookingListPage />)} />
           <Route path="calendar" element={guarded(<RoomCalendar />)} />
           <Route path="tasks" element={guarded(<TaskCenterPage />)} />

@@ -50,8 +50,9 @@ export const navigation: NavSection[] = [
     section: '營運',
     items: [
       {
-        key: 'bookings', label: '訂房營運', path: '/bookings', icon: ClipboardList, permission: 'booking.view',
+        key: 'bookings', label: '訂房營運', path: '/bookings/process', icon: ClipboardList, permission: 'booking.view',
         children: [
+          { label: '訂單處理', path: '/bookings/process', permission: 'booking.view', description: '輪到人動手的訂單：核對訂金、收尾款、退押金、退款、入住密碼；確認後直接通知客人' },
           { label: '訂單', path: '/bookings', permission: 'booking.view', description: '查看、搜尋及處理所有訂房' },
           { label: '房況行事曆', path: '/bookings/calendar', permission: 'calendar.view', description: '每個色塊是一筆訂單，點選可查看詳情' },
           { label: '待辦事項', path: '/bookings/tasks', permission: 'conflict.view', description: '所有需要人工處理的事項：核款、尾款、退款、押金、撞期、轉接' },

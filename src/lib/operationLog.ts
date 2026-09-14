@@ -65,6 +65,7 @@ export const LOG_FUNCTION_NAMES = [
   'flow-test',
   'knowledge-test',
   'roles-admin',
+  'booking-process',
 ];
 
 /** 系統自動異動時的固定異動者名稱。 */
