@@ -477,7 +477,7 @@ export default function FormulaSettings() {
                   <FormControlLabel value="sun_fri" control={<Radio size="small" />} label="日~五是平日，只有週六是小假日" />
                 </RadioGroup>
               </Box>
-              <Typography variant="caption" color="text.secondary">旺季／連假的日期區間，請到「行事曆」頁右上角「旺季/連假日期設定」調整。</Typography>
+              <Typography variant="caption" color="text.secondary">旺季／連假的日期區間，請到「行事曆」頁右上角「旺季/連假日期設定」調整；想讓某個節日「不看人數統一價」，也在那裡的「固定價格」欄填金額。</Typography>
             </Stack>
           }
         />

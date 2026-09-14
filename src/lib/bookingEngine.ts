@@ -128,6 +128,23 @@ export interface DateRange {
   start_date: string; // YYYY-MM-DD
   end_date: string; // YYYY-MM-DD
   label?: string;
+  /** 節日固定價：有值＝這段日期不看人數統一價，取代整段公式；null／undefined＝照公式 */
+  fixed_price?: number | null;
+}
+
+/**
+ * 節日固定價（不看人數統一價）：日期落在有填 fixed_price 的區間就回傳那個金額。
+ * 同一天命中多個有固定價的區間（例如手動加的跟匯入的重疊）時取天數最短的那一段——
+ * 範圍越窄代表設定得越精準，應該優先。沒命中回 null，呼叫端走原本的公式。
+ * 優先權低於特殊指定日期價格（getSpecialPrice）：特殊日期是逐筆指定的，比整段節日更明確。
+ */
+export function getFixedRangePrice(date: Date, dateRanges: DateRange[]): number | null {
+  const dateStr = toDateStr(date);
+  const hits = dateRanges.filter((r) => r.fixed_price != null && dateStr >= r.start_date && dateStr <= r.end_date);
+  if (!hits.length) return null;
+  const span = (r: DateRange) => (new Date(r.end_date).getTime() - new Date(r.start_date).getTime());
+  hits.sort((a, b) => span(a) - span(b));
+  return Number(hits[0].fixed_price);
 }
 
 export const TIER_WEEKDAY = '平日';
@@ -792,12 +809,16 @@ function dateSurchargeForTier(tier: string, s: DateSurcharge): number {
   return 0;
 }
 
+/** 這一晚的基礎價從哪來：special＝特殊指定日期價格、fixed_range＝節日固定價、formula＝公式 */
+export type NightlyPriceSource = 'special' | 'fixed_range' | 'formula';
+
 export interface UnifiedNightlyPrice {
   date: Date;
   tier: string;
   rawPrice: number;
   discountedPrice: number;
   layoutUsed: CapacityLayout;
+  priceSource: NightlyPriceSource;
 }
 
 export interface UnifiedQuoteInput {
@@ -833,7 +854,8 @@ export interface UnifiedMultiNightQuoteResult {
  * 統整報價：不分個別租房／包棟，所有人數都走這條路徑。人數低於 minGroupHeadcount 或
  * 超過目前房型庫存總容量、或庫存湊不出標準房型時，回傳 total=null，呼叫端要轉真人。
  * 客人指定的房型組合跟標準房型不同時，逐晚在標準價格上加計加開房費（命中特殊指定日期價格
- * 那一晚除外——特殊價格直接取代「標準價格＋加開房費＋日期加價」整段，不會再疊加加開房費）。
+ * 或節日固定價那一晚除外——這兩種都直接取代「標準價格＋加開房費＋日期加價」整段，不看人數、
+ * 不再疊加加開房費）。優先順序：特殊指定日期價格 > 節日固定價 > 公式。
  */
 export function computeUnifiedMultiNightQuote(input: UnifiedQuoteInput): UnifiedMultiNightQuoteResult {
   const totalCapacity = input.roomCapacities.reduce((s, c) => s + c.capacity * c.count, 0);
@@ -856,12 +878,16 @@ export function computeUnifiedMultiNightQuote(input: UnifiedQuoteInput): Unified
     const isFirstNight = i === 0;
 
     const special = getSpecialPrice(date, input.headcount, input.specialPrices || []);
-    const raw = special != null
-      ? special
+    const fixed = special == null ? getFixedRangePrice(date, input.dateRanges) : null;
+    const override = special ?? fixed;
+    const priceSource: NightlyPriceSource = special != null ? 'special' : fixed != null ? 'fixed_range' : 'formula';
+    const raw = override != null
+      ? override
       : standard.beds * input.bedBaseRate + (input.headcount === standard.beds ? input.fullOccupancyBonus : 0) + extraFee + dateSurchargeForTier(tier, input.dateSurcharge);
 
     let price = raw;
-    const skipDiscount = special != null && input.specialPriceStacksWithDiscounts === false;
+    // 特殊日期價格與節日固定價共用「要不要疊加折扣」的設定
+    const skipDiscount = override != null && input.specialPriceStacksWithDiscounts === false;
     if (!skipDiscount) {
       if (isFirstNight && input.promotion) {
         price = input.promotion.discount_type === 'amount'
@@ -872,7 +898,7 @@ export function computeUnifiedMultiNightQuote(input: UnifiedQuoteInput): Unified
       }
     }
 
-    nightly.push({ date, tier, rawPrice: raw, discountedPrice: price, layoutUsed: finalLayout });
+    nightly.push({ date, tier, rawPrice: raw, discountedPrice: price, layoutUsed: finalLayout, priceSource });
   }
 
   return {

@@ -166,7 +166,7 @@ export default function QuoteCalculator({ embedded = false }: { embedded?: boole
       checkInDate: new Date(`${quoteDate}T00:00:00`),
       nights: quoteNights,
       headcount: quoteHeadcount,
-      dateRanges: dateRanges.map((d) => ({ range_type: d.range_type, start_date: d.start_date, end_date: d.end_date })),
+      dateRanges: dateRanges.map((d) => ({ range_type: d.range_type, start_date: d.start_date, end_date: d.end_date, fixed_price: d.fixed_price == null ? null : Number(d.fixed_price) })),
       roomCapacities: roomCapacityCounts(roomTypes),
       capacityFees,
       bedBaseRate,
@@ -333,6 +333,8 @@ export default function QuoteCalculator({ embedded = false }: { embedded?: boole
                     <div key={i} className="flex justify-between gap-2">
                       <span>
                         {n.date.toLocaleDateString('zh-TW')}（{n.tier}）{i === 0 ? '　第一晚' : `　第${i + 1}晚`}
+                        {n.priceSource === 'fixed_range' && <span className="ml-1 inline-block px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 text-[11px]">節日固定價</span>}
+                        {n.priceSource === 'special' && <span className="ml-1 inline-block px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 text-[11px]">特殊日期價格</span>}
                         <span className="block text-xs text-gray-400">{nightDiscountLabel(i)}</span>
                         <span className="block text-xs text-gray-400">房型：{layoutLabel(n.layoutUsed)}</span>
                       </span>

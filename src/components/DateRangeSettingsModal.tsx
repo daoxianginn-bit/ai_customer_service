@@ -23,7 +23,7 @@ export default function DateRangeSettingsModal({ open, onClose, onSaved }: DateR
   const [peakSeasonWeekdayTier, setPeakSeasonWeekdayTier] = useState<'peak' | 'weekday'>('peak');
   const [dateRanges, setDateRanges] = useState<any[]>([]);
   const [pendingDeletes, setPendingDeletes] = useState<{ table: string; id: string }[]>([]);
-  const [newRange, setNewRange] = useState({ range_type: '旺季', start_date: '', end_date: '', label: '' });
+  const [newRange, setNewRange] = useState({ range_type: '旺季', start_date: '', end_date: '', label: '', fixed_price: '' });
   const [importYearInput, setImportYearInput] = useState(String(new Date().getFullYear()));
   const [importingHolidays, setImportingHolidays] = useState(false);
 
@@ -71,8 +71,9 @@ export default function DateRangeSettingsModal({ open, onClose, onSaved }: DateR
       alert('請填入起訖日期');
       return;
     }
-    setDateRanges([...dateRanges, { id: newId(), ...newRange }].sort((a, b) => a.start_date.localeCompare(b.start_date)));
-    setNewRange({ range_type: '旺季', start_date: '', end_date: '', label: '' });
+    const fixed = newRange.fixed_price === '' ? null : Number(newRange.fixed_price);
+    setDateRanges([...dateRanges, { id: newId(), range_type: newRange.range_type, start_date: newRange.start_date, end_date: newRange.end_date, label: newRange.label, fixed_price: fixed }].sort((a, b) => a.start_date.localeCompare(b.start_date)));
+    setNewRange({ range_type: '旺季', start_date: '', end_date: '', label: '', fixed_price: '' });
   };
 
   const updateDateRange = (id: string, field: string, value: any) => {
@@ -117,7 +118,7 @@ export default function DateRangeSettingsModal({ open, onClose, onSaved }: DateR
       const namedRuns = runs.filter((r) => r.labels.length > 0);
       const toAdd = namedRuns
         .filter((run) => !dateRanges.some((d) => d.range_type === '連假' && d.start_date === run.start && d.end_date === run.end))
-        .map((run) => ({ id: newId(), range_type: '連假', start_date: run.start, end_date: run.end, label: run.labels.join('、') }));
+        .map((run) => ({ id: newId(), range_type: '連假', start_date: run.start, end_date: run.end, label: run.labels.join('、'), fixed_price: null }));
 
       if (toAdd.length) {
         setDateRanges([...dateRanges, ...toAdd].sort((a, b) => a.start_date.localeCompare(b.start_date)));
@@ -144,7 +145,7 @@ export default function DateRangeSettingsModal({ open, onClose, onSaved }: DateR
       return;
     }
     setDateRanges(
-      [...dateRanges, { id: newId(), range_type: '旺季', start_date: start, end_date: end, label: `${yr}年暑假旺季` }].sort((a, b) =>
+      [...dateRanges, { id: newId(), range_type: '旺季', start_date: start, end_date: end, label: `${yr}年暑假旺季`, fixed_price: null }].sort((a, b) =>
         a.start_date.localeCompare(b.start_date)
       )
     );
@@ -164,6 +165,9 @@ export default function DateRangeSettingsModal({ open, onClose, onSaved }: DateR
           <Stack spacing={2.5}>
             <Typography variant="caption" color="text.secondary">
               優先順序：旺季 &gt; 連假 &gt; 一般日期依星期幾判斷，計價公式會依這裡設定的區間套用對應 tier 的日期加價。
+              <br />
+              <strong>固定價格</strong>：想讓某個節日「不看人數統一價」，就在那一列填金額——這段日期每晚直接用這個金額，不算床位數、不加日期加價與加開房費；
+              留空＝照公式。要不要再疊加促銷／連住折扣，跟特殊日期價格共用「計價公式設定」裡的同一個開關；同一天若也有特殊日期價格，以特殊日期價格為準。
             </Typography>
 
             <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
@@ -211,6 +215,7 @@ export default function DateRangeSettingsModal({ open, onClose, onSaved }: DateR
                 <TextField type="date" size="small" value={newRange.start_date} onChange={(e) => setNewRange({ ...newRange, start_date: e.target.value })} InputLabelProps={{ shrink: true }} />
                 <TextField type="date" size="small" value={newRange.end_date} onChange={(e) => setNewRange({ ...newRange, end_date: e.target.value })} InputLabelProps={{ shrink: true }} />
                 <TextField size="small" sx={{ flex: 1, minWidth: 140 }} value={newRange.label} onChange={(e) => setNewRange({ ...newRange, label: e.target.value })} placeholder="備註，例如：端午連假" />
+                <TextField type="number" size="small" sx={{ width: 130 }} label="固定價格" value={newRange.fixed_price} onChange={(e) => setNewRange({ ...newRange, fixed_price: e.target.value })} placeholder="照公式" InputLabelProps={{ shrink: true }} inputProps={{ min: 0 }} />
                 <Button variant="contained" size="small" startIcon={<Plus size={16} />} onClick={addDateRange}>新增</Button>
               </Stack>
             </Paper>
@@ -223,6 +228,7 @@ export default function DateRangeSettingsModal({ open, onClose, onSaved }: DateR
                     <TableCell>起始日期</TableCell>
                     <TableCell>結束日期</TableCell>
                     <TableCell>備註</TableCell>
+                    <TableCell>固定價格（不看人數）</TableCell>
                     <TableCell />
                   </TableRow>
                 </TableHead>
@@ -239,13 +245,22 @@ export default function DateRangeSettingsModal({ open, onClose, onSaved }: DateR
                       <TableCell><TextField type="date" size="small" variant="standard" value={d.end_date} onChange={(e) => updateDateRange(d.id, 'end_date', e.target.value)} /></TableCell>
                       <TableCell><TextField size="small" variant="standard" value={d.label} onChange={(e) => updateDateRange(d.id, 'label', e.target.value)} placeholder="例如：端午連假" /></TableCell>
                       <TableCell>
+                        <TextField
+                          type="number" size="small" variant="standard" sx={{ width: 110 }}
+                          value={d.fixed_price ?? ''}
+                          onChange={(e) => updateDateRange(d.id, 'fixed_price', e.target.value === '' ? null : Number(e.target.value))}
+                          placeholder="照公式"
+                          inputProps={{ min: 0 }}
+                        />
+                      </TableCell>
+                      <TableCell>
                         <IconButton size="small" color="error" onClick={() => deleteDateRange(d.id)}><Trash2 size={16} /></IconButton>
                       </TableCell>
                     </TableRow>
                   ))}
                   {dateRanges.length === 0 && (
                     <TableRow>
-                      <TableCell colSpan={5} align="center" sx={{ color: 'text.disabled', py: 3 }}>尚未設定任何日期區間</TableCell>
+                      <TableCell colSpan={6} align="center" sx={{ color: 'text.disabled', py: 3 }}>尚未設定任何日期區間</TableCell>
                     </TableRow>
                   )}
                 </TableBody>

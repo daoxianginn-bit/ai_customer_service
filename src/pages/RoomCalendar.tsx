@@ -258,7 +258,7 @@ export default function RoomCalendar() {
     const special = specialRangesForDate(iso);
     if (special.length === 0) return <Typography variant="caption">{label}</Typography>;
     const isHoliday = special.some((s) => s.range_type === '連假');
-    const tooltipText = special.map((s) => `${s.range_type}${s.label ? `：${s.label}` : ''}`).join('、');
+    const tooltipText = special.map((s) => `${s.range_type}${s.label ? `：${s.label}` : ''}${s.fixed_price != null ? `（固定價 NT${Number(s.fixed_price).toLocaleString()}）` : ''}`).join('、');
     return (
       <Tooltip title={tooltipText} arrow placement="top">
         <Stack alignItems="center" spacing={0.25} sx={{ cursor: 'help' }}>

@@ -1544,7 +1544,7 @@ async function fetchBookingData() {
   ]);
   return {
     roomTypes: rt.data || [],
-    dateRanges: (dr.data || []).map((d: any) => ({ range_type: d.range_type, start_date: d.start_date, end_date: d.end_date })),
+    dateRanges: (dr.data || []).map((d: any) => ({ range_type: d.range_type, start_date: d.start_date, end_date: d.end_date, fixed_price: d.fixed_price == null ? null : Number(d.fixed_price) })),
     promotions: promo.data || [],
     specialPrices: (sp.data || []).map((s: any) => ({ start_date: s.start_date, end_date: s.end_date, occupancy: s.occupancy, price: s.price })),
     capacityFees: (cp.data || []).map((c: any) => ({ capacity: c.capacity, extra_room_fee: c.extra_room_fee })),

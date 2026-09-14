@@ -259,6 +259,10 @@ CREATE TABLE IF NOT EXISTS public.booking_date_ranges (
     label TEXT DEFAULT '',
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
 );
+-- 節日固定價：有填就代表這段日期「不看人數統一價」——每晚直接用這個金額，不算床位×基礎價、
+-- 不加日期加價、也不加加開房費（跟特殊指定日期價格同一套邏輯；兩者同時命中時以特殊日期價格為準）。
+-- NULL＝照公式計價（原本的行為）。要不要再疊加促銷／連住折扣，沿用 settings.special_price_stacks_with_discounts。
+ALTER TABLE public.booking_date_ranges ADD COLUMN IF NOT EXISTS fixed_price NUMERIC;
 
 -- 訂房相關的 settings 欄位（既有專案升級用；新專案 CREATE TABLE 時不含這些，靠這幾行 ALTER 補齊）
 ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS booking_whole_house_enabled BOOLEAN DEFAULT true;
