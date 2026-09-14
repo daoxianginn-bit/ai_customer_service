@@ -69,7 +69,8 @@ t('effectivePermissions：停用角色排除、其餘聯集', (() => {
 t('grantableBy：主帳號全部；一般帳號只有自己有的', grantableBy(new Set(), true).size === PERMISSION_CATALOG.length && grantableBy(new Set(['booking.view', 'nope']), false).size === 1);
 
 // ---- 路由守衛
-t('canAccessRoute：有 role.view 才能進 /admin/roles 與 /admin/roles/:id', canAccessRoute(new Set(['role.view']), '/admin/roles') && canAccessRoute(new Set(['role.view']), '/admin/roles/abc') && !canAccessRoute(new Set(['system.view']), '/admin/roles/abc'));
+t('canAccessRoute：有 role.view 才能進 /access/roles 與 /access/roles/:id（有 account.view 也不行）', canAccessRoute(new Set(['role.view']), '/access/roles') && canAccessRoute(new Set(['role.view']), '/access/roles/abc') && !canAccessRoute(new Set(['account.view']), '/access/roles/abc'));
+t('canAccessRoute：拆出去的入口各自的權限（參數 system.view、操作紀錄 audit.view、錯誤 error_log.view）', canAccessRoute(new Set(['system.view']), '/parameters') && canAccessRoute(new Set(['audit.view']), '/audit') && canAccessRoute(new Set(['error_log.view']), '/errors') && !canAccessRoute(new Set(['audit.view']), '/errors'));
 t('canAccessRoute：沒登記的路徑 default deny，只有 system.manage 能進', !canAccessRoute(new Set(['booking.view']), '/nowhere') && canAccessRoute(new Set(['system.manage']), '/nowhere'));
 t('canAccessRoute：/bookings/:id 用 booking.view', canAccessRoute(new Set(['booking.view']), '/bookings/123') && !canAccessRoute(new Set(['calendar.view']), '/bookings/123'));
 t('defaultRouteFor：沒有工作台就落到第一個進得去的入口', defaultRouteFor(new Set(['dashboard.view'])) === '/' && defaultRouteFor(new Set(['housekeeping.view'])).startsWith('/housekeeping'));

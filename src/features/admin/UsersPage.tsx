@@ -146,7 +146,7 @@ export default function UsersPage() {
           {!loading && visible.length === 0 && <ResultState status="empty" title={users.length ? '沒有符合條件的帳號' : '尚無任何帳號'} description="" backTo={false} />}
           {!loading && visible.map((u) => (
             <Card key={u.id} variant="outlined">
-              <CardActionArea onClick={() => navigate(`/admin/accounts/${u.id}`)}>
+              <CardActionArea onClick={() => navigate(`/access/users/${u.id}`)}>
                 <CardContent sx={{ p: 1.5, '&:last-child': { pb: 1.5 } }}>
                   <Stack direction="row" justifyContent="space-between" alignItems="flex-start" spacing={1}>
                     {nameCell(u)}
@@ -167,7 +167,7 @@ export default function UsersPage() {
         <DataTableMui
           columns={columns} rows={visible} rowKey={(u) => u.id} loading={loading}
           emptyMessage={users.length ? '沒有符合條件的帳號' : '尚無任何帳號'}
-          onRowClick={(u) => navigate(`/admin/accounts/${u.id}`)}
+          onRowClick={(u) => navigate(`/access/users/${u.id}`)}
           rowActions={menuButton}
         />
       )}

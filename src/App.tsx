@@ -65,9 +65,9 @@ import UserDetailPage from './features/admin/UserDetailPage';
 import RolesPage from './features/admin/RolesPage';
 import RoleEditorPage from './features/admin/RoleEditorPage';
 import SecuritySettings from './pages/admin/SecuritySettings';
-import MessageVariables from './pages/MessageVariables';
-import OperationLogs from './pages/OperationLogs';
-import ErrorLogs from './pages/admin/ErrorLogs';
+// 帳號與權限／參數設定／紀錄：2026-09 從系統管理拆出來的獨立入口
+import ParametersPage from './features/parameters/ParametersPage';
+import LogsPage from './features/logs/LogsPage';
 
 const envMissing = !import.meta.env.VITE_SUPABASE_URL || import.meta.env.VITE_SUPABASE_URL.includes('placeholder');
 
@@ -200,16 +200,18 @@ function AppRoutes() {
           <Route path="property" element={guarded(<PropertySettings />)} />
           <Route path="ai" element={guarded(<AiEngineSettings />)} />
           <Route path="booking-rules" element={guarded(<BookingRulesSettings />)} />
-          <Route path="accounts" element={guarded(<UsersPage />)} />
-          <Route path="accounts/:id" element={guarded(<UserDetailPage />)} />
+          <Route path="security" element={guarded(<SecuritySettings />)} />
+        </Route>
+        <Route path="/access" element={<ModuleShell />}>
+          <Route path="users" element={guarded(<UsersPage />)} />
+          <Route path="users/:id" element={guarded(<UserDetailPage />)} />
           <Route path="roles" element={guarded(<RolesPage />)} />
           <Route path="roles/new" element={guarded(<RoleEditorPage />)} />
           <Route path="roles/:id" element={guarded(<RoleEditorPage />)} />
-          <Route path="security" element={guarded(<SecuritySettings />)} />
-          <Route path="message-variables" element={guarded(<MessageVariables />)} />
-          <Route path="audit" element={guarded(<OperationLogs />)} />
-          <Route path="errors" element={guarded(<ErrorLogs />)} />
         </Route>
+        <Route path="/parameters" element={guarded(<ParametersPage />)} />
+        <Route path="/audit" element={guarded(<LogsPage />)} />
+        <Route path="/errors" element={guarded(<LogsPage preset={{ level: 'error' }} />)} />
 
         {/* 舊網址與模組入口轉址（§160）：書籤、圖文選單裡的連結不會壞 */}
         {Object.entries(LEGACY_REDIRECTS).map(([from, to]) => (

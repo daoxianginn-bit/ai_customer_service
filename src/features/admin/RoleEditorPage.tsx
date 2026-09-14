@@ -21,8 +21,8 @@ import { fetchGrantable, fetchRbacLogs, fetchRoleUsers, fetchRoles, rolesAdmin, 
 
 // ========================================================================
 // 角色編輯器（權限管理 V2 §16–26、§55）。
-//   /admin/roles/new  三步驟精靈：基本資料（可從範本或既有角色複製）→ 選擇權限 → 確認建立
-//   /admin/roles/:id  頁籤：權限（矩陣＋摘要＋底部儲存列）／使用者／變更紀錄
+//   /access/roles/new  三步驟精靈：基本資料（可從範本或既有角色複製）→ 選擇權限 → 確認建立
+//   /access/roles/:id  頁籤：權限（矩陣＋摘要＋底部儲存列）／使用者／變更紀錄
 // 儲存前會列出 新增／移除 的差異；有高風險權限或角色已有使用者時再確認一次（§24）。
 // 帶 expected_version 做樂觀鎖：別人先改過就提示重新載入，不會蓋掉對方的修改（§55）。
 // ========================================================================
@@ -222,7 +222,7 @@ export default function RoleEditorPage() {
       });
       enqueueSnackbar(isNew ? `已建立角色「${name.trim()}」` : '角色已儲存', { variant: 'success' });
       refreshPermissions();
-      if (isNew) { setSelected(new Set()); setName(''); setDescription(''); navigate(`/admin/roles/${res.role.id}`, { replace: true }); return; }
+      if (isNew) { setSelected(new Set()); setName(''); setDescription(''); navigate(`/access/roles/${res.role.id}`, { replace: true }); return; }
       setLogs(null);
       await load();
     } catch (e: any) {
@@ -268,18 +268,18 @@ export default function RoleEditorPage() {
     try {
       await rolesAdmin('delete_role', { id: role.id });
       enqueueSnackbar(`已刪除「${role.name}」`, { variant: 'success' });
-      navigate('/admin/roles', { replace: true });
+      navigate('/access/roles', { replace: true });
     } catch (e: any) { enqueueSnackbar(e.message || '刪除失敗', { variant: 'error' }); }
   };
 
   const deleteBlockReason = role ? (role.is_system ? '系統角色不可刪除' : role.user_count > 0 ? `目前有 ${role.user_count} 位使用者，請先改指派或停用` : null) : null;
 
   const backLink = (
-    <Button component={RouterLink} to="/admin/roles" size="small" color="inherit" startIcon={<ChevronLeft size={16} />} sx={{ mb: 1, ml: -1 }}>角色列表</Button>
+    <Button component={RouterLink} to="/access/roles" size="small" color="inherit" startIcon={<ChevronLeft size={16} />} sx={{ mb: 1, ml: -1 }}>角色列表</Button>
   );
 
-  if (loadError === 'notfound') return <Box>{backLink}<ResultState status={404} description="找不到這個角色，可能已被刪除。" backTo="/admin/roles" /></Box>;
-  if (loadError) return <Box>{backLink}<ResultState status={500} description={loadError} onRetry={load} backTo="/admin/roles" /></Box>;
+  if (loadError === 'notfound') return <Box>{backLink}<ResultState status={404} description="找不到這個角色，可能已被刪除。" backTo="/access/roles" /></Box>;
+  if (loadError) return <Box>{backLink}<ResultState status={500} description={loadError} onRetry={load} backTo="/access/roles" /></Box>;
   if (loading) return <Box>{backLink}<Skeleton width={240} height={36} /><Skeleton variant="rounded" height={320} sx={{ mt: 2 }} /></Box>;
 
   const basicFields = (
@@ -291,7 +291,7 @@ export default function RoleEditorPage() {
 
   // ---------------- 新增精靈 ----------------
   if (isNew) {
-    if (!canManage) return <Box>{backLink}<ResultState status={403} backTo="/admin/roles" /></Box>;
+    if (!canManage) return <Box>{backLink}<ResultState status={403} backTo="/access/roles" /></Box>;
     const steps = ['基本資料', '選擇權限', '確認'];
     const canNext = step === 0 ? !!name.trim() && !nameError : true;
     const next = () => { if (step === 0) applySource(); setStep((s) => Math.min(s + 1, 2)); };
@@ -414,13 +414,13 @@ export default function RoleEditorPage() {
   const usersTab = users === null
     ? <Stack spacing={1}>{[0, 1].map((i) => <Skeleton key={i} variant="rounded" height={56} />)}</Stack>
     : users.length === 0
-      ? <ResultState status="empty" title="還沒有人擁有這個角色" description="到「使用者」頁指派，或在邀請同事時直接選這個角色。" backTo={false} action={<Button component={RouterLink} to="/admin/accounts" variant="outlined">前往使用者</Button>} />
+      ? <ResultState status="empty" title="還沒有人擁有這個角色" description="到「使用者」頁指派，或在邀請同事時直接選這個角色。" backTo={false} action={<Button component={RouterLink} to="/access/users" variant="outlined">前往使用者</Button>} />
       : (
         <List disablePadding>
           {users.map((u) => (
             <ListItem key={u.id} divider sx={{ px: 0 }} secondaryAction={<Chip label={STATUS_LABELS[u.status]} size="small" />}>
               <ListItemText
-                primary={<Link component={RouterLink} to={`/admin/accounts/${u.id}`} underline="hover">{u.display_name || u.email}</Link>}
+                primary={<Link component={RouterLink} to={`/access/users/${u.id}`} underline="hover">{u.display_name || u.email}</Link>}
                 secondary={u.email}
               />
             </ListItem>

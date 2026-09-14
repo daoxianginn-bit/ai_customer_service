@@ -10,7 +10,7 @@
 
 import type { LucideIcon } from 'lucide-react';
 import {
-  LayoutDashboard, ClipboardList, Headphones, Users, Shirt, DoorOpen, Coins, Plug, Zap, Settings,
+  LayoutDashboard, ClipboardList, Headphones, Users, Shirt, DoorOpen, Coins, Plug, Zap, Settings, ShieldCheck, SlidersHorizontal, ScrollText, AlertTriangle,
 } from 'lucide-react';
 import type { Permission } from './permissions';
 
@@ -131,20 +131,27 @@ export const navigation: NavSection[] = [
   {
     section: '管理',
     items: [
+      // 系統管理只留「設定民宿怎麼運作」的頁面；帳號權限、參數、紀錄各自獨立成入口，
+      // 九個頁籤擠在一條捲動列裡找不到東西（使用者反映太擁擠）。
       {
         key: 'admin', label: '系統管理', path: '/admin/property', icon: Settings, permission: 'system.view',
         children: [
           { label: '民宿基本資料', path: '/admin/property', permission: 'system.view', description: '民宿名稱、客服 LINE、禮金內容' },
           { label: 'AI 引擎', path: '/admin/ai', permission: 'ai_setting.view', description: 'AI 供應商、模型、金鑰與系統指令' },
           { label: '訂房規則', path: '/admin/booking-rules', permission: 'system.view', description: '訂金、押金、匯款期限、包棟開放' },
-          { label: '使用者', path: '/admin/accounts', permission: 'account.view', description: '邀請同事、指派角色、停權與重置 2FA' },
-          { label: '角色與權限', path: '/admin/roles', permission: 'role.view', description: '自訂角色、勾選每個角色可以做的事' },
           { label: '安全性', path: '/admin/security', permission: 'system.view', description: '登入政策、主帳號、對話紀錄保留' },
-          { label: '進階設定', path: '/admin/message-variables', permission: 'system.view', description: '訊息變數從哪個欄位取值' },
-          { label: '操作紀錄', path: '/admin/audit', permission: 'audit.view', description: '誰在何時把什麼從什麼改成什麼' },
-          { label: '錯誤紀錄', path: '/admin/errors', permission: 'error_log.view', description: '系統發生過的錯誤' },
         ],
       },
+      {
+        key: 'access', label: '帳號與權限', path: '/access/users', icon: ShieldCheck, permission: 'account.view',
+        children: [
+          { label: '使用者', path: '/access/users', permission: 'account.view', description: '邀請同事、指派角色、停權與重置 2FA' },
+          { label: '角色與權限', path: '/access/roles', permission: 'role.view', description: '自訂角色、勾選每個角色可以做的事' },
+        ],
+      },
+      { key: 'parameters', label: '參數設定', path: '/parameters', icon: SlidersHorizontal, permission: 'system.view', description: '訊息範本裡的 [變數] 要從訂單、客戶或民宿設定的哪個欄位取值' },
+      { key: 'audit', label: '操作紀錄', path: '/audit', icon: ScrollText, permission: 'audit.view', description: '誰在什麼時候、把什麼從什麼改成什麼' },
+      { key: 'errors', label: '錯誤紀錄', path: '/errors', icon: AlertTriangle, permission: 'error_log.view', description: 'AI、LINE、OTA 同步、行事曆、排程與後端 API 發生過的錯誤' },
     ],
   },
 ];
@@ -209,7 +216,7 @@ export const LEGACY_REDIRECTS: Record<string, string> = {
   '/ai-service-center': '/service',
   '/service/conversations': '/service',
   '/standard-messages': '/service/flows',
-  '/message-variables': '/admin/message-variables',
+  '/message-variables': '/parameters',
   '/knowledge-base': '/service/knowledge',
   '/broadcast': '/marketing/send',
   '/linens': '/housekeeping/linens',
@@ -220,8 +227,15 @@ export const LEGACY_REDIRECTS: Record<string, string> = {
   '/handover-rules': '/service/rules',
   '/room-spaces': '/inventory/rooms',
   '/scheduled-tasks': '/automation/rules',
-  '/accounts': '/admin/accounts',
-  '/operation-logs': '/admin/audit',
+  '/accounts': '/access/users',
+  '/operation-logs': '/audit',
+  // 2026-09 從系統管理拆出去的頁面
+  '/admin/accounts': '/access/users',
+  '/admin/roles': '/access/roles',
+  '/admin/message-variables': '/parameters',
+  '/admin/audit': '/audit',
+  '/admin/errors': '/errors',
+  '/access': '/access/users',
   // 模組入口沒有自己內容的，導到第一個頁籤
   '/inventory': '/inventory/rooms',
   '/integrations': '/integrations/line',

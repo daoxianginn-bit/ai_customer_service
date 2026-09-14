@@ -87,10 +87,10 @@ export default function UserDetailPage() {
     return sources;
   }, [user, roles, primary.primaryAdminId]);
 
-  const backLink = <Button component={RouterLink} to="/admin/accounts" size="small" color="inherit" startIcon={<ChevronLeft size={16} />} sx={{ mb: 1, ml: -1 }}>使用者列表</Button>;
+  const backLink = <Button component={RouterLink} to="/access/users" size="small" color="inherit" startIcon={<ChevronLeft size={16} />} sx={{ mb: 1, ml: -1 }}>使用者列表</Button>;
 
-  if (error === 'notfound') return <Box>{backLink}<ResultState status={404} description="找不到這個使用者，可能已被移除。" backTo="/admin/accounts" /></Box>;
-  if (error) return <Box>{backLink}<ResultState status={500} description={error} onRetry={load} backTo="/admin/accounts" /></Box>;
+  if (error === 'notfound') return <Box>{backLink}<ResultState status={404} description="找不到這個使用者，可能已被移除。" backTo="/access/users" /></Box>;
+  if (error) return <Box>{backLink}<ResultState status={500} description={error} onRetry={load} backTo="/access/users" /></Box>;
   if (loading || !user) return <Box>{backLink}<Skeleton width={240} height={36} /><Skeleton variant="rounded" height={240} sx={{ mt: 2 }} /></Box>;
 
   const assignReason = actions.assignBlockReason(user);
@@ -159,7 +159,7 @@ export default function UserDetailPage() {
         <Typography variant="subtitle2" color="error.main" gutterBottom>永久移除</Typography>
         <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>帳號會被永久刪除，無法復原。如果只是暫時不讓對方使用，請改用停權。</Typography>
         <Tooltip title={deleteReason || ''}><span>
-          <Button variant="outlined" color="error" startIcon={<Trash2 size={16} />} disabled={!!deleteReason} onClick={async () => { if (await actions.remove(user)) navigate('/admin/accounts', { replace: true }); }}>永久移除帳號</Button>
+          <Button variant="outlined" color="error" startIcon={<Trash2 size={16} />} disabled={!!deleteReason} onClick={async () => { if (await actions.remove(user)) navigate('/access/users', { replace: true }); }}>永久移除帳號</Button>
         </span></Tooltip>
       </CardContent></Card>
     </Stack>

@@ -5,13 +5,12 @@ import {
   TextField, Tooltip, Typography,
 } from '@mui/material';
 import { useSnackbar } from 'notistack';
-import { Eye, MoreVertical, Pencil, Plus, Power, Search, Trash2 } from 'lucide-react';
+import { Eye, MoreVertical, Pencil, Plus, Power, Search, Trash2, Users } from 'lucide-react';
 import { usePermissions } from '../../app/PermissionContext';
 import { useBreakpoint } from '../../app/useBreakpoint';
 import { formatRelative } from '../../lib/format';
 import PageHeaderV2 from '../../components/ui-mui/PageHeaderV2';
 import ResultState from '../../components/ui-mui/ResultState';
-import DataTableMui, { type Column } from '../../components/ui-mui/DataTableMui';
 import { useConfirm } from '../../components/ui-mui/ConfirmDialogProvider';
 import { fetchRoles, rolesAdmin, type RoleRecord } from './rbacQueries';
 import { riskCounts } from './PermissionMatrix';
@@ -109,37 +108,11 @@ export default function RolesPage() {
     </Stack>
   );
 
-  const riskSummary = (r: RoleRecord) => {
-    const rc = riskCounts(r.permission_codes);
-    return (
-      <Stack direction="row" spacing={0.5} alignItems="center" flexWrap="wrap" useFlexGap>
-        <Typography variant="body2">{rc.total} 項</Typography>
-        {rc.high > 0 && <Chip label={`高風險 ${rc.high}`} size="small" variant="outlined" color="error" sx={{ height: 20, fontSize: 11 }} />}
-        {rc.medium > 0 && <Chip label={`敏感 ${rc.medium}`} size="small" variant="outlined" color="warning" sx={{ height: 20, fontSize: 11 }} />}
-      </Stack>
-    );
-  };
-
   const actionsMenuButton = (r: RoleRecord) => (
     <IconButton size="small" onClick={(e) => { e.stopPropagation(); setMenu({ el: e.currentTarget, role: r }); }} disabled={busyId === r.id} aria-label="更多操作">
       <MoreVertical size={16} />
     </IconButton>
   );
-
-  const columns: Column<RoleRecord>[] = [
-    {
-      key: 'name', header: '角色',
-      render: (r) => (
-        <Box sx={{ minWidth: 0 }}>
-          <Stack direction="row" spacing={1} alignItems="center"><Typography variant="body2" fontWeight={600}>{r.name}</Typography>{chips(r)}</Stack>
-          {r.description && <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>{r.description}</Typography>}
-        </Box>
-      ),
-    },
-    { key: 'permissions', header: '權限', width: 220, render: riskSummary },
-    { key: 'users', header: '使用者', width: 100, align: 'right', render: (r) => <Typography variant="body2">{r.user_count}</Typography> },
-    { key: 'updated_at', header: '最後更新', width: 140, nowrap: true, render: (r) => <Typography variant="body2" color="text.secondary">{formatRelative(r.updated_at)}</Typography> },
-  ];
 
   if (error) {
     return (<Box><PageHeaderV2 /><ResultState status={500} description={error} onRetry={load} backTo={false} /></Box>);
@@ -148,7 +121,7 @@ export default function RolesPage() {
   return (
     <Box>
       <PageHeaderV2
-        action={canManage ? <Button variant="contained" startIcon={<Plus size={16} />} onClick={() => navigate('/admin/roles/new')}>新增角色</Button> : undefined}
+        action={canManage ? <Button variant="contained" startIcon={<Plus size={16} />} onClick={() => navigate('/access/roles/new')}>新增角色</Button> : undefined}
       />
       <LegacyDbAlert />
 
@@ -161,43 +134,46 @@ export default function RolesPage() {
         <FormControlLabel control={<Switch size="small" checked={showInactive} onChange={(e) => setShowInactive(e.target.checked)} />} label={<Typography variant="body2">顯示已停用</Typography>} />
       </Stack>
 
-      {isMobile ? (
-        <Stack spacing={1.5}>
-          {loading && [0, 1, 2].map((i) => <Skeleton key={i} variant="rounded" height={88} />)}
-          {!loading && visible.length === 0 && <ResultState status="empty" title="沒有角色" description={rows.length ? '沒有符合條件的角色' : '還沒有任何角色'} backTo={false} />}
-          {!loading && visible.map((r) => (
-            <Card key={r.id} variant="outlined">
-              <CardActionArea onClick={() => navigate(`/admin/roles/${r.id}`)}>
-                <CardContent sx={{ p: 1.5, '&:last-child': { pb: 1.5 } }}>
+      {/* 卡片格：一張卡就是一個角色，名稱、說明、權限數與風險、使用者數一眼看完；不用表格擠成一列 */}
+      <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: 'repeat(2, minmax(0, 1fr))', xl: 'repeat(3, minmax(0, 1fr))' }, gap: 2 }}>
+        {loading && [0, 1, 2, 3, 4, 5].map((i) => <Skeleton key={i} variant="rounded" height={150} />)}
+        {!loading && visible.length === 0 && (
+          <Box sx={{ gridColumn: '1 / -1' }}><ResultState status="empty" title="沒有角色" description={rows.length ? '沒有符合條件的角色' : '還沒有任何角色'} backTo={false} /></Box>
+        )}
+        {!loading && visible.map((r) => {
+          const rc = riskCounts(r.permission_codes);
+          return (
+            <Card key={r.id} sx={{ display: 'flex', flexDirection: 'column', opacity: r.is_active ? 1 : 0.7 }}>
+              <CardActionArea onClick={() => navigate(`/access/roles/${r.id}`)} sx={{ flex: 1, alignItems: 'stretch' }}>
+                <CardContent sx={{ p: 2.5, '&:last-child': { pb: 2 }, height: '100%', display: 'flex', flexDirection: 'column' }}>
                   <Stack direction="row" alignItems="flex-start" justifyContent="space-between" spacing={1}>
                     <Box sx={{ minWidth: 0 }}>
-                      <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
-                        <Typography variant="subtitle2">{r.name}</Typography>{chips(r)}
-                      </Stack>
-                      {r.description && <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>{r.description}</Typography>}
+                      <Typography variant="subtitle1" fontWeight={600} noWrap>{r.name}</Typography>
+                      <Box sx={{ mt: 0.5 }}>{chips(r)}</Box>
                     </Box>
                     {actionsMenuButton(r)}
                   </Stack>
-                  <Stack direction="row" spacing={2} alignItems="center" sx={{ mt: 1 }}>
-                    {riskSummary(r)}
-                    <Typography variant="caption" color="text.secondary">{r.user_count} 位使用者</Typography>
+                  <Typography variant="body2" color="text.secondary" sx={{ mt: 1.25, flex: 1, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden', minHeight: 40 }}>
+                    {r.description || '（沒有說明）'}
+                  </Typography>
+                  <Stack direction="row" alignItems="center" spacing={1.5} sx={{ mt: 2 }} flexWrap="wrap" useFlexGap>
+                    <Typography variant="body2" fontWeight={600}>{rc.total} 項權限</Typography>
+                    {rc.high > 0 && <Chip label={`高風險 ${rc.high}`} size="small" variant="outlined" color="error" sx={{ height: 20, fontSize: 11 }} />}
+                    {rc.medium > 0 && <Chip label={`敏感 ${rc.medium}`} size="small" variant="outlined" color="warning" sx={{ height: 20, fontSize: 11 }} />}
+                    <Stack direction="row" spacing={0.5} alignItems="center" sx={{ ml: 'auto', color: 'text.secondary' }}>
+                      <Users size={14} /><Typography variant="body2">{r.user_count}</Typography>
+                    </Stack>
                   </Stack>
+                  <Typography variant="caption" color="text.disabled" sx={{ mt: 0.75 }}>最後更新 {formatRelative(r.updated_at)}</Typography>
                 </CardContent>
               </CardActionArea>
             </Card>
-          ))}
-        </Stack>
-      ) : (
-        <DataTableMui
-          columns={columns} rows={visible} rowKey={(r) => r.id} loading={loading}
-          emptyMessage={rows.length ? '沒有符合條件的角色' : '還沒有任何角色'}
-          onRowClick={(r) => navigate(`/admin/roles/${r.id}`)}
-          rowActions={actionsMenuButton}
-        />
-      )}
+          );
+        })}
+      </Box>
 
       <Menu open={!!menu} anchorEl={menu?.el} onClose={() => setMenu(null)}>
-        <MenuItem onClick={() => { if (menu) navigate(`/admin/roles/${menu.role.id}`); setMenu(null); }}>
+        <MenuItem onClick={() => { if (menu) navigate(`/access/roles/${menu.role.id}`); setMenu(null); }}>
           <Pencil size={16} style={{ marginRight: 8 }} />{canManage && !menu?.role.is_system ? '編輯' : '查看'}
         </MenuItem>
         <MenuItem onClick={() => { if (menu) preview(menu.role); setMenu(null); }}>
