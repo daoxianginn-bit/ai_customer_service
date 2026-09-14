@@ -29,7 +29,13 @@ export interface StageDef {
   /** 按確認需要的權限 */
   permission: string;
   hint: string;
+  /** 這一關要處理的金額是哪一筆（待確認看訂金、待收尾款看尾款、押金處理看待退押金…） */
+  amountLabel: string;
+  amountOf: (b: BookingRow) => number | null;
 }
+
+const num = (v: unknown) => (v == null || v === '' ? null : Number(v));
+const balanceOf = (b: BookingRow) => (num(b.total_amount) == null ? null : Number(b.total_amount) - Number(b.deposit || 0));
 
 export const STAGES: StageDef[] = [
   {
@@ -37,30 +43,35 @@ export const STAGES: StageDef[] = [
     color: '#d97706', colorLight: '#fef3c7', nextStatus: 'reserved', confirmAdvances: true, fields: ['remit'],
     templateTitle: '訂房成功通知', permission: 'booking.payment.verify',
     hint: '人工核對訂金已到帳後，填入匯款末五碼按確認；訂單會直接變成「已預定」（停在待確認會被自動取消排程當成未付款）。',
+    amountLabel: '訂金', amountOf: (b) => num(b.deposit),
   },
   {
     key: 'awaiting_balance', group: 'payment', title: '待收尾款', statuses: ['awaiting_balance'], action: '收尾款',
     color: '#ea580c', colorLight: '#ffedd5', nextStatus: 'awaiting_checkin', confirmAdvances: false, fields: [],
     templateTitle: '已繳清尾款', permission: 'booking.payment.verify',
     hint: '收到尾款後按確認；要讓訂單進到「待入住」請按「確認並推進」。',
+    amountLabel: '尾款', amountOf: balanceOf,
   },
   {
     key: 'deposit_processing', group: 'payment', title: '押金處理', statuses: ['deposit_processing'], action: '退房押金處理',
     color: '#4f46e5', colorLight: '#e0e7ff', nextStatus: 'completed', confirmAdvances: false, fields: [],
     templateTitle: '押金退款', permission: 'booking.refund.process',
     hint: '核對房間狀況、退還（或扣除）押金後按確認；「確認並推進」會把訂單結案為「已處理」。',
+    amountLabel: '待退押金', amountOf: (b) => num(b.security_deposit),
   },
   {
     key: 'awaiting_refund', group: 'payment', title: '待退款', statuses: ['awaiting_refund'], action: '退款完成',
     color: '#e11d48', colorLight: '#ffe4e6', nextStatus: 'refunded', confirmAdvances: false, fields: [],
     templateTitle: '取消退款', permission: 'booking.refund.process',
     hint: '款項退回客人後按確認；「確認並推進」會把訂單標成「已退款」。',
+    amountLabel: '已收訂金', amountOf: (b) => num(b.deposit),
   },
   {
     key: 'checkin', group: 'checkin', title: '待入住／入住中', statuses: ['awaiting_checkin', 'checked_in'], action: '密碼更新',
     color: '#0284c7', colorLight: '#e0f2fe', nextStatus: null, confirmAdvances: false, fields: ['password', 'linen'],
     templateTitle: '入住密碼發送', permission: 'booking.edit',
     hint: '設定或修改大門密碼、調整這筆訂單的洗物數量。狀態由排程在入住日／退房日自動轉，這裡不用推進。',
+    amountLabel: '押金', amountOf: (b) => num(b.security_deposit),
   },
 ];
 

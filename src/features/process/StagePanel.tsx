@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react';
-import { Alert, Box, Button, Chip, Dialog, DialogContent, Divider, Drawer, IconButton, Skeleton, Stack, TextField, Tooltip, Typography } from '@mui/material';
+import { Alert, Box, Button, Chip, Dialog, DialogContent, Divider, IconButton, Skeleton, Stack, TextField, Tooltip, Typography } from '@mui/material';
 import { useSnackbar } from 'notistack';
 import { ArrowRight, Check, RotateCcw, Send, X } from 'lucide-react';
 import { useAuth } from '../../lib/AuthContext';
@@ -14,8 +14,8 @@ import { advanceBookingStatus, saveBookingLinen, BookingActionError } from '../b
 import { markStageConfirmed, saveStageEdits, type StageAction, type StageDef } from './processQueries';
 
 // ========================================================================
-// 處理面板：點一筆訂單後只顯示「這一關需要看的」——訂單編號、訂房資訊、金額、可編輯欄位、內部備註，
-// 不把整張訂單攤出來。底部：取消（放棄編輯）／確認／確認並推進。
+// 處理視窗：點一筆訂單後彈出置中視窗，只顯示「這一關需要看的」——訂單編號、訂房資訊、金額（本關要處理的
+// 那一筆放最前面）、可編輯欄位、內部備註，不把整張訂單攤出來。底部：取消（放棄編輯）／高亮動作鈕（＝確認）／確認並推進。
 // 確認完直接切到第二步「發送通知」，訂單同時已離開佇列（清單由上層即時更新）。
 // ========================================================================
 
@@ -43,7 +43,7 @@ export default function StagePanel({ open, stage, booking, action, onClose, onCh
   const { enqueueSnackbar } = useSnackbar();
   const { profile } = useAuth();
   const { hasPermission } = usePermissions();
-  const { isDesktop } = useBreakpoint();
+  const { isMobile } = useBreakpoint();
   const canAct = hasPermission(stage.permission);
   const canSeePayment = hasPermission('booking.payment.view');
   const canNotify = hasPermission('booking.notify');
@@ -105,6 +105,7 @@ export default function StagePanel({ open, stage, booking, action, onClose, onCh
 
   const balance = booking.total_amount != null ? Number(booking.total_amount) - Number(booking.deposit || 0) : null;
   const nights = booking.nights ?? null;
+  const stageAmount = stage.amountOf(booking);
 
   const header = (
     <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', px: 2.5, py: 1.5, borderBottom: '1px solid', borderColor: 'divider' }}>
@@ -130,6 +131,10 @@ export default function StagePanel({ open, stage, booking, action, onClose, onCh
       </Box>
       <Box>
         <Typography variant="subtitle2" gutterBottom>金額</Typography>
+        <Box sx={{ mb: 1.5, px: 1.5, py: 1, borderRadius: 1, bgcolor: stage.colorLight, display: 'inline-flex', alignItems: 'baseline', gap: 1 }}>
+          <Typography variant="caption" sx={{ color: stage.color, fontWeight: 600 }}>{stage.amountLabel}</Typography>
+          <Typography variant="h6" sx={{ color: stage.color, fontWeight: 700 }}>{formatMoney(stageAmount)}</Typography>
+        </Box>
         <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 1.5 }}>
           <Field label="總額" value={formatMoney(booking.total_amount)} />
           <Field label="訂金" value={formatMoney(booking.deposit)} />
@@ -197,12 +202,13 @@ export default function StagePanel({ open, stage, booking, action, onClose, onCh
   const footer = !done && (
     <Box sx={{ px: 2.5, py: 1.5, borderTop: '1px solid', borderColor: 'divider', display: 'flex', gap: 1, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
       <Button color="inherit" onClick={onClose} disabled={busy}>取消</Button>
-      <Button variant={stage.nextStatus && !stage.confirmAdvances ? 'outlined' : 'contained'} onClick={() => run(false)} disabled={busy || !canAct} startIcon={<Check size={16} />} sx={stage.nextStatus && !stage.confirmAdvances ? {} : { bgcolor: stage.color, '&:hover': { bgcolor: stage.color, filter: 'brightness(.92)' } }}>
-        {busy ? '處理中…' : stage.confirmAdvances ? `確認（→ ${bookingStatusLabel(stage.nextStatus)}）` : '確認'}
+      {/* 高亮動作鈕就是「確認」：清單上按的是哪顆，視窗裡按的就是同一顆 */}
+      <Button variant="contained" onClick={() => run(false)} disabled={busy || !canAct} startIcon={<Check size={16} />} sx={{ bgcolor: stage.color, fontWeight: 600, boxShadow: 'none', '&:hover': { bgcolor: stage.color, filter: 'brightness(.92)', boxShadow: 'none' } }}>
+        {busy ? '處理中…' : stage.confirmAdvances ? `${stage.action}（→ ${bookingStatusLabel(stage.nextStatus)}）` : stage.action}
       </Button>
       {stage.nextStatus && !stage.confirmAdvances && (
-        <Button variant="contained" onClick={() => run(true)} disabled={busy || !canAct} endIcon={<ArrowRight size={16} />} sx={{ bgcolor: stage.color, '&:hover': { bgcolor: stage.color, filter: 'brightness(.92)' } }}>
-          確認並推進到「{bookingStatusLabel(stage.nextStatus)}」
+        <Button variant="outlined" onClick={() => run(true)} disabled={busy || !canAct} endIcon={<ArrowRight size={16} />} sx={{ color: stage.color, borderColor: stage.color, '&:hover': { borderColor: stage.color, bgcolor: stage.colorLight } }}>
+          並推進到「{bookingStatusLabel(stage.nextStatus)}」
         </Button>
       )}
     </Box>
@@ -224,9 +230,9 @@ export default function StagePanel({ open, stage, booking, action, onClose, onCh
     </Box>
   );
 
-  return isDesktop ? (
-    <Drawer anchor="right" open={open} onClose={busy ? undefined : onClose} PaperProps={{ sx: { width: 560, maxWidth: '100vw' } }}>{content}</Drawer>
-  ) : (
-    <Dialog open={open} onClose={busy ? undefined : onClose} fullScreen><DialogContent sx={{ p: 0 }}>{content}</DialogContent></Dialog>
+  return (
+    <Dialog open={open} onClose={busy ? undefined : onClose} fullScreen={isMobile} maxWidth="sm" fullWidth PaperProps={{ sx: isMobile ? {} : { maxHeight: '90vh' } }}>
+      <DialogContent sx={{ p: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>{content}</DialogContent>
+    </Dialog>
   );
 }

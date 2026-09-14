@@ -174,7 +174,7 @@ export default function ProcessPage() {
                     </Box>
                     <StatusBadge status={b.status} />
                   </Stack>
-                  <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>{formatDateRange(b.checkin_date, b.checkout_date)}・總額 {formatMoney(b.total_amount)}</Typography>
+                  <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>{formatDateRange(b.checkin_date, b.checkout_date)}・總額 {formatMoney(b.total_amount)}・<Box component="span" sx={{ color: stage.color, fontWeight: 600 }}>{stage.amountLabel} {formatMoney(stage.amountOf(b))}</Box></Typography>
                   <Stack direction="row" spacing={1} alignItems="center" sx={{ mt: 1.25 }}>
                     <StageButton stage={stage} onClick={() => setPanel({ booking: b, stage })} size="medium" fullWidth />
                     {a?.confirmed_at && canNotify && b.line_user_id && <Button variant="outlined" size="medium" startIcon={<Send size={16} />} onClick={() => setNotify({ booking: b, stage })} sx={{ whiteSpace: 'nowrap' }}>訊息發送</Button>}
@@ -198,7 +198,7 @@ export default function ProcessPage() {
                 <TableCell>客人</TableCell>
                 <TableCell sx={{ width: 180 }}>入住 → 退房</TableCell>
                 <TableCell sx={{ width: 150 }}>人數・房型</TableCell>
-                <TableCell sx={{ width: 130 }} align="right">總額／尾款</TableCell>
+                <TableCell sx={{ width: 150 }} align="right">總額／本關金額</TableCell>
                 <TableCell sx={{ width: 110 }}>狀態</TableCell>
                 <TableCell sx={{ width: 170 }}>進度</TableCell>
                 <TableCell sx={{ width: 150 }} align="right" />
@@ -207,7 +207,6 @@ export default function ProcessPage() {
             <TableBody>
               {rows.map(({ booking: b, stage }) => {
                 const a = actionFor(b.id, stage.key);
-                const balance = b.total_amount != null ? Number(b.total_amount) - Number(b.deposit || 0) : null;
                 return (
                   <TableRow key={b.id} hover onClick={() => setPanel({ booking: b, stage })} sx={{ cursor: 'pointer', '& td:first-of-type': { borderLeft: '4px solid', borderLeftColor: stage.color } }}>
                     <TableCell><StageButton stage={stage} onClick={() => setPanel({ booking: b, stage })} /></TableCell>
@@ -215,7 +214,7 @@ export default function ProcessPage() {
                     <TableCell><Typography variant="body2" noWrap>{b.name || b.nickname || '未取得'}</Typography>{b.phone && <Typography variant="caption" color="text.secondary">{b.phone}</Typography>}</TableCell>
                     <TableCell><Typography variant="body2" noWrap>{formatDateRange(b.checkin_date, b.checkout_date)}</Typography>{b.nights ? <Typography variant="caption" color="text.secondary">{b.nights} 晚</Typography> : null}</TableCell>
                     <TableCell><Typography variant="body2" noWrap>{b.headcount ?? '?'} 人・{b.room_type_label || (b.whole_house ? '包棟' : '—')}</Typography></TableCell>
-                    <TableCell align="right"><Typography variant="body2">{formatMoney(b.total_amount)}</Typography>{balance != null && balance > 0 && <Typography variant="caption" color="text.secondary">尾款 {formatMoney(balance)}</Typography>}</TableCell>
+                    <TableCell align="right"><Typography variant="body2" color="text.secondary">{formatMoney(b.total_amount)}</Typography><Typography variant="body2" sx={{ color: stage.color, fontWeight: 600, whiteSpace: 'nowrap' }}>{stage.amountLabel} {formatMoney(stage.amountOf(b))}</Typography></TableCell>
                     <TableCell><StatusBadge status={b.status} /></TableCell>
                     <TableCell><ProgressMarks action={a} /></TableCell>
                     <TableCell align="right">
