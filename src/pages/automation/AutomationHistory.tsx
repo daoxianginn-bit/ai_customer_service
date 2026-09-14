@@ -1,4 +1,4 @@
-import LogsPage from '../../features/logs/LogsPage';
+import LogsPage from '../../features/activity-log/LogsPage';
 import { LOG_FEATURES } from '../../lib/operationLog';
 
 // 自動化排程 → 執行紀錄（V2 §63）：每次排程執行的結果。資料來自 operation_logs（排程執行後寫入），

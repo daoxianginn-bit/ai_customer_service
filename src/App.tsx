@@ -67,7 +67,7 @@ import RoleEditorPage from './features/admin/RoleEditorPage';
 import SecuritySettings from './pages/admin/SecuritySettings';
 // 帳號與權限／參數設定／紀錄：2026-09 從系統管理拆出來的獨立入口
 import ParametersPage from './features/parameters/ParametersPage';
-import LogsPage from './features/logs/LogsPage';
+import LogsPage from './features/activity-log/LogsPage';
 
 const envMissing = !import.meta.env.VITE_SUPABASE_URL || import.meta.env.VITE_SUPABASE_URL.includes('placeholder');
 
