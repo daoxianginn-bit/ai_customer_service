@@ -1231,7 +1231,8 @@ function buildStepExtractionPrompt(todayIso: string, fields: FlowFieldDef[]): st
     `需要擷取的欄位（JSON 格式，key 請完全照下面列出的英數代碼）：\n${fieldLines}\n\n` +
     `規則：\n` +
     `1. 只回傳一個 JSON 物件，包含以上欄位，不要加任何其他文字、不要用 markdown code block。\n` +
-    `2. 從對話中能確定的欄位才填值，不確定或沒提到的欄位填 null，絕對不要自己猜測。`
+    `2. 從對話中能確定的欄位才填值，不確定或沒提到的欄位填 null，絕對不要自己猜測。\n` +
+    `3. 日期只有在顧客指到「某一天」時才填。「10月初」「月中」「月底」「下旬」「過年」「連假」「暑假」「下個月」這種沒有指到特定日期的說法一律填 null——自己挑一天會直接變成報價上的入住日，顧客根本沒說要住那天。`
   );
 }
 
@@ -1284,6 +1285,17 @@ async function extractStepFields(settings: any, userMessage: string, fields: Flo
     throw e;
   }
   const parsed = parseStepExtraction(raw, fields);
+  // 不管提示詞怎麼寫，AI 還是會把「10月初」變成 10/01 填進來——客人只是問「10月初還有房嗎」，
+  // 報價卻用 10/01 當入住日，而且整段對話裡沒有任何地方看得出來這個日期是誰決定的。
+  // 訊息裡沒有具體日期寫法時，一律作廢 AI 給的日期，讓流程照常再問一次。
+  if (hasOnlyVagueDate(userMessage)) {
+    for (const f of fields) {
+      if (isDateField(f) && parsed[f.key] !== undefined) {
+        traceStep(`「${f.label}」：訊息只有「月初／月底」這類模糊說法，不採用 AI 猜的 ${parsed[f.key]}，再問一次`);
+        delete parsed[f.key];
+      }
+    }
+  }
   // AI 原文一定要留：「回了非 JSON」跟「JSON 裡欄位名對不上」在結果上都是空物件，
   // 只看 parsed 分不出來是哪一種，要看原文才知道該修提示詞還是修欄位設定。
   traceData('ai_extract', { provider: settings.active_ai, latency_ms: Date.now() - startedAt, raw: clipForTrace(raw), parsed });
@@ -1388,6 +1400,57 @@ function scanHeadcount(message: string): string | undefined {
     if (Number.isFinite(n) && n > 0) return String(n);
   }
   return undefined;
+}
+
+// 「這句話明確講了人數」的寫法。跟 HEADCOUNT_PATTERNS 分開的理由：那一份的最後一條是
+// 「訊息裡隨便一個數字」的保底規則，拿來判斷「可不可以覆蓋已經答過的人數」太寬——
+// bot 問房數、客人回「1」就會把原本的 12 人蓋掉。這裡只收看得出單位或寫法的：
+//   人數：9／9人／9位／2大人／7+2小（大人＋小孩的寫法，最後一組）
+const EXPLICIT_HEADCOUNT_PATTERNS = [
+  /人數\s*[:：]?\s*(?<!\d)\d{1,3}(?!\d)/,
+  /(?<!\d)\d{1,3}(?!\d)\s*(?:位|個人|大人|小孩|名|人)(?!房)/,
+  /(?<!\d)\d{1,3}(?!\d)\s*[+＋]\s*(?<!\d)\d{1,3}(?!\d)\s*(?:大|小|童|老)/,
+];
+
+export function isDateField(field: FlowFieldDef): boolean {
+  return field.quote_field === 'checkin_date' || field.quote_field === 'checkout_date' || field.value_type === 'date';
+}
+
+/**
+ * 這句話裡只有「月初／月底／下旬／過年」這種沒有指到某一天的說法嗎？
+ * 有具體日期（10/6、10月6日…）就不算——「10月初到10月5號」是講得出日子的。
+ * 「下個月6號」也不算：雖然有「下個月」，但 6 號是具體的，交給 AI 換算年月才對。
+ */
+export function hasOnlyVagueDate(message: string): boolean {
+  const text = message || '';
+  if (scanDates(text).length > 0) return false;
+  // 「10月初」「10月底」「10月下旬」：月份講了、日沒講
+  if (/\d{1,2}\s*月\s*[初中底]|[上中下]\s*旬/.test(text)) return true;
+  // 「月底」「過年」「下個月」這類連月份都沒有的說法。有任何數字就不算——「下個月6號」的 6 是具體的，
+  // 該讓 AI 去換算年月，不能連它一起作廢。
+  return /月\s*[初中底]|過年|春節|連假|暑假|寒假|下個?月|這個?月/.test(text) && !/\d/.test(text);
+}
+
+/**
+ * 已經答過的欄位，這一句要「明確講到」才能覆蓋既有答案。
+ *
+ * 明確＝寫了欄位標籤（「人數：15」），或這句話本身就看得出是哪一種值：
+ *   日期：訊息裡有日期寫法。客人先說「10月初」、再補「10/6-7」是最自然的改期方式，
+ *        擋掉的話舊的入住日會留著，報價就是拿一個客人沒說過的日期去算（實際發生過）。
+ *   人數：數字有帶標籤或單位（「9人」「人數：9」），不含 HEADCOUNT_PATTERNS 最後那個
+ *        「訊息裡隨便一個數字」的保底規則——那一招正是會把「雙人房數：1」的 1 誤當人數的元兇。
+ * 其餘欄位（房數、包棟、自由文字）維持要標籤：它們的值就是個數字或「是／否」，
+ * 沒有標籤分不出客人是在改答案，還是在回答別的問題。
+ */
+export function messageStatesFieldExplicitly(message: string, field: FlowFieldDef): boolean {
+  const text = message || '';
+  if (field.label && text.includes(field.label)) return true;
+  if (isDateField(field)) return scanDates(text).length > 0;
+  if (field.quote_field === 'headcount') {
+    const withoutDates = text.replace(DATE_SCAN_RE, ' ');
+    return EXPLICIT_HEADCOUNT_PATTERNS.some((re) => re.test(withoutDates));
+  }
+  return false;
 }
 
 function scanWholeHouse(message: string): string | undefined {
@@ -2232,15 +2295,21 @@ async function continueBookingFlow(
   }
   if (stepUsesSystemMode) traceStep('系統模式：不呼叫 AI，用規則解析');
 
-  // 已經答過的欄位，這一句要明確寫了標籤（「人數：15」）才能覆蓋。沒標籤的猜測不能推翻
-  // 已收集到的答案——scanHeadcount 最後一招是「訊息裡任一個獨立數字就當人數」，於是 bot
-  // 問「還需要麻煩您補充：雙人房數」、客人回「1」，這個 1 會被猜成人數、把原本的 12 蓋掉，
-  // 雙人房數照樣是空的、再問一次，客人怎麼回都出不去（KAI CHE CHANG 卡住的就是這個）。
+  // 已經答過的欄位，這一句要「明確講到」才能覆蓋（見 messageStatesFieldExplicitly）。
+  // 沒標籤的猜測不能推翻已收集到的答案——scanHeadcount 最後一招是「訊息裡任一個獨立數字就當
+  // 人數」，於是 bot 問「還需要麻煩您補充：雙人房數」、客人回「1」，這個 1 會被猜成人數、把原本
+  // 的 12 蓋掉，雙人房數照樣是空的、再問一次，客人怎麼回都出不去（KAI CHE CHANG 卡住的就是這個）。
   // 擋掉之後 extracted 變空，才輪得到下面「只剩一欄就整句當答案」的捷徑接手。
+  //
+  // 但「明確」不等於「有寫標籤」：客人先問「10月初還有房嗎」、再補「10/6-7」是最自然的講清楚
+  // 方式，只認標籤的話新的入住日會被丟掉，報價就用著客人沒說過的 10/01（實際發生過）。
+  // 所以日期看訊息裡有沒有日期寫法、人數看數字有沒有帶單位，其餘欄位維持要標籤。
   for (const f of currentStep.fields) {
-    if (session.collected[f.key] && extracted[f.key] !== undefined && !userMessage.includes(f.label)) {
-      traceStep(`「${f.label}」已經答過，這句沒有寫標籤，不用猜到的值（${extracted[f.key]}）覆蓋`);
+    if (session.collected[f.key] && extracted[f.key] !== undefined && !messageStatesFieldExplicitly(userMessage, f)) {
+      traceStep(`「${f.label}」已經答過，這句沒有明確講到，不用猜到的值（${extracted[f.key]}）覆蓋`);
       delete extracted[f.key];
+    } else if (session.collected[f.key] && extracted[f.key] !== undefined && session.collected[f.key] !== extracted[f.key]) {
+      traceStep(`「${f.label}」改成 ${extracted[f.key]}（原本 ${session.collected[f.key]}）`);
     }
   }
 
