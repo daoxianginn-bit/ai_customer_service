@@ -26,7 +26,7 @@ import { computeUsage, normalizeChangeCount } from '../../src/lib/linenCost';
 import { LineChannel, isFullServiceRole, channelRoleLabel } from '../../src/lib/lineChannels';
 import {
   buildIntentPrompt, parseIntentResponse, classifyByRules,
-  isYesAnswer, isNoAnswer, isRestartCommand, interpretBareAnswer,
+  isYesAnswer, isNoAnswer, isRestartCommand, interpretBareAnswer, scanRoomComposition,
   missingEssentialFields, QUOTE_ESSENTIAL_FIELDS,
   type BookingPhase, type IntentContext, type IntentResult,
 } from '../../src/lib/bookingIntent';
@@ -3076,6 +3076,20 @@ function normalizeSlots(fields: FlowFieldDef[], slots: Record<string, string>): 
 }
 
 // 意圖分類：明確的短答不花 AI；system 模式只用規則；AI 模式呼叫 AI，失敗退回規則。
+/**
+ * 「2+2+4+4」這種房間組合的保險：AI 常把「能給我 2+2+4+4 的報價嗎？」判成 question
+ * （句尾有問號、內容又在講房型），於是回一句「請找真人客服」，但這個組合系統自己算得出來。
+ * 訊息裡出現對得上實際房型人數的組合時，一律改判成「要改房間組合」並帶上房數。
+ * 只在「已經報過價」的階段介入：收集中本來就會把抓到的欄位存起來，不需要覆寫意圖。
+ */
+function applyRoomCompositionOverride(message: string, ctx: IntentContext, result: IntentResult): IntentResult {
+  if (result.intent !== 'question' || ctx.phase === 'collecting') return result;
+  const composition = scanRoomComposition(message, ctx.fields);
+  if (!Object.keys(composition).length) return result;
+  traceStep(`客人指定了房間組合（${Object.entries(composition).filter(([, v]) => v !== '0').map(([k, v]) => `${ctx.fields.find((f) => f.key === k)?.label ?? k} ${v}`).join('、')}），改判成要重新報價`);
+  return { ...result, intent: 'modify', slots: { ...result.slots, ...composition }, reason: '指定房間組合' };
+}
+
 async function classifyBookingIntent(settings: any, flow: FlowDef, message: string, ctx: IntentContext, nickname: string | null, lineClient: Client | null): Promise<IntentResult> {
   const extract = (m: string, fields: IntentContext['fields']) => extractStepFieldsWithoutAi(m, fields as FlowFieldDef[]);
 
@@ -3097,7 +3111,7 @@ async function classifyBookingIntent(settings: any, flow: FlowDef, message: stri
       raw: clipForTrace(raw, 600),
       parsed: parsed ? { intent: parsed.intent, slots: parsed.slots } : null,
     });
-    if (parsed) return parsed;
+    if (parsed) return applyRoomCompositionOverride(message, ctx, parsed);
     traceStep('AI 意圖分類回覆無法解析，退回規則判斷');
   } catch (e: any) {
     traceData('intent_ai', { provider: settings.active_ai, latency_ms: Date.now() - startedAt, error: e.message });

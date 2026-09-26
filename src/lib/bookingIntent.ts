@@ -148,6 +148,37 @@ export function missingEssentialFields(fields: IntentFieldDef[], collected: Reco
   );
 }
 
+/**
+ * 房間組合的寫法：「2+2+4+4」＝兩間雙人房、兩間四人房。
+ *
+ * 客人講房型組合時最自然就是這樣寫（「能給我 2+2+4+4 的報價嗎？」），但它既沒有欄位標籤、
+ * 句尾又是問號，AI 很容易判成「在問問題」，於是回一句「請找真人客服」——明明這個組合系統
+ * 自己算得出來（多開的房間會照加開房費計價）。這裡把它解析成房數欄位，讓它走重新報價。
+ *
+ * 每一個數字都必須對得上實際存在的房型人數才採用，否則「7+2小」（7 大 2 小）這種人數寫法
+ * 會被誤讀成房間組合。至少要兩個數字——單一個「4」是「4 人房」還是「4 間」分不出來。
+ */
+export function scanRoomComposition(message: string, fields: IntentFieldDef[]): Record<string, string> {
+  const capacityFields = fields.filter((f) => f.quote_field === 'room_count' && Number(f.room_capacity) > 0);
+  if (!capacityFields.length) return {};
+  const byCapacity = new Map(capacityFields.map((f) => [Number(f.room_capacity), f]));
+
+  // 取最長的一串「數字＋數字＋…」，避免只吃到前面兩個
+  const candidates = (message.match(/(?<!\d)\d{1,2}(?:\s*[+＋]\s*\d{1,2})+(?!\d)/g) || [])
+    .sort((a, b) => b.length - a.length);
+  for (const candidate of candidates) {
+    const numbers = candidate.split(/[+＋]/).map((n) => Number(n.trim()));
+    if (numbers.length < 2 || numbers.some((n) => !byCapacity.has(n))) continue;
+    const counts = new Map<number, number>();
+    for (const n of numbers) counts.set(n, (counts.get(n) || 0) + 1);
+    const slots: Record<string, string> = {};
+    // 沒被提到的房型要明確填 0：客人是在指定「整組要哪幾間」，舊的組合不能留著
+    for (const [capacity, field] of byCapacity) slots[field.key] = String(counts.get(capacity) ?? 0);
+    return slots;
+  }
+  return {};
+}
+
 // ------------------------------------------------------------------------
 // 規則版分類器：system 模式（不花 token）與 AI 失敗時的退路。
 // 順序就是優先權：明確指令 > 階段專屬的短答 > 有欄位內容 > 問句 > 階段預設。
@@ -186,6 +217,10 @@ export function classifyByRules(
     const nights = scanNights(trimmed);
     if (checkin && nights && /^\d{4}-\d{2}-\d{2}$/.test(checkin)) slots[checkoutField.key] = addDaysIso(checkin, nights);
   }
+
+  // 「2+2+4+4」這種房間組合沒有欄位標籤，上面的擷取器抓不到，但它是明確指定要哪幾間房
+  const composition = scanRoomComposition(trimmed, ctx.fields);
+  for (const [k, v] of Object.entries(composition)) if (slots[k] === undefined) slots[k] = v;
 
   if (Object.keys(slots).length > 0) {
     return rules(ctx.phase === 'collecting' ? 'provide_info' : 'modify', slots);
@@ -278,6 +313,8 @@ ${historyLines.length ? historyLines.join('\n') : '  （無）'}
 - 客人只講住幾晚（「住一晚」「兩天一夜」「3 晚」）：退房日＝入住日＋晚數，直接算出來填進退房日期。
 - 「大約 8 人」「8 個人左右」：人數就填 8。
 - 房數欄位客人沒提到就不要填，不要填 0。
+- 「2+2+4+4」「2人房兩間、4人房兩間」這種房間組合＝指定各房型各要幾間，拆進對應的房數欄位（這個例子是 2 人房 2 間、4 人房 2 間），沒被提到的房型填 0。
+- 「想改成 X 間房」「能給我 2+2+4+4 的報價嗎？」這類**要求用不同條件重新報價**的話一律是 modify，不是 question——就算句尾有問號、語氣像在詢問也一樣。question 只留給「民宿本身的事」（早餐、停車、設施、入住時間、付款方式）。
 - 客人把整張表單（含「入住日期：」這類標籤）貼回來時，逐行對應欄位；留空的行不填。
 - 不確定就 unclear，不要猜。
 
