@@ -1022,6 +1022,57 @@ CREATE TABLE IF NOT EXISTS public.booking_stage_actions (
 );
 CREATE INDEX IF NOT EXISTS idx_booking_stage_actions_confirmed ON public.booking_stage_actions(confirmed_at DESC);
 
+-- 會計登錄的實際金流：訂單原本的金額欄位是「應收應退」，這幾個是「實際收到／退出去多少」，對帳看這裡。
+ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS balance_remit_last5 TEXT;   -- 尾款匯款末五碼（預設帶訂金那組，不同再改）
+ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS refund_amount NUMERIC;      -- 實退金額（押金退還或取消退款）
+ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS refund_note TEXT;           -- 沒退滿的原因（選填）
+-- 房務退房檢查的回報，供會計決定押金退多少
+ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS damage_found BOOLEAN;       -- NULL＝還沒檢查
+ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS damage_deduction NUMERIC;   -- 建議扣款
+ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS damage_note TEXT;
+
+-- 原本「待入住／入住中」是一關（checkin），2026-09 拆成 洗滌清單(linen) 與 入住密碼(checkin_password) 兩關。
+UPDATE public.booking_stage_actions SET stage = 'checkin_password' WHERE stage = 'checkin';
+
+-- 版本升級時，把「這一版才新增的權限」補給對應的範本角色。
+-- 為什麼需要：上面的 seed 只在角色權限是空的時候才套範本（避免蓋掉管理員自己調過的設定），
+-- 所以既有安裝升級後，房務人員／會計會少掉這一版新增的權限，功能直接不能用。
+-- 新 code 在升級前不可能被「刻意移除」，所以補上是安全的；但只補一次（template_grant_version），
+-- 之後管理員把它拿掉就不會再被塞回來。
+ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS template_grant_version INTEGER NOT NULL DEFAULT 0;
+
+DO $template_grant$
+DECLARE
+  v INTEGER;
+BEGIN
+  SELECT COALESCE(MAX(template_grant_version), 0) INTO v FROM public.settings;
+  IF v < 1 THEN
+    INSERT INTO public.role_permissions (role_id, permission_id)
+    SELECT r.id, p.id
+    FROM (VALUES
+      -- 2026-09：訂單處理拆出房務／會計的關卡
+      ('housekeeping', 'booking.linen.manage'),
+      ('housekeeping', 'booking.checkin_password.manage'),
+      ('housekeeping', 'booking.room_check'),
+      ('housekeeping', 'booking.notify'),
+      ('staff',        'booking.linen.manage'),
+      ('staff',        'booking.checkin_password.manage'),
+      ('staff',        'booking.room_check'),
+      ('staff',        'booking.notify'),
+      ('accounting',   'booking.notify'),
+      ('sys_admin',    'booking.linen.manage'),
+      ('sys_admin',    'booking.checkin_password.manage'),
+      ('sys_admin',    'booking.room_check'),
+      ('sys_admin',    'booking.notify')
+    ) AS t(role_code, perm_code)
+    JOIN public.roles r ON r.code = t.role_code
+    JOIN public.permissions p ON p.code = t.perm_code AND p.is_active
+    ON CONFLICT DO NOTHING;
+    UPDATE public.settings SET template_grant_version = 1 WHERE id IS NOT NULL;
+  END IF;
+END
+$template_grant$;
+
 -- 各關卡預設通知範本：{ "awaiting_confirmation": "<custom_message_templates.id>", ... }。
 -- 沒設定的關卡由前端依範本標題（下面 seed 的五個）找預設。
 ALTER TABLE public.settings ADD COLUMN IF NOT EXISTS stage_templates JSONB NOT NULL DEFAULT '{}';
@@ -1582,77 +1633,80 @@ INSERT INTO public.permissions (code, module, resource, action, name, descriptio
   ('booking.edit', 'booking', 'booking', 'edit', '修改訂單', '修改客人資料、日期、房間、金額與備註。', 'low', 4, true),
   ('booking.cancel', 'booking', 'booking', 'cancel', '取消訂單', '把訂單改成「取消」，紀錄保留。', 'medium', 5, true),
   ('booking.delete', 'booking', 'booking', 'delete', '刪除訂單', '永久刪除訂單，連同房間與布巾用量，無法復原。', 'high', 6, true),
-  ('booking.payment.view', 'booking', 'booking', 'payment.view', '查看付款資料', '看得到匯款末五碼與入住密碼。', 'medium', 7, true),
+  ('booking.payment.view', 'booking', 'booking', 'payment.view', '查看付款資料', '看得到匯款末五碼、實收與實退金額。', 'medium', 7, true),
   ('booking.payment.verify', 'booking', 'booking', 'payment.verify', '確認付款／推進狀態', '核對訂金或尾款，依流程把訂單推到下一關。', 'medium', 8, true),
   ('booking.refund.process', 'booking', 'booking', 'refund.process', '處理退款', '把待退款的訂單標記為已退款。會留下操作紀錄。', 'high', 9, true),
   ('booking.override_conflict', 'booking', 'booking', 'override_conflict', '處理撞期／候補', '清除 OTA 撞期旗標、決定系統攔下的撞期訂單怎麼走。', 'high', 10, true),
   ('booking.history.view', 'booking', 'booking', 'history.view', '查看訂單異動紀錄', '訂單詳情的操作紀錄時間軸（誰在何時改了什麼）。', 'low', 11, true),
-  ('booking.notify', 'booking', 'booking', 'notify', '發送訂單通知', '訂單處理各關卡確認後，用範本推播 LINE 訊息給這筆訂單的客人。', 'medium', 12, true),
-  ('calendar.view', 'booking', 'calendar', 'view', '查看房況行事曆', '月曆與手機列表檢視。', 'low', 13, true),
-  ('calendar.manage', 'booking', 'calendar', 'manage', '設定旺季／連假', '維護行事曆上的旺季與連假日期。', 'medium', 14, true),
-  ('conflict.view', 'booking', 'conflict', 'view', '查看待辦與候補／衝突', '待辦事項中心與候補／衝突頁。', 'low', 15, true),
-  ('service.view', 'service', 'service', 'view', '查看客服工作台', '對話清單、對話內容與客戶脈絡。', 'low', 16, true),
-  ('service.reply', 'service', 'service', 'reply', '回覆客人', '在工作台直接回覆客人（會用官方帳號推播）。', 'medium', 17, true),
-  ('service.handover', 'service', 'service', 'handover', '接手／轉回 AI', '把客人切成真人模式、轉回 AI、標記轉接已處理。', 'medium', 18, true),
-  ('conversation.diagnostic', 'service', 'conversation', 'diagnostic', '查看 AI 判斷過程', '客人訊息旁的 ⓘ：意圖、抓到的欄位、決策過程與錯誤。', 'low', 19, true),
-  ('conversation.raw_ai_output', 'service', 'conversation', 'raw_ai_output', '查看 AI 原文', 'AI 回覆的原始 JSON／文字（除錯用）。', 'medium', 20, true),
-  ('flow.view', 'service', 'flow', 'view', '查看對話流程', '對話流程的設定內容。', 'low', 21, true),
-  ('flow.manage', 'service', 'flow', 'manage', '編輯對話流程', '新增、修改、刪除對話流程與步驟。改壞會影響客人訂房。', 'medium', 22, true),
-  ('flow.test', 'service', 'flow', 'test', '測試對話', '用模擬器測試一句話會被判成什麼（會呼叫 AI）。', 'low', 23, true),
-  ('knowledge.view', 'service', 'knowledge', 'view', '查看知識庫', 'AI 知識庫的條目與檔案。', 'low', 24, true),
-  ('knowledge.manage', 'service', 'knowledge', 'manage', '編輯知識庫', '新增、修改、刪除、啟用／停用知識庫條目。', 'medium', 25, true),
-  ('knowledge.test', 'service', 'knowledge', 'test', '測試 AI 回答', '用目前知識庫實際問 AI 一次（會呼叫 AI）。', 'low', 26, true),
-  ('service_rule.view', 'service', 'service_rule', 'view', '查看客服規則', '轉接關鍵字、通知對象、逾時設定。', 'low', 27, true),
-  ('service_rule.manage', 'service', 'service_rule', 'manage', '修改客服規則', '修改轉接關鍵字、通知對象、逾時設定。', 'medium', 28, true),
-  ('customer.view', 'customer', 'customer', 'view', '查看客戶', '客戶列表與詳情、訂房紀錄、最近對話。', 'low', 29, true),
-  ('customer.edit', 'customer', 'customer', 'edit', '修改客戶', '重新抓取暱稱、行銷拒收開關。', 'low', 30, true),
-  ('customer.personal_data.delete', 'customer', 'customer', 'personal_data.delete', '清除客戶個資', '永久刪除客人的聯絡人、對話與轉接紀錄。無法復原，主帳號才可執行。', 'high', 31, true),
-  ('marketing.view', 'customer', 'marketing', 'view', '查看訊息發送', '訊息發送頁、名單查詢、LINE 額度。', 'low', 32, true),
-  ('marketing.send', 'customer', 'marketing', 'send', '發送訊息', '批次推播 LINE 訊息給客人（消耗官方帳號額度）。', 'medium', 33, true),
-  ('marketing.template.manage', 'customer', 'marketing', 'template.manage', '管理訊息範本', '新增、修改、刪除訊息範本。', 'low', 34, true),
-  ('housekeeping.view', 'housekeeping', 'housekeeping', 'view', '查看房務', '房務總覽、布巾、耗材、洗滌單。', 'low', 35, true),
-  ('housekeeping.manage', 'housekeeping', 'housekeeping', 'manage', '維護房務資料', '修改布巾品項、房型預設組合、耗材與庫存。', 'low', 36, true),
-  ('linen.cost.view', 'housekeeping', 'linen', 'cost.view', '查看洗滌成本統計', '房務統計的成本報表。', 'low', 37, true),
-  ('inventory.view', 'inventory', 'inventory', 'view', '查看房型與空間', '房間與公共空間的基本資料。', 'low', 38, true),
-  ('inventory.manage', 'inventory', 'inventory', 'manage', '維護房型與空間', '新增、修改、刪除房間與空間。影響計價與配房。', 'medium', 39, true),
-  ('pricing.view', 'pricing', 'pricing', 'view', '查看價格', '價格總覽與目前設定。', 'low', 40, true),
-  ('pricing.manage', 'pricing', 'pricing', 'manage', '修改價格', '基礎價、日期加價、特殊日期、包棟、加人、連住、促銷。直接影響報價。', 'high', 41, true),
-  ('pricing.simulate', 'pricing', 'pricing', 'simulate', '報價模擬', '用目前設定試算報價。', 'low', 42, true),
-  ('integration.view', 'integration', 'integration', 'view', '查看串接', 'LINE 官方帳號、OTA、Google 行事曆、通知對象的頁面入口（設定內容需搭配「修改串接」）。', 'low', 43, true),
-  ('integration.manage', 'integration', 'integration', 'manage', '修改串接', '新增、修改、停用官方帳號、OTA 頻道、行事曆與通知名單。', 'medium', 44, true),
-  ('integration.secret.view', 'integration', 'integration', 'secret.view', '顯示串接金鑰', '看見 LINE Token／Secret 等原文。', 'high', 45, true),
-  ('integration.ota.sync', 'integration', 'integration', 'ota.sync', '手動同步 OTA／行事曆', '立即抓取第三方行事曆並同步。', 'medium', 46, true),
-  ('automation.view', 'automation', 'automation', 'view', '查看排程', '自動化規則與執行結果。', 'low', 47, true),
-  ('automation.manage', 'automation', 'automation', 'manage', '修改排程', '新增、修改、停用、刪除排程。排程會自動改訂單狀態與發訊息。', 'high', 48, true),
-  ('automation.run', 'automation', 'automation', 'run', '立即執行排程', '不等排程時間直接跑一次。', 'high', 49, true),
-  ('system.view', 'system', 'system', 'view', '查看系統設定', '民宿基本資料、訂房規則、安全性、進階設定的頁面入口（設定內容需搭配「修改系統設定」）。', 'low', 50, true),
-  ('system.manage', 'system', 'system', 'manage', '修改系統設定', '修改民宿基本資料、訂房規則、安全性、訊息變數。', 'medium', 51, true),
-  ('ai_setting.view', 'system', 'ai_setting', 'view', '查看 AI 引擎設定', 'AI 引擎頁的入口（設定內容需搭配「修改 AI 引擎設定」）。', 'low', 52, true),
-  ('ai_setting.manage', 'system', 'ai_setting', 'manage', '修改 AI 引擎設定', '切換供應商、模型、金鑰、參數、系統指令。', 'medium', 53, true),
-  ('ai_setting.test', 'system', 'ai_setting', 'test', '測試 AI 連線', '用畫面上的模型與金鑰實際呼叫一次。', 'low', 54, true),
-  ('ai_setting.secret.view', 'system', 'ai_setting', 'secret.view', '顯示 AI 金鑰', '看見 OpenAI／Gemini API Key 原文。', 'high', 55, true),
-  ('account.view', 'account', 'account', 'view', '查看使用者', '使用者清單、狀態、2FA、最後登入。', 'low', 56, true),
-  ('account.invite', 'account', 'account', 'invite', '邀請使用者', '寄送邀請並指定角色。', 'medium', 57, true),
-  ('account.edit', 'account', 'account', 'edit', '修改使用者', '改顯示名稱、停權與恢復。', 'medium', 58, true),
-  ('account.reset_mfa', 'account', 'account', 'reset_mfa', '重置 2FA', '移除他人的驗證器，對方下次登入要重新綁定。', 'high', 59, true),
-  ('account.delete', 'account', 'account', 'delete', '移除使用者', '把使用者從系統移除。', 'high', 60, true),
-  ('role.view', 'account', 'role', 'view', '查看角色與權限', '角色清單與各角色的權限。', 'low', 61, true),
-  ('role.manage', 'account', 'role', 'manage', '建立／修改角色', '新增角色、勾選權限、停用或刪除角色。只能授予自己擁有的權限。', 'high', 62, true),
-  ('role.assign', 'account', 'role', 'assign', '指派角色', '把角色指派給使用者或移除。', 'high', 63, true),
-  ('primary_admin.manage', 'account', 'primary_admin', 'manage', '設定主帳號', '指定誰是主帳號（老闆本人）。', 'high', 64, true),
-  ('audit.view', 'audit', 'audit', 'view', '查看操作紀錄', '誰在何時把什麼從什麼改成什麼。', 'low', 65, true),
-  ('error_log.view', 'audit', 'error_log', 'view', '查看錯誤紀錄', '系統錯誤與 AI 呼叫失敗。', 'low', 66, true)
+  ('booking.linen.manage', 'booking', 'booking', 'linen.manage', '確認訂單洗滌清單', '入住前逐筆核對並調整這筆訂單的布巾用量，洗滌單依此發送。', 'low', 12, true),
+  ('booking.checkin_password.manage', 'booking', 'booking', 'checkin_password.manage', '設定入住密碼', '查看與設定訂單的大門／房門密碼。', 'medium', 13, true),
+  ('booking.room_check', 'booking', 'booking', 'room_check', '回報退房房況', '退房後回報有無損壞與建議扣款，供會計決定押金退多少。', 'low', 14, true),
+  ('booking.notify', 'booking', 'booking', 'notify', '發送訂單通知', '訂單處理各關卡確認後，用範本推播 LINE 訊息給這筆訂單的客人。', 'medium', 15, true),
+  ('calendar.view', 'booking', 'calendar', 'view', '查看房況行事曆', '月曆與手機列表檢視。', 'low', 16, true),
+  ('calendar.manage', 'booking', 'calendar', 'manage', '設定旺季／連假', '維護行事曆上的旺季與連假日期。', 'medium', 17, true),
+  ('conflict.view', 'booking', 'conflict', 'view', '查看待辦與候補／衝突', '待辦事項中心與候補／衝突頁。', 'low', 18, true),
+  ('service.view', 'service', 'service', 'view', '查看客服工作台', '對話清單、對話內容與客戶脈絡。', 'low', 19, true),
+  ('service.reply', 'service', 'service', 'reply', '回覆客人', '在工作台直接回覆客人（會用官方帳號推播）。', 'medium', 20, true),
+  ('service.handover', 'service', 'service', 'handover', '接手／轉回 AI', '把客人切成真人模式、轉回 AI、標記轉接已處理。', 'medium', 21, true),
+  ('conversation.diagnostic', 'service', 'conversation', 'diagnostic', '查看 AI 判斷過程', '客人訊息旁的 ⓘ：意圖、抓到的欄位、決策過程與錯誤。', 'low', 22, true),
+  ('conversation.raw_ai_output', 'service', 'conversation', 'raw_ai_output', '查看 AI 原文', 'AI 回覆的原始 JSON／文字（除錯用）。', 'medium', 23, true),
+  ('flow.view', 'service', 'flow', 'view', '查看對話流程', '對話流程的設定內容。', 'low', 24, true),
+  ('flow.manage', 'service', 'flow', 'manage', '編輯對話流程', '新增、修改、刪除對話流程與步驟。改壞會影響客人訂房。', 'medium', 25, true),
+  ('flow.test', 'service', 'flow', 'test', '測試對話', '用模擬器測試一句話會被判成什麼（會呼叫 AI）。', 'low', 26, true),
+  ('knowledge.view', 'service', 'knowledge', 'view', '查看知識庫', 'AI 知識庫的條目與檔案。', 'low', 27, true),
+  ('knowledge.manage', 'service', 'knowledge', 'manage', '編輯知識庫', '新增、修改、刪除、啟用／停用知識庫條目。', 'medium', 28, true),
+  ('knowledge.test', 'service', 'knowledge', 'test', '測試 AI 回答', '用目前知識庫實際問 AI 一次（會呼叫 AI）。', 'low', 29, true),
+  ('service_rule.view', 'service', 'service_rule', 'view', '查看客服規則', '轉接關鍵字、通知對象、逾時設定。', 'low', 30, true),
+  ('service_rule.manage', 'service', 'service_rule', 'manage', '修改客服規則', '修改轉接關鍵字、通知對象、逾時設定。', 'medium', 31, true),
+  ('customer.view', 'customer', 'customer', 'view', '查看客戶', '客戶列表與詳情、訂房紀錄、最近對話。', 'low', 32, true),
+  ('customer.edit', 'customer', 'customer', 'edit', '修改客戶', '重新抓取暱稱、行銷拒收開關。', 'low', 33, true),
+  ('customer.personal_data.delete', 'customer', 'customer', 'personal_data.delete', '清除客戶個資', '永久刪除客人的聯絡人、對話與轉接紀錄。無法復原，主帳號才可執行。', 'high', 34, true),
+  ('marketing.view', 'customer', 'marketing', 'view', '查看訊息發送', '訊息發送頁、名單查詢、LINE 額度。', 'low', 35, true),
+  ('marketing.send', 'customer', 'marketing', 'send', '發送訊息', '批次推播 LINE 訊息給客人（消耗官方帳號額度）。', 'medium', 36, true),
+  ('marketing.template.manage', 'customer', 'marketing', 'template.manage', '管理訊息範本', '新增、修改、刪除訊息範本。', 'low', 37, true),
+  ('housekeeping.view', 'housekeeping', 'housekeeping', 'view', '查看房務', '房務總覽、布巾、耗材、洗滌單。', 'low', 38, true),
+  ('housekeeping.manage', 'housekeeping', 'housekeeping', 'manage', '維護房務資料', '修改布巾品項、房型預設組合、耗材與庫存。', 'low', 39, true),
+  ('linen.cost.view', 'housekeeping', 'linen', 'cost.view', '查看洗滌成本統計', '房務統計的成本報表。', 'low', 40, true),
+  ('inventory.view', 'inventory', 'inventory', 'view', '查看房型與空間', '房間與公共空間的基本資料。', 'low', 41, true),
+  ('inventory.manage', 'inventory', 'inventory', 'manage', '維護房型與空間', '新增、修改、刪除房間與空間。影響計價與配房。', 'medium', 42, true),
+  ('pricing.view', 'pricing', 'pricing', 'view', '查看價格', '價格總覽與目前設定。', 'low', 43, true),
+  ('pricing.manage', 'pricing', 'pricing', 'manage', '修改價格', '基礎價、日期加價、特殊日期、包棟、加人、連住、促銷。直接影響報價。', 'high', 44, true),
+  ('pricing.simulate', 'pricing', 'pricing', 'simulate', '報價模擬', '用目前設定試算報價。', 'low', 45, true),
+  ('integration.view', 'integration', 'integration', 'view', '查看串接', 'LINE 官方帳號、OTA、Google 行事曆、通知對象的頁面入口（設定內容需搭配「修改串接」）。', 'low', 46, true),
+  ('integration.manage', 'integration', 'integration', 'manage', '修改串接', '新增、修改、停用官方帳號、OTA 頻道、行事曆與通知名單。', 'medium', 47, true),
+  ('integration.secret.view', 'integration', 'integration', 'secret.view', '顯示串接金鑰', '看見 LINE Token／Secret 等原文。', 'high', 48, true),
+  ('integration.ota.sync', 'integration', 'integration', 'ota.sync', '手動同步 OTA／行事曆', '立即抓取第三方行事曆並同步。', 'medium', 49, true),
+  ('automation.view', 'automation', 'automation', 'view', '查看排程', '自動化規則與執行結果。', 'low', 50, true),
+  ('automation.manage', 'automation', 'automation', 'manage', '修改排程', '新增、修改、停用、刪除排程。排程會自動改訂單狀態與發訊息。', 'high', 51, true),
+  ('automation.run', 'automation', 'automation', 'run', '立即執行排程', '不等排程時間直接跑一次。', 'high', 52, true),
+  ('system.view', 'system', 'system', 'view', '查看系統設定', '民宿基本資料、訂房規則、安全性、進階設定的頁面入口（設定內容需搭配「修改系統設定」）。', 'low', 53, true),
+  ('system.manage', 'system', 'system', 'manage', '修改系統設定', '修改民宿基本資料、訂房規則、安全性、訊息變數。', 'medium', 54, true),
+  ('ai_setting.view', 'system', 'ai_setting', 'view', '查看 AI 引擎設定', 'AI 引擎頁的入口（設定內容需搭配「修改 AI 引擎設定」）。', 'low', 55, true),
+  ('ai_setting.manage', 'system', 'ai_setting', 'manage', '修改 AI 引擎設定', '切換供應商、模型、金鑰、參數、系統指令。', 'medium', 56, true),
+  ('ai_setting.test', 'system', 'ai_setting', 'test', '測試 AI 連線', '用畫面上的模型與金鑰實際呼叫一次。', 'low', 57, true),
+  ('ai_setting.secret.view', 'system', 'ai_setting', 'secret.view', '顯示 AI 金鑰', '看見 OpenAI／Gemini API Key 原文。', 'high', 58, true),
+  ('account.view', 'account', 'account', 'view', '查看使用者', '使用者清單、狀態、2FA、最後登入。', 'low', 59, true),
+  ('account.invite', 'account', 'account', 'invite', '邀請使用者', '寄送邀請並指定角色。', 'medium', 60, true),
+  ('account.edit', 'account', 'account', 'edit', '修改使用者', '改顯示名稱、停權與恢復。', 'medium', 61, true),
+  ('account.reset_mfa', 'account', 'account', 'reset_mfa', '重置 2FA', '移除他人的驗證器，對方下次登入要重新綁定。', 'high', 62, true),
+  ('account.delete', 'account', 'account', 'delete', '移除使用者', '把使用者從系統移除。', 'high', 63, true),
+  ('role.view', 'account', 'role', 'view', '查看角色與權限', '角色清單與各角色的權限。', 'low', 64, true),
+  ('role.manage', 'account', 'role', 'manage', '建立／修改角色', '新增角色、勾選權限、停用或刪除角色。只能授予自己擁有的權限。', 'high', 65, true),
+  ('role.assign', 'account', 'role', 'assign', '指派角色', '把角色指派給使用者或移除。', 'high', 66, true),
+  ('primary_admin.manage', 'account', 'primary_admin', 'manage', '設定主帳號', '指定誰是主帳號（老闆本人）。', 'high', 67, true),
+  ('audit.view', 'audit', 'audit', 'view', '查看操作紀錄', '誰在何時把什麼從什麼改成什麼。', 'low', 68, true),
+  ('error_log.view', 'audit', 'error_log', 'view', '查看錯誤紀錄', '系統錯誤與 AI 呼叫失敗。', 'low', 69, true)
 ON CONFLICT (code) DO UPDATE SET module = EXCLUDED.module, resource = EXCLUDED.resource, action = EXCLUDED.action, name = EXCLUDED.name, description = EXCLUDED.description, risk_level = EXCLUDED.risk_level, sort_order = EXCLUDED.sort_order, is_active = true;
 -- 不在 registry 裡的舊權限停用（不刪：role_permissions 的歷史還在）
-UPDATE public.permissions SET is_active = false WHERE code NOT IN ('dashboard.view', 'booking.view', 'booking.create', 'booking.edit', 'booking.cancel', 'booking.delete', 'booking.payment.view', 'booking.payment.verify', 'booking.refund.process', 'booking.override_conflict', 'booking.history.view', 'booking.notify', 'calendar.view', 'calendar.manage', 'conflict.view', 'service.view', 'service.reply', 'service.handover', 'conversation.diagnostic', 'conversation.raw_ai_output', 'flow.view', 'flow.manage', 'flow.test', 'knowledge.view', 'knowledge.manage', 'knowledge.test', 'service_rule.view', 'service_rule.manage', 'customer.view', 'customer.edit', 'customer.personal_data.delete', 'marketing.view', 'marketing.send', 'marketing.template.manage', 'housekeeping.view', 'housekeeping.manage', 'linen.cost.view', 'inventory.view', 'inventory.manage', 'pricing.view', 'pricing.manage', 'pricing.simulate', 'integration.view', 'integration.manage', 'integration.secret.view', 'integration.ota.sync', 'automation.view', 'automation.manage', 'automation.run', 'system.view', 'system.manage', 'ai_setting.view', 'ai_setting.manage', 'ai_setting.test', 'ai_setting.secret.view', 'account.view', 'account.invite', 'account.edit', 'account.reset_mfa', 'account.delete', 'role.view', 'role.manage', 'role.assign', 'primary_admin.manage', 'audit.view', 'error_log.view');
+UPDATE public.permissions SET is_active = false WHERE code NOT IN ('dashboard.view', 'booking.view', 'booking.create', 'booking.edit', 'booking.cancel', 'booking.delete', 'booking.payment.view', 'booking.payment.verify', 'booking.refund.process', 'booking.override_conflict', 'booking.history.view', 'booking.linen.manage', 'booking.checkin_password.manage', 'booking.room_check', 'booking.notify', 'calendar.view', 'calendar.manage', 'conflict.view', 'service.view', 'service.reply', 'service.handover', 'conversation.diagnostic', 'conversation.raw_ai_output', 'flow.view', 'flow.manage', 'flow.test', 'knowledge.view', 'knowledge.manage', 'knowledge.test', 'service_rule.view', 'service_rule.manage', 'customer.view', 'customer.edit', 'customer.personal_data.delete', 'marketing.view', 'marketing.send', 'marketing.template.manage', 'housekeeping.view', 'housekeeping.manage', 'linen.cost.view', 'inventory.view', 'inventory.manage', 'pricing.view', 'pricing.manage', 'pricing.simulate', 'integration.view', 'integration.manage', 'integration.secret.view', 'integration.ota.sync', 'automation.view', 'automation.manage', 'automation.run', 'system.view', 'system.manage', 'ai_setting.view', 'ai_setting.manage', 'ai_setting.test', 'ai_setting.secret.view', 'account.view', 'account.invite', 'account.edit', 'account.reset_mfa', 'account.delete', 'role.view', 'role.manage', 'role.assign', 'primary_admin.manage', 'audit.view', 'error_log.view');
 
 -- 範本角色：名稱與說明只在第一次建立時寫入（管理員之後可以改名），is_system 每次同步。
 INSERT INTO public.roles (code, name, description, is_system, sort_order) VALUES
   ('super_admin', 'Super Admin', '系統最高權限，不可刪除、不可停用。只給老闆本人與備援帳號。', true, 10),
   ('sys_admin', '系統管理員', '完整管理：設定、價格、串接、帳號都能改；不含清除客戶個資與設定主帳號。', false, 20),
   ('staff', '客服人員', '訂單、確認付款、房況、客服對話與客戶；價格與房型只能看，不能改系統設定。', false, 30),
-  ('housekeeping', '房務人員', '房況、訂單查看、房務、布巾、耗材與洗滌單。', false, 40),
-  ('accounting', '會計', '訂單查看、付款確認、退款處理、洗滌成本。', false, 50),
+  ('housekeeping', '房務人員', '入住前的洗滌清單與入住密碼、退房房況回報；房務、布巾、耗材與洗滌單。', false, 40),
+  ('accounting', '會計', '訂金與尾款入款確認、押金與取消退款出款、洗滌成本。', false, 50),
   ('marketing', '行銷人員', '客戶資料、訊息發送與範本、知識庫查看。', false, 60),
   ('viewer', '唯讀主管', '只看不改：工作台、訂單、房況、客戶、價格、房務、排程狀態與操作紀錄。', false, 70)
 ON CONFLICT (code) DO UPDATE SET is_system = EXCLUDED.is_system;
@@ -1666,15 +1720,15 @@ BEGIN
   INSERT INTO public.role_permissions (role_id, permission_id) SELECT r_id, p.id FROM public.permissions p WHERE p.is_active ON CONFLICT DO NOTHING;
   SELECT id INTO r_id FROM public.roles WHERE code = 'sys_admin';
   IF NOT EXISTS (SELECT 1 FROM public.role_permissions WHERE role_id = r_id) THEN
-    INSERT INTO public.role_permissions (role_id, permission_id) SELECT r_id, p.id FROM public.permissions p WHERE p.code IN ('dashboard.view', 'booking.view', 'booking.create', 'booking.edit', 'booking.cancel', 'booking.delete', 'booking.payment.view', 'booking.payment.verify', 'booking.refund.process', 'booking.override_conflict', 'booking.history.view', 'booking.notify', 'calendar.view', 'calendar.manage', 'conflict.view', 'service.view', 'service.reply', 'service.handover', 'conversation.diagnostic', 'conversation.raw_ai_output', 'flow.view', 'flow.manage', 'flow.test', 'knowledge.view', 'knowledge.manage', 'knowledge.test', 'service_rule.view', 'service_rule.manage', 'customer.view', 'customer.edit', 'marketing.view', 'marketing.send', 'marketing.template.manage', 'housekeeping.view', 'housekeeping.manage', 'linen.cost.view', 'inventory.view', 'inventory.manage', 'pricing.view', 'pricing.manage', 'pricing.simulate', 'integration.view', 'integration.manage', 'integration.secret.view', 'integration.ota.sync', 'automation.view', 'automation.manage', 'automation.run', 'system.view', 'system.manage', 'ai_setting.view', 'ai_setting.manage', 'ai_setting.test', 'ai_setting.secret.view', 'account.view', 'account.invite', 'account.edit', 'account.reset_mfa', 'account.delete', 'role.view', 'role.manage', 'role.assign', 'audit.view', 'error_log.view') ON CONFLICT DO NOTHING;
+    INSERT INTO public.role_permissions (role_id, permission_id) SELECT r_id, p.id FROM public.permissions p WHERE p.code IN ('dashboard.view', 'booking.view', 'booking.create', 'booking.edit', 'booking.cancel', 'booking.delete', 'booking.payment.view', 'booking.payment.verify', 'booking.refund.process', 'booking.override_conflict', 'booking.history.view', 'booking.linen.manage', 'booking.checkin_password.manage', 'booking.room_check', 'booking.notify', 'calendar.view', 'calendar.manage', 'conflict.view', 'service.view', 'service.reply', 'service.handover', 'conversation.diagnostic', 'conversation.raw_ai_output', 'flow.view', 'flow.manage', 'flow.test', 'knowledge.view', 'knowledge.manage', 'knowledge.test', 'service_rule.view', 'service_rule.manage', 'customer.view', 'customer.edit', 'marketing.view', 'marketing.send', 'marketing.template.manage', 'housekeeping.view', 'housekeeping.manage', 'linen.cost.view', 'inventory.view', 'inventory.manage', 'pricing.view', 'pricing.manage', 'pricing.simulate', 'integration.view', 'integration.manage', 'integration.secret.view', 'integration.ota.sync', 'automation.view', 'automation.manage', 'automation.run', 'system.view', 'system.manage', 'ai_setting.view', 'ai_setting.manage', 'ai_setting.test', 'ai_setting.secret.view', 'account.view', 'account.invite', 'account.edit', 'account.reset_mfa', 'account.delete', 'role.view', 'role.manage', 'role.assign', 'audit.view', 'error_log.view') ON CONFLICT DO NOTHING;
   END IF;
   SELECT id INTO r_id FROM public.roles WHERE code = 'staff';
   IF NOT EXISTS (SELECT 1 FROM public.role_permissions WHERE role_id = r_id) THEN
-    INSERT INTO public.role_permissions (role_id, permission_id) SELECT r_id, p.id FROM public.permissions p WHERE p.code IN ('dashboard.view', 'booking.view', 'booking.create', 'booking.edit', 'booking.cancel', 'booking.payment.view', 'booking.payment.verify', 'booking.history.view', 'booking.notify', 'calendar.view', 'conflict.view', 'service.view', 'service.reply', 'service.handover', 'conversation.diagnostic', 'customer.view', 'customer.edit', 'marketing.view', 'marketing.send', 'marketing.template.manage', 'housekeeping.view', 'housekeeping.manage', 'linen.cost.view', 'inventory.view', 'pricing.view', 'pricing.simulate') ON CONFLICT DO NOTHING;
+    INSERT INTO public.role_permissions (role_id, permission_id) SELECT r_id, p.id FROM public.permissions p WHERE p.code IN ('dashboard.view', 'booking.view', 'booking.create', 'booking.edit', 'booking.cancel', 'booking.payment.view', 'booking.payment.verify', 'booking.history.view', 'booking.notify', 'calendar.view', 'conflict.view', 'booking.linen.manage', 'booking.checkin_password.manage', 'booking.room_check', 'service.view', 'service.reply', 'service.handover', 'conversation.diagnostic', 'customer.view', 'customer.edit', 'marketing.view', 'marketing.send', 'marketing.template.manage', 'housekeeping.view', 'housekeeping.manage', 'linen.cost.view', 'inventory.view', 'pricing.view', 'pricing.simulate') ON CONFLICT DO NOTHING;
   END IF;
   SELECT id INTO r_id FROM public.roles WHERE code = 'housekeeping';
   IF NOT EXISTS (SELECT 1 FROM public.role_permissions WHERE role_id = r_id) THEN
-    INSERT INTO public.role_permissions (role_id, permission_id) SELECT r_id, p.id FROM public.permissions p WHERE p.code IN ('dashboard.view', 'calendar.view', 'booking.view', 'housekeeping.view', 'housekeeping.manage', 'linen.cost.view', 'inventory.view') ON CONFLICT DO NOTHING;
+    INSERT INTO public.role_permissions (role_id, permission_id) SELECT r_id, p.id FROM public.permissions p WHERE p.code IN ('dashboard.view', 'calendar.view', 'booking.view', 'booking.linen.manage', 'booking.checkin_password.manage', 'booking.room_check', 'booking.notify', 'housekeeping.view', 'housekeeping.manage', 'linen.cost.view', 'inventory.view') ON CONFLICT DO NOTHING;
   END IF;
   SELECT id INTO r_id FROM public.roles WHERE code = 'accounting';
   IF NOT EXISTS (SELECT 1 FROM public.role_permissions WHERE role_id = r_id) THEN
@@ -1963,11 +2017,11 @@ BEGIN
       ('line_groups',                       'ANY', 'integration.manage', 'integration.manage', 'integration.manage'),
       ('line_group_members',                'ANY', 'integration.manage', 'integration.manage', 'integration.manage'),
       -- 營運類：依動作分開，取消／推進／退款都是 UPDATE，狀態機的細部規則在程式裡（授權 ≠ 業務規則，§67）
-      ('bookings',                          'booking.view', 'booking.create', 'booking.edit,booking.payment.verify,booking.cancel,booking.refund.process,booking.override_conflict', 'booking.delete'),
-      ('booking_rooms',                     'booking.view', 'booking.create,booking.edit', 'booking.create,booking.edit', 'booking.create,booking.edit'),
+      ('bookings',                          'booking.view', 'booking.create', 'booking.edit,booking.payment.verify,booking.cancel,booking.refund.process,booking.override_conflict,booking.linen.manage,booking.checkin_password.manage,booking.room_check', 'booking.delete'),
+      ('booking_rooms',                     'booking.view', 'booking.create,booking.edit,booking.linen.manage', 'booking.create,booking.edit,booking.linen.manage', 'booking.create,booking.edit,booking.linen.manage'),
       ('booking_room_nights',               'booking.view', 'booking.create,booking.edit', 'booking.create,booking.edit', 'booking.create,booking.edit'),
-      ('booking_linen_usage',               'booking.view', 'booking.create,booking.edit', 'booking.create,booking.edit', 'booking.create,booking.edit'),
-      ('booking_stage_actions',             'booking.view', 'booking.edit,booking.payment.verify,booking.refund.process', 'booking.edit,booking.payment.verify,booking.refund.process', 'NONE'),
+      ('booking_linen_usage',               'booking.view', 'booking.create,booking.edit,booking.linen.manage', 'booking.create,booking.edit,booking.linen.manage', 'booking.create,booking.edit,booking.linen.manage'),
+      ('booking_stage_actions',             'booking.view', 'booking.edit,booking.payment.verify,booking.refund.process,booking.linen.manage,booking.checkin_password.manage,booking.room_check', 'booking.edit,booking.payment.verify,booking.refund.process,booking.linen.manage,booking.checkin_password.manage,booking.room_check', 'NONE'),
       ('user_states',                       'customer.view,service.view,marketing.view', 'customer.edit,service.handover', 'customer.edit,service.handover', 'OWNER'),
       ('conversations',                     'service.view,customer.view', 'NONE', 'NONE', 'OWNER'),
       ('handover_logs',                     'service.view,customer.view', 'service.handover', 'service.handover', 'OWNER'),

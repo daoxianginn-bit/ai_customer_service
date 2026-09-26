@@ -21,7 +21,7 @@ const supabase = createClient(process.env.SUPABASE_URL || '', process.env.SUPABA
 //       用排程的洗滌單設定，把當天入住訂單的布巾數量重新加總再發一次（開頭加【更新】）。
 // ========================================================================
 
-const STAGES = ['awaiting_confirmation', 'awaiting_balance', 'deposit_processing', 'awaiting_refund', 'checkin'];
+const STAGES = ['awaiting_confirmation', 'awaiting_balance', 'deposit_processing', 'awaiting_refund', 'linen', 'checkin_password', 'room_check'];
 
 function mergeTemplate(template: string, fields: Record<string, string>): string {
   let result = template;

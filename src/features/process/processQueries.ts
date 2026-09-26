@@ -64,7 +64,19 @@ export async function fetchQueues(): Promise<QueueData> {
 // ---------------- 寫入 ----------------
 
 /** 存這一關可編輯的欄位（備註／密碼／末五碼），只寫有變的欄位並留操作紀錄。 */
-export async function saveStageEdits(order: BookingRow, patch: { notes?: string | null; check_in_password?: string | null; remit_last5?: string | null }) {
+export interface StageEditPatch {
+  notes?: string | null;
+  check_in_password?: string | null;
+  remit_last5?: string | null;
+  balance_remit_last5?: string | null;
+  refund_amount?: number | null;
+  refund_note?: string | null;
+  damage_found?: boolean | null;
+  damage_deduction?: number | null;
+  damage_note?: string | null;
+}
+
+export async function saveStageEdits(order: BookingRow, patch: StageEditPatch) {
   const payload: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(patch)) if ((order as any)[k] !== v && !((order as any)[k] == null && !v)) payload[k] = v;
   if (!Object.keys(payload).length) return;

@@ -1,7 +1,9 @@
 import { useEffect, useState, type ReactNode } from 'react';
-import { Alert, Box, Button, Chip, Dialog, DialogContent, Divider, IconButton, Skeleton, Stack, TextField, Tooltip, Typography } from '@mui/material';
+import {
+  Alert, Box, Button, Chip, Dialog, DialogContent, Divider, IconButton, InputAdornment, Skeleton, Stack, TextField, ToggleButton, ToggleButtonGroup, Tooltip, Typography,
+} from '@mui/material';
 import { useSnackbar } from 'notistack';
-import { ArrowRight, Check, RotateCcw, Send, X } from 'lucide-react';
+import { ArrowRight, Check, Minus, Plus, RotateCcw, Send, Shuffle, X } from 'lucide-react';
 import { useAuth } from '../../lib/AuthContext';
 import { usePermissions } from '../../app/PermissionContext';
 import { useBreakpoint } from '../../app/useBreakpoint';
@@ -11,12 +13,12 @@ import { computeUsage, linenItemLabel, normalizeChangeCount, type LinenItem, typ
 import StatusBadge from '../../components/ui-mui/StatusBadge';
 import { fetchBookingLinen, fetchLinenSetup, type BookingRow } from '../booking/bookingQueries';
 import { advanceBookingStatus, saveBookingLinen, BookingActionError } from '../booking/bookingActions';
-import { markStageConfirmed, saveStageEdits, type StageAction, type StageDef } from './processQueries';
+import { damageSummary, markStageConfirmed, saveStageEdits, type StageAction, type StageDef, type StageEditPatch } from './processQueries';
 
 // ========================================================================
-// 處理視窗：點一筆訂單後彈出置中視窗，只顯示「這一關需要看的」——訂單編號、訂房資訊、金額（本關要處理的
-// 那一筆放最前面）、可編輯欄位、內部備註，不把整張訂單攤出來。底部：取消（放棄編輯）／高亮動作鈕（＝確認）／確認並推進。
-// 確認完直接切到第二步「發送通知」，訂單同時已離開佇列（清單由上層即時更新）。
+// 處理視窗：點一筆訂單後彈出置中視窗（手機整頁），只顯示「這一關需要看的」——訂單編號、訂房資訊、
+// 金額（會計看完整、房務只看總額）、這一關的可編輯欄位、內部備註。底部：取消／高亮動作鈕（＝確認）／並推進。
+// 確認完直接切到第二步「發送通知」；不發客人通知的關卡（洗滌、房況）確認完就結束。
 // ========================================================================
 
 function Field({ label, value, mono }: { label: string; value: ReactNode; mono?: boolean }) {
@@ -25,6 +27,18 @@ function Field({ label, value, mono }: { label: string; value: ReactNode; mono?:
       <Typography variant="caption" color="text.secondary">{label}</Typography>
       <Typography variant="body2" sx={{ fontFamily: mono ? 'monospace' : undefined, wordBreak: 'break-all' }}>{value ?? '—'}</Typography>
     </Box>
+  );
+}
+
+/** 手機上用加減鈕調數量，不用叫出鍵盤 */
+function QtyStepper({ label, value, onChange, disabled }: { label: string; value: number; onChange: (v: number) => void; disabled?: boolean }) {
+  return (
+    <Stack direction="row" alignItems="center" spacing={1} sx={{ py: 0.75, borderBottom: '1px solid', borderColor: 'divider' }}>
+      <Typography variant="body2" sx={{ flex: 1, minWidth: 0 }}>{label}</Typography>
+      <IconButton size="small" onClick={() => onChange(Math.max(0, value - 1))} disabled={disabled || value <= 0} aria-label={`${label} 減一`}><Minus size={16} /></IconButton>
+      <Typography variant="h6" sx={{ width: 40, textAlign: 'center', fontVariantNumeric: 'tabular-nums' }}>{value}</Typography>
+      <IconButton size="small" onClick={() => onChange(value + 1)} disabled={disabled} aria-label={`${label} 加一`}><Plus size={16} /></IconButton>
+    </Stack>
   );
 }
 
@@ -46,27 +60,44 @@ export default function StagePanel({ open, stage, booking, action, onClose, onCh
   const { isMobile } = useBreakpoint();
   const canAct = hasPermission(stage.permission);
   const canSeePayment = hasPermission('booking.payment.view');
-  const canNotify = hasPermission('booking.notify');
+  const canNotify = hasPermission('booking.notify') && !!stage.templateTitle;
 
   const [notes, setNotes] = useState('');
   const [remit, setRemit] = useState('');
   const [password, setPassword] = useState('');
+  const [refund, setRefund] = useState('');
+  const [refundNote, setRefundNote] = useState('');
+  const [damaged, setDamaged] = useState<boolean | null>(null);
+  const [deduction, setDeduction] = useState('');
+  const [damageNote, setDamageNote] = useState('');
   const [linen, setLinen] = useState<{ items: LinenItem[]; defaults: RoomLinenDefault[]; roomIds: string[]; usage: LinenUsageRow[] } | null>(null);
   const [linenLoading, setLinenLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState<BookingRow | null>(null);
   const [remitError, setRemitError] = useState('');
 
+  const has = (f: string) => stage.fields.includes(f as never);
+
   useEffect(() => {
     if (!open) return;
-    setNotes(booking.notes || ''); setRemit(booking.remit_last5 || ''); setPassword(booking.check_in_password || '');
+    setNotes(booking.notes || '');
+    // 尾款末五碼沒填過就帶訂金那一組（多數人兩次都用同一個帳號匯款），不對再改
+    setRemit(has('balance_remit') ? (booking.balance_remit_last5 || booking.remit_last5 || '') : (booking.remit_last5 || ''));
+    setPassword(booking.check_in_password || '');
+    const defRefund = booking.refund_amount ?? stage.defaultRefund?.(booking) ?? null;
+    setRefund(defRefund == null ? '' : String(defRefund));
+    setRefundNote(booking.refund_note || '');
+    setDamaged(booking.damage_found ?? null);
+    setDeduction(booking.damage_deduction == null ? '' : String(booking.damage_deduction));
+    setDamageNote(booking.damage_note || '');
     setDone(null); setRemitError(''); setLinen(null);
-    if (stage.fields.includes('linen')) {
+    if (has('linen')) {
       setLinenLoading(true);
       Promise.all([fetchLinenSetup(), fetchBookingLinen(booking.id)])
         .then(([setup, mine]) => setLinen({ items: setup.items, defaults: setup.defaults, roomIds: mine.roomIds, usage: mine.usage }))
         .finally(() => setLinenLoading(false));
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, booking, stage]);
 
   const resetLinen = () => {
@@ -82,17 +113,24 @@ export default function StagePanel({ open, stage, booking, action, onClose, onCh
 
   const run = async (advance: boolean) => {
     if (!canAct) return;
-    if (stage.fields.includes('remit') && !remit.trim()) { setRemitError('請先填寫匯款末5碼'); return; }
+    if (has('remit') && !remit.trim()) { setRemitError('請先填寫匯款末5碼'); return; }
     setBusy(true);
     try {
-      const patch: Parameters<typeof saveStageEdits>[1] = { notes: notes.trim() || null };
-      if (stage.fields.includes('password')) patch.check_in_password = password.trim() || null;
+      const patch: StageEditPatch = { notes: notes.trim() || null };
+      if (has('balance_remit')) patch.balance_remit_last5 = remit.trim() || null;
+      if (has('password')) patch.check_in_password = password.trim() || null;
+      if (has('refund')) { patch.refund_amount = refund === '' ? null : Number(refund); patch.refund_note = refundNote.trim() || null; }
+      if (has('damage')) {
+        patch.damage_found = damaged;
+        patch.damage_deduction = damaged && deduction !== '' ? Number(deduction) : damaged ? 0 : null;
+        patch.damage_note = damageNote.trim() || null;
+      }
       await saveStageEdits(booking, patch);
       if (linen) await saveBookingLinen(booking.id, linen.roomIds, linen.usage, true);
       let updated: BookingRow = { ...booking, ...patch } as BookingRow;
       if ((advance || stage.confirmAdvances) && stage.nextStatus) {
         await advanceBookingStatus(updated, stage.nextStatus, { remitLast5: remit.trim() });
-        updated = { ...updated, status: stage.nextStatus, ...(stage.fields.includes('remit') ? { remit_last5: remit.trim() } : {}) };
+        updated = { ...updated, status: stage.nextStatus, ...(has('remit') ? { remit_last5: remit.trim() } : {}) };
       }
       await markStageConfirmed(booking.id, stage.key, profile?.email || profile?.id || 'unknown');
       onChanged(updated);
@@ -106,6 +144,7 @@ export default function StagePanel({ open, stage, booking, action, onClose, onCh
   const balance = booking.total_amount != null ? Number(booking.total_amount) - Number(booking.deposit || 0) : null;
   const nights = booking.nights ?? null;
   const stageAmount = stage.amountOf(booking);
+  const damage = damageSummary(booking);
 
   const header = (
     <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', px: 2.5, py: 1.5, borderBottom: '1px solid', borderColor: 'divider' }}>
@@ -129,59 +168,123 @@ export default function StagePanel({ open, stage, booking, action, onClose, onCh
           <Field label="房型" value={booking.room_type_label || (booking.whole_house ? '包棟' : '—')} />
         </Box>
       </Box>
-      <Box>
-        <Typography variant="subtitle2" gutterBottom>金額</Typography>
-        <Box sx={{ mb: 1.5, px: 1.5, py: 1, borderRadius: 1, bgcolor: stage.colorLight, display: 'inline-flex', alignItems: 'baseline', gap: 1 }}>
-          <Typography variant="caption" sx={{ color: stage.color, fontWeight: 600 }}>{stage.amountLabel}</Typography>
-          <Typography variant="h6" sx={{ color: stage.color, fontWeight: 700 }}>{formatMoney(stageAmount)}</Typography>
+
+      {stage.money === 'full' ? (
+        <Box>
+          <Typography variant="subtitle2" gutterBottom>金額</Typography>
+          {stage.amountLabel && (
+            <Box sx={{ mb: 1.5, px: 1.5, py: 1, borderRadius: 1, bgcolor: stage.colorLight, display: 'inline-flex', alignItems: 'baseline', gap: 1 }}>
+              <Typography variant="caption" sx={{ color: stage.color, fontWeight: 600 }}>{stage.amountLabel}</Typography>
+              <Typography variant="h6" sx={{ color: stage.color, fontWeight: 700 }}>{formatMoney(stageAmount)}</Typography>
+            </Box>
+          )}
+          <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 1.5 }}>
+            <Field label="總額" value={formatMoney(booking.total_amount)} />
+            <Field label="訂金" value={formatMoney(booking.deposit)} />
+            <Field label="尾款" value={balance != null ? formatMoney(balance) : '—'} />
+            <Field label="押金" value={formatMoney(booking.security_deposit)} />
+            {canSeePayment && !has('remit') && <Field label="訂金末五碼" value={booking.remit_last5 || '—'} mono />}
+            {canSeePayment && !has('balance_remit') && booking.balance_remit_last5 && <Field label="尾款末五碼" value={booking.balance_remit_last5} mono />}
+            {booking.payment_deadline_at && stage.key === 'awaiting_confirmation' && <Field label="匯款期限" value={formatDateTime(booking.payment_deadline_at)} />}
+          </Box>
         </Box>
-        <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 1.5 }}>
-          <Field label="總額" value={formatMoney(booking.total_amount)} />
-          <Field label="訂金" value={formatMoney(booking.deposit)} />
-          <Field label="尾款" value={balance != null ? formatMoney(balance) : '—'} />
-          <Field label="押金" value={formatMoney(booking.security_deposit)} />
-          {canSeePayment && !stage.fields.includes('remit') && <Field label="匯款末五碼" value={booking.remit_last5 || '—'} mono />}
-          {booking.payment_deadline_at && stage.key === 'awaiting_confirmation' && <Field label="匯款期限" value={formatDateTime(booking.payment_deadline_at)} />}
+      ) : (
+        <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 1.5 }}>
+          <Field label="訂單總額" value={formatMoney(booking.total_amount)} />
+          {booking.guest_notes && <Field label="顧客備註" value={booking.guest_notes} />}
         </Box>
-      </Box>
+      )}
+
+      {/* 押金退款要看得到房務回報了什麼，不用自己跑去問 */}
+      {stage.key === 'deposit_processing' && (
+        <Alert severity={damage.checked ? (booking.damage_found ? 'warning' : 'success') : 'info'} icon={false} sx={{ py: 0.75 }}>
+          <Typography variant="body2" fontWeight={600}>{damage.label}</Typography>
+          {booking.damage_note && <Typography variant="caption" color="text.secondary">{booking.damage_note}</Typography>}
+          {!damage.checked && <Typography variant="caption" color="text.secondary">房務還沒回報，實退金額預設為全額，確定要退再按確認。</Typography>}
+        </Alert>
+      )}
     </Stack>
   );
 
   const editor = (
     <Stack spacing={2}>
       <Alert severity="info" icon={false} sx={{ bgcolor: stage.colorLight, color: 'text.primary', fontSize: 13 }}>{stage.hint}</Alert>
-      {stage.fields.includes('remit') && (
-        <TextField label="匯款末5碼" value={remit} onChange={(e) => { setRemit(e.target.value.replace(/\D/g, '').slice(0, 5)); setRemitError(''); }} error={!!remitError} helperText={remitError || '核對到帳後填入，會寫進訂單'} inputProps={{ inputMode: 'numeric', maxLength: 5 }} required disabled={!canAct} sx={{ maxWidth: 240 }} />
+
+      {(has('remit') || has('balance_remit')) && (
+        <TextField
+          label={has('remit') ? '訂金匯款末5碼' : '尾款匯款末5碼'} value={remit}
+          onChange={(e) => { setRemit(e.target.value.replace(/\D/g, '').slice(0, 5)); setRemitError(''); }}
+          error={!!remitError} helperText={remitError || (has('balance_remit') ? '預設帶訂金那一組，不同請改掉' : '核對到帳後填入，會寫進訂單')}
+          inputProps={{ inputMode: 'numeric', maxLength: 5 }} required={has('remit')} disabled={!canAct} sx={{ maxWidth: 260 }}
+        />
       )}
-      {stage.fields.includes('password') && (
-        <TextField label="入住密碼" value={password} onChange={(e) => setPassword(e.target.value)} helperText="大門／房門密碼，發送「入住密碼發送」範本時會帶入 [入住密碼]" disabled={!canAct || !canSeePayment} sx={{ maxWidth: 240 }} />
+
+      {has('refund') && (
+        <Stack spacing={1.5}>
+          <TextField
+            label="實退金額" type="number" value={refund} onChange={(e) => setRefund(e.target.value)} disabled={!canAct}
+            InputProps={{ startAdornment: <InputAdornment position="start">NT$</InputAdornment> }} inputProps={{ min: 0, inputMode: 'numeric' }}
+            helperText={`應退 ${formatMoney(stageAmount)}${stage.key === 'deposit_processing' && damage.deduction > 0 ? `，已扣房務建議的 ${formatMoney(damage.deduction)}` : ''}`}
+            sx={{ maxWidth: 260 }}
+          />
+          <TextField label="退款說明（選填）" value={refundNote} onChange={(e) => setRefundNote(e.target.value)} disabled={!canAct} placeholder="例如：扣除清潔費 500" fullWidth />
+        </Stack>
       )}
-      {stage.fields.includes('linen') && (
+
+      {has('password') && (
+        <Stack direction="row" spacing={1} alignItems="flex-start">
+          <TextField
+            label="入住密碼" value={password} onChange={(e) => setPassword(e.target.value)} disabled={!canAct}
+            helperText="大門／房門密碼，排程會用 [入住密碼] 發給客人" inputProps={{ inputMode: 'numeric' }}
+            sx={{ maxWidth: 200, '& input': { fontSize: 24, letterSpacing: 4, fontFamily: 'monospace' } }}
+          />
+          <Button size="small" startIcon={<Shuffle size={14} />} onClick={() => setPassword(String(Math.floor(1000 + Math.random() * 9000)))} disabled={!canAct} sx={{ mt: 1.5 }}>隨機</Button>
+        </Stack>
+      )}
+
+      {has('damage') && (
+        <Stack spacing={1.5}>
+          <Box>
+            <Typography variant="body2" sx={{ mb: 0.75 }}>房間狀況</Typography>
+            <ToggleButtonGroup
+              exclusive size="small" value={damaged === null ? null : damaged ? 'yes' : 'no'} disabled={!canAct}
+              onChange={(_, v) => { if (v === null) return; setDamaged(v === 'yes'); if (v === 'no') setDeduction(''); }}
+            >
+              <ToggleButton value="no" sx={{ px: 2.5, '&.Mui-selected': { bgcolor: 'success.light', color: 'success.dark' } }}>正常</ToggleButton>
+              <ToggleButton value="yes" sx={{ px: 2.5, '&.Mui-selected': { bgcolor: 'warning.light', color: 'warning.dark' } }}>有損壞</ToggleButton>
+            </ToggleButtonGroup>
+          </Box>
+          {damaged && (
+            <TextField
+              label="建議扣款" type="number" value={deduction} onChange={(e) => setDeduction(e.target.value)} disabled={!canAct}
+              InputProps={{ startAdornment: <InputAdornment position="start">NT$</InputAdornment> }} inputProps={{ min: 0, inputMode: 'numeric' }}
+              helperText={`押金 ${formatMoney(booking.security_deposit)}，會計退款時會自動扣掉這個金額`} sx={{ maxWidth: 260 }}
+            />
+          )}
+          <TextField label={damaged ? '損壞說明' : '房況說明（選填）'} value={damageNote} onChange={(e) => setDamageNote(e.target.value)} disabled={!canAct} multiline minRows={2} fullWidth placeholder={damaged ? '例如：浴室玻璃杯破一個' : ''} />
+        </Stack>
+      )}
+
+      {has('linen') && (
         <Box>
-          <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1 }}>
+          <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 0.5 }}>
             <Typography variant="subtitle2">洗物數量</Typography>
             <Button size="small" startIcon={<RotateCcw size={14} />} onClick={resetLinen} disabled={!linen || !canAct}>回復預設</Button>
           </Stack>
-          {linenLoading || !linen ? <Skeleton variant="rounded" height={96} /> : linen.items.length === 0 ? (
+          {linenLoading || !linen ? <Skeleton variant="rounded" height={120} /> : linen.items.length === 0 ? (
             <Typography variant="body2" color="text.disabled">尚未建立任何布巾品項。</Typography>
           ) : (
-            <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: 1 }}>
-              {linen.items.map((it) => {
-                const row = linen.usage.find((u) => u.linen_item_id === it.id);
-                return (
-                  <TextField
-                    key={it.id} size="small" type="number" label={linenItemLabel(it)} value={row?.quantity ?? 0}
-                    onChange={(e) => setQty(it, Math.max(0, Number(e.target.value) || 0))} inputProps={{ min: 0 }} disabled={!canAct}
-                    InputLabelProps={{ shrink: true }}
-                  />
-                );
-              })}
+            <Box>
+              {linen.items.map((it) => (
+                <QtyStepper key={it.id} label={linenItemLabel(it)} value={linen.usage.find((u) => u.linen_item_id === it.id)?.quantity ?? 0} onChange={(v) => setQty(it, v)} disabled={!canAct} />
+              ))}
             </Box>
           )}
           {linen && linen.roomIds.length === 0 && <Typography variant="caption" color="warning.main">這筆訂單還沒連結房間，「回復預設」算不出用量；請先到訂單編輯勾選房間。</Typography>}
         </Box>
       )}
-      <TextField label="內部備註" value={notes} onChange={(e) => setNotes(e.target.value)} multiline minRows={3} disabled={!canAct} helperText="只有後台看得到，不會發給客人" />
+
+      <TextField label="內部備註" value={notes} onChange={(e) => setNotes(e.target.value)} multiline minRows={2} disabled={!canAct} helperText="只有後台看得到，不會發給客人" />
       {!canAct && <Alert severity="info">你沒有「{stage.action}」的權限，只能查看。</Alert>}
     </Stack>
   );
@@ -190,12 +293,17 @@ export default function StagePanel({ open, stage, booking, action, onClose, onCh
     <Stack spacing={2} alignItems="center" sx={{ py: 3, textAlign: 'center' }}>
       <Box sx={{ width: 56, height: 56, borderRadius: '50%', bgcolor: 'success.light', color: 'success.dark', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Check size={28} /></Box>
       <Typography variant="h6">已確認</Typography>
-      <Typography variant="body2" color="text.secondary">訂單目前狀態：<StatusBadge status={done.status} />。接下來可以把結果通知客人。</Typography>
-      {action?.notified_at && <Typography variant="caption" color="text.secondary">這一關已於 {formatDateTime(action.notified_at)} 通知過客人（{action.template_title || '自訂內容'}），可再發一次。</Typography>}
-      <Tooltip title={!booking.line_user_id ? '這筆訂單沒有 LINE 帳號，無法推播' : !canNotify ? '沒有「發送訂單通知」權限' : ''}><span>
-        <Button variant="contained" size="large" startIcon={<Send size={18} />} onClick={() => onNotify(done, stage)} disabled={!booking.line_user_id || !canNotify} sx={{ bgcolor: stage.color, '&:hover': { bgcolor: stage.color, filter: 'brightness(.92)' } }}>訊息發送</Button>
-      </span></Tooltip>
-      <Button color="inherit" onClick={onClose}>稍後再發，關閉</Button>
+      <Typography variant="body2" color="text.secondary">
+        訂單目前狀態：<StatusBadge status={done.status} />
+        {stage.key === 'room_check' ? '。會計的「押金退款」已經看得到你的回報。' : canNotify ? '。接下來可以把結果通知客人。' : ''}
+      </Typography>
+      {action?.notified_at && canNotify && <Typography variant="caption" color="text.secondary">這一關已於 {formatDateTime(action.notified_at)} 通知過客人（{action.template_title || '自訂內容'}），可再發一次。</Typography>}
+      {canNotify && (
+        <Tooltip title={!booking.line_user_id ? '這筆訂單沒有 LINE 帳號，無法推播' : ''}><span>
+          <Button variant="contained" size="large" startIcon={<Send size={18} />} onClick={() => onNotify(done, stage)} disabled={!booking.line_user_id} sx={{ bgcolor: stage.color, '&:hover': { bgcolor: stage.color, filter: 'brightness(.92)' } }}>{stage.notifyLabel || '訊息發送'}</Button>
+        </span></Tooltip>
+      )}
+      <Button color="inherit" onClick={onClose}>{canNotify ? '稍後再發，關閉' : '關閉'}</Button>
     </Stack>
   );
 

@@ -58,11 +58,14 @@ export const PERMISSION_CATALOG: readonly PermissionDef[] = [
   P('booking.edit', 'booking', '修改訂單', '修改客人資料、日期、房間、金額與備註。', 'low', ['booking.view']),
   P('booking.cancel', 'booking', '取消訂單', '把訂單改成「取消」，紀錄保留。', 'medium', ['booking.view']),
   P('booking.delete', 'booking', '刪除訂單', '永久刪除訂單，連同房間與布巾用量，無法復原。', 'high', ['booking.view']),
-  P('booking.payment.view', 'booking', '查看付款資料', '看得到匯款末五碼與入住密碼。', 'medium', ['booking.view']),
+  P('booking.payment.view', 'booking', '查看付款資料', '看得到匯款末五碼、實收與實退金額。', 'medium', ['booking.view']),
   P('booking.payment.verify', 'booking', '確認付款／推進狀態', '核對訂金或尾款，依流程把訂單推到下一關。', 'medium', ['booking.view', 'booking.payment.view']),
   P('booking.refund.process', 'booking', '處理退款', '把待退款的訂單標記為已退款。會留下操作紀錄。', 'high', ['booking.view', 'booking.payment.view']),
   P('booking.override_conflict', 'booking', '處理撞期／候補', '清除 OTA 撞期旗標、決定系統攔下的撞期訂單怎麼走。', 'high', ['booking.view', 'conflict.view']),
   P('booking.history.view', 'booking', '查看訂單異動紀錄', '訂單詳情的操作紀錄時間軸（誰在何時改了什麼）。', 'low', ['booking.view']),
+  P('booking.linen.manage', 'booking', '確認訂單洗滌清單', '入住前逐筆核對並調整這筆訂單的布巾用量，洗滌單依此發送。', 'low', ['booking.view']),
+  P('booking.checkin_password.manage', 'booking', '設定入住密碼', '查看與設定訂單的大門／房門密碼。', 'medium', ['booking.view']),
+  P('booking.room_check', 'booking', '回報退房房況', '退房後回報有無損壞與建議扣款，供會計決定押金退多少。', 'low', ['booking.view']),
   P('booking.notify', 'booking', '發送訂單通知', '訂單處理各關卡確認後，用範本推播 LINE 訊息給這筆訂單的客人。', 'medium', ['booking.view']),
   P('calendar.view', 'booking', '查看房況行事曆', '月曆與手機列表檢視。'),
   P('calendar.manage', 'booking', '設定旺季／連假', '維護行事曆上的旺季與連假日期。', 'medium', ['calendar.view']),
@@ -221,6 +224,7 @@ export const ROLE_TEMPLATES: readonly RoleTemplate[] = [
     permissions: [...withDependencies([
       'dashboard.view', 'booking.view', 'booking.create', 'booking.edit', 'booking.cancel', 'booking.payment.view', 'booking.payment.verify', 'booking.history.view', 'booking.notify',
       'calendar.view', 'conflict.view',
+      'booking.linen.manage', 'booking.checkin_password.manage', 'booking.room_check',
       'service.view', 'service.reply', 'service.handover', 'conversation.diagnostic',
       'customer.view', 'customer.edit', 'marketing.view', 'marketing.send', 'marketing.template.manage',
       'housekeeping.view', 'housekeeping.manage', 'linen.cost.view',
@@ -228,11 +232,11 @@ export const ROLE_TEMPLATES: readonly RoleTemplate[] = [
     ])],
   },
   {
-    code: 'housekeeping', name: '房務人員', description: '房況、訂單查看、房務、布巾、耗材與洗滌單。', isSystem: false,
-    permissions: [...withDependencies(['dashboard.view', 'calendar.view', 'booking.view', 'housekeeping.view', 'housekeeping.manage', 'linen.cost.view', 'inventory.view'])],
+    code: 'housekeeping', name: '房務人員', description: '入住前的洗滌清單與入住密碼、退房房況回報；房務、布巾、耗材與洗滌單。', isSystem: false,
+    permissions: [...withDependencies(['dashboard.view', 'calendar.view', 'booking.view', 'booking.linen.manage', 'booking.checkin_password.manage', 'booking.room_check', 'booking.notify', 'housekeeping.view', 'housekeeping.manage', 'linen.cost.view', 'inventory.view'])],
   },
   {
-    code: 'accounting', name: '會計', description: '訂單查看、付款確認、退款處理、洗滌成本。', isSystem: false,
+    code: 'accounting', name: '會計', description: '訂金與尾款入款確認、押金與取消退款出款、洗滌成本。', isSystem: false,
     permissions: [...withDependencies(['dashboard.view', 'booking.view', 'booking.payment.view', 'booking.payment.verify', 'booking.refund.process', 'booking.history.view', 'booking.notify', 'customer.view', 'linen.cost.view'])],
   },
   {

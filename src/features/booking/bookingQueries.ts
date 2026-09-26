@@ -35,6 +35,12 @@ export interface BookingRow {
   total_amount?: number | null;
   deposit?: number | null;
   remit_last5?: string | null;
+  balance_remit_last5?: string | null;
+  refund_amount?: number | null;
+  refund_note?: string | null;
+  damage_found?: boolean | null;
+  damage_deduction?: number | null;
+  damage_note?: string | null;
   check_in_password?: string | null;
   status: string;
   guest_notes?: string | null;
