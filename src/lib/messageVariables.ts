@@ -426,6 +426,52 @@ export function resolveVariable(source: VariableSource, fieldKey: string, ctx: V
   return '';
 }
 
+/**
+ * 標準欄位：不管管理員有沒有在「參數設定」建過對照，這些名稱一律可用。
+ *
+ * message_variables 的預設值只在「整張表是空的」時才種（見 schema 的說明），所以既有安裝可能
+ * 根本沒有「入住人數」這一列——系統自己出的範本（訂房成功通知…）用到它就會原樣把 [入住人數]
+ * 送給客人。名稱直接用白名單的 label，跟參數設定頁看到的一樣；管理員自己定義的同名變數優先，
+ * 所以呼叫端要用 { ...buildStandardFields(ctx), ...buildMergeFields(vars, ctx) } 的順序。
+ *
+ * 「房價（不含押金）」這種帶括號說明的 label 不適合當變數名，另外取短名（房價／訂單總額／訂金／尾款）。
+ */
+const STANDARD_FIELD_ALIASES: Record<string, string> = {
+  'room_amount': '房價',
+  'total_amount': '訂單總額',
+  'deposit': '訂金',
+  'balance_due': '尾款',
+};
+
+export function buildStandardFields(ctx: VariableResolveContext): Record<string, string> {
+  const fields: Record<string, string> = {};
+  const add = (source: VariableSource, options: { value: string; label: string }[]) => {
+    for (const o of options) {
+      const name = STANDARD_FIELD_ALIASES[o.value] || o.label;
+      fields[name] = resolveVariable(source, o.value, ctx);
+    }
+  };
+  add('booking', BOOKING_FIELD_OPTIONS);
+  add('customer', CUSTOMER_FIELD_OPTIONS);
+  add('settings', SETTINGS_FIELD_OPTIONS);
+  // 歷史上兩種叫法都有人用（客製訊息發送 vs 罐頭訊息），兩個都認
+  fields['姓名'] = fields['客戶姓名'];
+  fields['人數'] = fields['入住人數'];
+  fields['總金額'] = fields['訂單總額'];
+  fields['總報價'] = fields['訂單總額'];
+  return fields;
+}
+
+/**
+ * 標準欄位當成「內建的變數列」：訊息編輯器把它們跟管理員自訂的變數一起列出來、也一起算進
+ * 「認得的變數」，否則可用的 [入住人數] 會被標成打錯字。field_key 讓它們落在正確的分區。
+ */
+export const STANDARD_VARIABLE_ROWS: { variable_name: string; field_key: string }[] = [
+  ...BOOKING_FIELD_OPTIONS.map((o) => ({ variable_name: STANDARD_FIELD_ALIASES[o.value] || o.label, field_key: o.value })),
+  ...CUSTOMER_FIELD_OPTIONS.map((o) => ({ variable_name: o.label, field_key: o.value })),
+  ...SETTINGS_FIELD_OPTIONS.map((o) => ({ variable_name: o.label, field_key: o.value })),
+];
+
 export function buildMergeFields(variables: MessageVariable[], ctx: VariableResolveContext): Record<string, string> {
   const fields: Record<string, string> = {};
   for (const v of variables) {

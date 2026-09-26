@@ -2,7 +2,7 @@ import { Handler } from '@netlify/functions';
 import { Client } from '@line/bot-sdk';
 import { createClient } from '@supabase/supabase-js';
 import fetch from 'node-fetch';
-import { buildMergeFields, MessageVariable, computeTodayTomorrowFields } from '../../src/lib/messageVariables';
+import { buildMergeFields, buildStandardFields, MessageVariable, computeTodayTomorrowFields } from '../../src/lib/messageVariables';
 import { LineChannel } from '../../src/lib/lineChannels';
 import { withErrorLogging } from '../../src/lib/operationLog';
 import { requirePermission } from '../../src/lib/requireRole';
@@ -305,12 +305,11 @@ async function listOrders(settings: any, filters: OrderFilters): Promise<{ varia
 
   const rows = bookingsForBroadcast.map((b: any) => {
     const balanceDue = b.total_amount != null ? b.total_amount - (b.deposit ?? 0) : null;
+    const ctx = { booking: b, customer: customerByUser[b.line_user_id] || { nickname: b.nickname, line_user_id: b.line_user_id }, settings };
     const fields = {
-      ...buildMergeFields(variables, {
-        booking: b,
-        customer: customerByUser[b.line_user_id] || { nickname: b.nickname, line_user_id: b.line_user_id },
-        settings,
-      }),
+      // 標準欄位先鋪底（管理員沒在「參數設定」建過對照也能用），自訂的同名變數蓋過去
+      ...buildStandardFields(ctx),
+      ...buildMergeFields(variables, ctx),
       ...computeTodayTomorrowFields(),
     };
     return {
@@ -381,7 +380,7 @@ async function listCustomers(settings: any, keyword?: string): Promise<{ variabl
     nickname: c.nickname || '',
     last_message_at: c.last_message_at,
     booking_count: bookingCountByUser[c.line_user_id] || 0,
-    fields: { ...buildMergeFields(variables, { customer: c, settings }), ...computeTodayTomorrowFields() },
+    fields: { ...buildStandardFields({ customer: c, settings }), ...buildMergeFields(variables, { customer: c, settings }), ...computeTodayTomorrowFields() },
   }));
 
   return { variables: variables.map((v) => v.variable_name), rows };

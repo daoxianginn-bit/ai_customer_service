@@ -11,6 +11,7 @@ import {
   DEPOSIT_SECTION_LABEL,
   BOOKING_NOTICE_VARIABLES,
   BOOKING_NOTICE_SECTION_LABEL,
+  STANDARD_VARIABLE_ROWS,
 } from '../lib/messageVariables';
 
 /**
@@ -56,7 +57,12 @@ export function useTemplateVariables(scope: TemplateVariableScope = 'message'): 
       const isNotice = scope === 'laundry' || scope === 'deposit' || scope === 'booking';
 
       const groups: PlaceholderGroup[] = [
-        ...groupVariablesBySection(variableRes.data || [], ['今日日期', '明日日期']),
+        // 標準欄位（訂單編號、入住人數…）一律列出：它們不依賴管理員在「參數設定」建過對照就算得出值，
+        // 漏列的話系統自己出的範本會出現「這個變數沒有登記」的假警告。自訂的同名變數以自訂的為準。
+        ...groupVariablesBySection(
+          [...(variableRes.data || []), ...STANDARD_VARIABLE_ROWS.filter((r) => !(variableRes.data || []).some((v) => v.variable_name === r.variable_name))],
+          ['今日日期', '明日日期'],
+        ),
         { label: BOOKING_NOTICE_SECTION_LABEL, items: BOOKING_NOTICE_VARIABLES, inert: !isNotice, note: NOTICE_ONLY_NOTE },
         { label: LAUNDRY_SECTION_LABEL, items: LAUNDRY_SHEET_VARIABLES, inert: scope !== 'laundry', note: LAUNDRY_ONLY_NOTE },
         { label: LINEN_SECTION_LABEL, items: linenNames, inert: scope !== 'laundry', note: LAUNDRY_ONLY_NOTE },

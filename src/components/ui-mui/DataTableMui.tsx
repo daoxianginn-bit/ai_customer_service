@@ -53,6 +53,8 @@ export interface DataTableProps<T> {
 
   /** 每列最右側的行內動作按鈕 */
   rowActions?: (row: T) => ReactNode;
+  /** 每一列額外的樣式（例如依狀態上色的左側色軌）。回傳 MUI 的 sx 物件。 */
+  rowSx?: (row: T) => Record<string, unknown>;
   /** 點整列時觸發（通常是開啟檢視/編輯） */
   onRowClick?: (row: T) => void;
   /** 緊湊列高（欄位多的列表用，V2 §21） */
@@ -63,7 +65,7 @@ export default function DataTableMui<T>({
   columns, rows, rowKey, loading, emptyMessage = '沒有資料',
   sortBy, sortDir = 'asc', onSortChange,
   page, rowsPerPage = 20, totalCount, onPageChange, onRowsPerPageChange,
-  selected, onSelectedChange, rowActions, onRowClick, dense,
+  selected, onSelectedChange, rowActions, rowSx, onRowClick, dense,
 }: DataTableProps<T>) {
   const selectable = !!selected && !!onSelectedChange;
   const pageKeys = useMemo(() => rows.map(rowKey), [rows, rowKey]);
@@ -149,7 +151,7 @@ export default function DataTableMui<T>({
                   hover
                   selected={isSelected}
                   onClick={onRowClick ? () => onRowClick(row) : undefined}
-                  sx={{ cursor: onRowClick ? 'pointer' : undefined }}
+                  sx={{ cursor: onRowClick ? 'pointer' : undefined, ...(rowSx ? rowSx(row) : {}) }}
                 >
                   {selectable && (
                     // 勾選格自己吃掉點擊，否則會連帶觸發整列的 onRowClick

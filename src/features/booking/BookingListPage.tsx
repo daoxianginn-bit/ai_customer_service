@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
-  Box, Button, Card, CardActionArea, CardContent, Chip, Drawer, IconButton, MenuItem, Paper, Skeleton, Stack,
+  Box, Button, Card, CardActionArea, CardContent, Chip, Drawer, IconButton, LinearProgress, MenuItem, Paper, Skeleton, Stack,
   TextField, Tooltip, Typography,
 } from '@mui/material';
 import { useSnackbar } from 'notistack';
@@ -10,17 +10,18 @@ import {
   BOOKING_STATUS_OPTIONS, SYSTEM_ONLY_STATUSES, FLOW_STEP_STATUSES, MANUAL_ACTION_FLOW_STATUSES, MANUAL_ACTION_STATUSES,
   bookingStatusLabel, nextFlowStatus,
 } from '../../lib/bookingStatus';
-import { formatDateRange, formatMoney } from '../../lib/format';
+import { formatMoney, formatShortDate } from '../../lib/format';
 import { useBreakpoint } from '../../app/useBreakpoint';
 import { Can, usePermission } from '../../app/Can';
 import PageHeaderV2 from '../../components/ui-mui/PageHeaderV2';
 import StatusBadge from '../../components/ui-mui/StatusBadge';
+import { CustomerCell, DatesCell, MoneyCell, RoomCell, StatusCell, checkinHint, paymentState, rowRailSx, tableRailSx, tracksPayment } from './bookingListCells';
 import DataTableMui, { type Column } from '../../components/ui-mui/DataTableMui';
 import BatchActionBar from '../../components/ui-mui/BatchActionBar';
 import ResultState from '../../components/ui-mui/ResultState';
 import { useConfirm } from '../../components/ui-mui/ConfirmDialogProvider';
 import {
-  BOOKING_PAGE_SIZE, EMPTY_FILTERS, QUICK_VIEW_OPTIONS, bookingBalance, bookingSourceLabel, fetchBooking, fetchRooms,
+  BOOKING_PAGE_SIZE, EMPTY_FILTERS, QUICK_VIEW_OPTIONS, bookingSourceLabel, fetchBooking, fetchRooms,
   fetchStatusCounts, listBookings, type BookingFilters, type BookingQuickView, type BookingRow,
 } from './bookingQueries';
 import { deleteBooking, deleteBookings } from './bookingActions';
@@ -239,51 +240,18 @@ export default function BookingListPage() {
   const selectView = (view: BookingQuickView) => applyFilters({ ...draft, view, status: '' });
   const selectStatus = (status: string) => applyFilters({ ...draft, view: 'all', status: draft.status === status ? '' : status });
 
+  // 欄位刻意比以前少：訂單編號併進客戶、晚數與來源併進日期、人數併進房型，
+  // 每一格都有主副兩層，掃的時候眼睛只需要跳過五個點而不是十一個。
   const columns = useMemo<Column<BookingRow>[]>(() => {
     const cols: Column<BookingRow>[] = [
-      { key: 'order_number', header: '訂單編號', nowrap: true, render: (r) => <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>{r.order_number || '—'}</Typography> },
-      {
-        key: 'customer', header: '客戶',
-        render: (r) => (
-          <Box sx={{ minWidth: 0 }}>
-            <Typography variant="body2" noWrap>{r.name || r.nickname || '未取得'}</Typography>
-            {r.name && r.nickname && <Typography variant="caption" color="text.secondary" noWrap sx={{ display: 'block' }}>{r.nickname}</Typography>}
-          </Box>
-        ),
-      },
-      {
-        key: 'dates', header: '入住 → 退房', nowrap: true,
-        render: (r) => (
-          <Box>
-            <Typography variant="body2">{formatDateRange(r.checkin_date, r.checkout_date) || '—'}</Typography>
-            {r.nights ? <Typography variant="caption" color="text.secondary">{r.nights} 晚</Typography> : null}
-          </Box>
-        ),
-      },
+      { key: 'customer', header: '客戶', render: (r) => <CustomerCell r={r} /> },
+      { key: 'dates', header: '入住 → 退房', nowrap: true, width: 210, render: (r) => <DatesCell r={r} /> },
     ];
-    // 人數、房型、來源只在 ≥1440 顯示：1024–1439 加上側欄放不下 11 欄，寧可少三欄也不要橫向捲動
-    if (isWide) {
-      cols.push(
-        { key: 'headcount', header: '人數', align: 'right', render: (r) => (r.headcount != null ? `${r.headcount}` : '—') },
-        { key: 'room_type_label', header: '房型', render: (r) => <Typography variant="body2" noWrap sx={{ maxWidth: 180 }}>{r.whole_house ? '包棟' : r.room_type_label || '—'}</Typography> },
-        { key: 'source', header: '來源', nowrap: true, render: (r) => <Typography variant="body2" color="text.secondary">{bookingSourceLabel(r)}</Typography> },
-      );
-    }
+    // 1024–1439 加上側欄塞不下，人數房型那一欄讓給金額與狀態
+    if (isWide) cols.push({ key: 'room', header: '人數・房型', width: 190, render: (r) => <RoomCell r={r} /> });
     cols.push(
-      { key: 'total_amount', header: '金額（NT$）', align: 'right', nowrap: true, render: (r) => formatMoney(r.total_amount, { withCurrency: false }) || '—' },
-      {
-        key: 'deposit', header: '付款', nowrap: true,
-        render: (r) => {
-          const bal = bookingBalance(r);
-          return (
-            <Box>
-              <Typography variant="body2">訂金 {formatMoney(r.deposit, { withCurrency: false }) || '—'}</Typography>
-              {bal != null && <Typography variant="caption" color="text.secondary">尾款 {formatMoney(bal, { withCurrency: false })}</Typography>}
-            </Box>
-          );
-        },
-      },
-      { key: 'status', header: '狀態', nowrap: true, render: (r) => <StatusBadge status={r.status} /> },
+      { key: 'total_amount', header: '金額・收款', align: 'right', width: 150, render: (r) => <MoneyCell r={r} /> },
+      { key: 'status', header: '狀態', nowrap: true, width: 150, render: (r) => <StatusCell r={r} /> },
     );
     return cols;
   }, [isWide]);
@@ -433,26 +401,48 @@ export default function BookingListPage() {
           {loading && [0, 1, 2].map((i) => <Skeleton key={i} variant="rounded" height={96} />)}
           {!loading && rows.length === 0 && <ResultState status="empty" description="沒有符合條件的訂單" backTo={false} />}
           {!loading && rows.map((r) => {
-            const bal = bookingBalance(r);
+            const hint = checkinHint(r.checkin_date);
+            const pay = paymentState(r);
             return (
-              <Card key={r.id} variant="outlined">
+              <Card key={r.id} variant="outlined" sx={{ ...rowRailSx(r.status), borderRadius: 2 }}>
                 <CardActionArea onClick={() => navigate(`/bookings/${r.id}`)}>
-                  <CardContent sx={{ p: 1.5, '&:last-child': { pb: 1.5 } }}>
+                  <CardContent sx={{ p: 1.75, '&:last-child': { pb: 1.75 } }}>
                     <Stack direction="row" justifyContent="space-between" alignItems="flex-start" spacing={1}>
                       <Box sx={{ minWidth: 0 }}>
-                        <Typography variant="subtitle2" noWrap>{r.name || r.nickname || '未取得'}</Typography>
-                        <Typography variant="caption" color="text.secondary" sx={{ fontFamily: 'monospace' }}>{r.order_number || '—'}</Typography>
+                        <Typography variant="subtitle1" fontWeight={600} noWrap sx={{ fontSize: 16 }}>{r.name || r.nickname || '未取得'}</Typography>
+                        <Typography variant="caption" color="text.disabled" sx={{ fontFamily: 'monospace' }}>{r.order_number || '—'}</Typography>
                       </Box>
                       <StatusBadge status={r.status} />
                     </Stack>
-                    <Stack direction="row" justifyContent="space-between" sx={{ mt: 1 }}>
-                      <Typography variant="body2">{formatDateRange(r.checkin_date, r.checkout_date) || '—'}{r.nights ? `・${r.nights} 晚` : ''}</Typography>
-                      <Typography variant="body2" sx={{ fontWeight: 600 }}>{formatMoney(r.total_amount) || '—'}</Typography>
+
+                    <Stack direction="row" spacing={0.75} alignItems="center" sx={{ mt: 1.25 }}>
+                      <Typography variant="body2" fontWeight={500}>
+                        {formatShortDate(r.checkin_date) || '—'}<Box component="span" sx={{ color: 'text.disabled', mx: 0.5 }}>→</Box>{formatShortDate(r.checkout_date) || '—'}
+                      </Typography>
+                      {hint && (
+                        <Box component="span" sx={{ px: 0.75, py: 0.125, borderRadius: 0.75, fontSize: 11, fontWeight: 700, bgcolor: hint.urgent ? 'warning.light' : 'grey.100', color: hint.urgent ? 'warning.dark' : 'text.secondary' }}>{hint.label}</Box>
+                      )}
+                      <Typography variant="caption" color="text.secondary">{r.nights ? `${r.nights} 晚` : ''}</Typography>
                     </Stack>
-                    <Stack direction="row" justifyContent="space-between" sx={{ mt: 0.25 }}>
-                      <Typography variant="caption" color="text.secondary">{r.whole_house ? '包棟' : r.room_type_label || '—'}・{bookingSourceLabel(r)}</Typography>
-                      {bal != null && <Typography variant="caption" color="text.secondary">尾款 {formatMoney(bal)}</Typography>}
+
+                    <Stack direction="row" justifyContent="space-between" alignItems="center" spacing={1} sx={{ mt: 0.5 }}>
+                      <Typography variant="caption" color="text.secondary" noWrap sx={{ minWidth: 0 }}>
+                        {r.headcount != null ? `${r.headcount} 人・` : ''}{r.whole_house ? '包棟' : r.room_type_label || '—'}・{bookingSourceLabel(r)}
+                      </Typography>
+                      <Typography variant="subtitle2" fontWeight={700} sx={{ whiteSpace: 'nowrap' }}>{formatMoney(r.total_amount) || '—'}</Typography>
                     </Stack>
+
+                    {pay.total > 0 && tracksPayment(r.status) && (
+                      <Stack direction="row" spacing={1} alignItems="center" sx={{ mt: 0.75 }}>
+                        <LinearProgress
+                          variant="determinate" value={pay.percent}
+                          sx={{ flex: 1, height: 5, borderRadius: 3, bgcolor: 'grey.200', '& .MuiLinearProgress-bar': { borderRadius: 3, bgcolor: pay.due === 0 ? 'success.main' : pay.percent > 0 ? 'warning.main' : 'grey.300' } }}
+                        />
+                        <Typography variant="caption" color={pay.due === 0 ? 'success.main' : 'text.secondary'} sx={{ whiteSpace: 'nowrap' }}>
+                          {pay.due === 0 ? '已結清' : `未收 ${formatMoney(pay.due, { withCurrency: false })}`}
+                        </Typography>
+                      </Stack>
+                    )}
                   </CardContent>
                 </CardActionArea>
               </Card>
@@ -466,6 +456,7 @@ export default function BookingListPage() {
           rowKey={(r) => r.id}
           loading={loading}
           emptyMessage="沒有符合條件的訂單"
+          rowSx={(r) => ({ ...tableRailSx(r.status), '& td': { py: 1.25 } })}
           selected={canDelete ? selectedIds : undefined}
           onSelectedChange={canDelete ? setSelectedIds : undefined}
           rowActions={canEdit || canDelete ? rowActions : undefined}

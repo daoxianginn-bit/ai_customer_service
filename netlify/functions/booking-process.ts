@@ -1,7 +1,7 @@
 import { Handler } from '@netlify/functions';
 import { Client } from '@line/bot-sdk';
 import { createClient } from '@supabase/supabase-js';
-import { buildMergeFields, computeTodayTomorrowFields, type MessageVariable } from '../../src/lib/messageVariables';
+import { buildMergeFields, buildStandardFields, computeTodayTomorrowFields, type MessageVariable } from '../../src/lib/messageVariables';
 import { LOG_FEATURES, withErrorLogging, writeOperationLog } from '../../src/lib/operationLog';
 import { requirePermission } from '../../src/lib/requireRole';
 import { resendLaundrySheet } from './scheduled-tasks-run';
@@ -39,8 +39,11 @@ async function loadBookingContext(bookingId: string) {
   const { data: state } = booking.line_user_id
     ? await supabase.from('user_states').select('channel_id, nickname').eq('line_user_id', booking.line_user_id).order('last_message_at', { ascending: false, nullsFirst: false }).limit(1).maybeSingle()
     : { data: null };
+  const ctx = { booking, customer: state ? { ...state, line_user_id: booking.line_user_id } : { nickname: booking.nickname, line_user_id: booking.line_user_id }, settings };
   const fields: Record<string, string> = {
-    ...buildMergeFields((variables || []) as MessageVariable[], { booking, customer: state ? { ...state, line_user_id: booking.line_user_id } : { nickname: booking.nickname, line_user_id: booking.line_user_id }, settings }),
+    // 標準欄位先鋪底（管理員沒建對照也能用），管理員自訂的同名變數蓋過去
+    ...buildStandardFields(ctx),
+    ...buildMergeFields((variables || []) as MessageVariable[], ctx),
     ...computeTodayTomorrowFields(),
     // [入住密碼] 是特殊變數（不在一般欄位白名單裡），只有這種「發給客人本人」的通知才代入
     入住密碼: booking.check_in_password || '（尚未設定）',
