@@ -139,7 +139,7 @@ export default function PricingOverview() {
             <Link to="/pricing/settings#pricing-formula-section" style={{ fontSize: 12, color: '#15803d', display: 'inline-flex', alignItems: 'center', gap: 4, textDecoration: 'none' }}>
               調整加價金額 <ArrowRight size={12} />
             </Link>
-            <Link to="/bookings/calendar" style={{ fontSize: 12, color: '#15803d', display: 'inline-flex', alignItems: 'center', gap: 4, textDecoration: 'none' }}>
+            <Link to="/calendar" style={{ fontSize: 12, color: '#15803d', display: 'inline-flex', alignItems: 'center', gap: 4, textDecoration: 'none' }}>
               <CalendarDays size={12} /> 到「行事曆」設定旺季/連假日期區間 <ArrowRight size={12} />
             </Link>
           </Stack>

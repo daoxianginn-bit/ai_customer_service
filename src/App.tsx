@@ -114,6 +114,16 @@ function RequireAccess({ children }: { children: ReactNode }) {
 
 const guarded = (el: ReactNode) => <RequireAccess>{el}</RequireAccess>;
 
+/**
+ * 根路徑不是固定的某一頁：導到這個人在選單上第一個進得去的入口（首頁是房況行事曆，
+ * 但沒有 calendar.view 的角色——例如會計——要落在他真的用得到的頁，而不是 403）。
+ */
+function LandingRedirect() {
+  const { permissions } = usePermissions();
+  const to = defaultRouteFor(permissions);
+  return <Navigate to={to === '/' ? '/dashboard' : to} replace />;
+}
+
 function AppRoutes() {
   const { phase } = useAuth();
   const { loaded: permissionsLoaded } = usePermissions();
@@ -140,14 +150,15 @@ function AppRoutes() {
       <Route path="/auth/verify-2fa" element={<Verify2FA />} />
 
       <Route element={<AppLayout />}>
-        {/* 工作台 */}
-        <Route path="/" element={guarded(<DashboardPage />)} />
+        {/* 首頁：房況行事曆；/ 依權限轉址 */}
+        <Route path="/" element={<LandingRedirect />} />
+        <Route path="/calendar" element={guarded(<RoomCalendar />)} />
+        <Route path="/dashboard" element={guarded(<DashboardPage />)} />
 
         {/* 營運 */}
         <Route path="/bookings" element={<ModuleShell />}>
           <Route path="process" element={guarded(<ProcessPage />)} />
           <Route index element={guarded(<BookingListPage />)} />
-          <Route path="calendar" element={guarded(<RoomCalendar />)} />
           <Route path="tasks" element={guarded(<TaskCenterPage />)} />
           <Route path="conflicts" element={guarded(<BookingConflictsPage />)} />
           <Route path=":id" element={guarded(<BookingDetailPage />)} />

@@ -49,7 +49,7 @@ export default function HousekeepingOverviewPage() {
       <PageHeaderV2 secondary={<Button color="inherit" startIcon={<RefreshCw size={16} />} onClick={load}>重新整理</Button>} />
       {error && <ResultState status={500} description={error} onRetry={load} backTo={false} />}
       <Grid container spacing={1.5} sx={{ mb: 3 }}>
-        <Grid item xs={6} md={3}><Kpi label="今日退房" value={data?.checkoutsToday ?? null} hint="退房後房間待清潔" href="/bookings/calendar" warn /></Grid>
+        <Grid item xs={6} md={3}><Kpi label="今日退房" value={data?.checkoutsToday ?? null} hint="退房後房間待清潔" href="/calendar" warn /></Grid>
         <Grid item xs={6} md={3}><Kpi label="今日入住" value={data?.checkinsToday ?? null} hint="今天要備妥的房間" href="/bookings?view=upcoming" /></Grid>
         <Grid item xs={6} md={3}><Kpi label="待洗布巾" value={data?.laundryPiecesToday ?? null} hint="今日入住訂單的用量（件）" href="/housekeeping/laundry" /></Grid>
         <Grid item xs={6} md={3}><Kpi label="低庫存耗材" value={data ? data.lowStock.length : null} hint="低於補貨門檻" href="/housekeeping/consumables" warn /></Grid>
@@ -57,7 +57,7 @@ export default function HousekeepingOverviewPage() {
 
       <Grid container spacing={2} alignItems="stretch">
         <Grid item xs={12} md={7}>
-          <Block title={`今日退房・${formatDate(new Date())}`} action={<Link component={RouterLink} to="/bookings/calendar" variant="body2" underline="hover">房況行事曆 →</Link>}>
+          <Block title={`今日退房・${formatDate(new Date())}`} action={<Link component={RouterLink} to="/calendar" variant="body2" underline="hover">房況行事曆 →</Link>}>
             {!data && <Stack spacing={1}>{[0, 1].map((i) => <Skeleton key={i} variant="rounded" height={48} />)}</Stack>}
             {data && data.checkoutsList.length === 0 && <Typography variant="body2" color="text.secondary">今天沒有退房。</Typography>}
             <Stack spacing={1}>

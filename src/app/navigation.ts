@@ -10,7 +10,7 @@
 
 import type { LucideIcon } from 'lucide-react';
 import {
-  LayoutDashboard, ClipboardList, Headphones, Users, Shirt, DoorOpen, Coins, Plug, Zap, Settings, ShieldCheck, SlidersHorizontal, ScrollText, AlertTriangle,
+  LayoutDashboard, CalendarDays, ClipboardList, Headphones, Users, Shirt, DoorOpen, Coins, Plug, Zap, Settings, ShieldCheck, SlidersHorizontal, ScrollText, AlertTriangle,
 } from 'lucide-react';
 import type { Permission } from './permissions';
 
@@ -43,7 +43,10 @@ export const navigation: NavSection[] = [
   {
     section: null,
     items: [
-      { key: 'dashboard', label: '工作台', path: '/', icon: LayoutDashboard, permission: 'dashboard.view', description: '今天的營運狀況與需要處理的事項' },
+      // 首頁＝房況行事曆：開店的人一天要看好幾次「今天有誰在、哪幾間空著」，放在第一個、
+      // 網址 / 也導到這裡（沒有行事曆權限的人會被導到他第一個進得去的頁，見 defaultRouteFor）。
+      { key: 'calendar', label: '房況行事曆', path: '/calendar', icon: CalendarDays, permission: 'calendar.view', description: '每個色塊是一筆訂單，點選可查看詳情' },
+      { key: 'dashboard', label: '工作台', path: '/dashboard', icon: LayoutDashboard, permission: 'dashboard.view', description: '今天的營運狀況與需要處理的事項' },
     ],
   },
   {
@@ -54,7 +57,6 @@ export const navigation: NavSection[] = [
         children: [
           { label: '訂單處理', path: '/bookings/process', permission: 'booking.view', description: '輪到你動手的訂單。會計：訂金與尾款入款、押金與取消退款；房務：洗滌清單、入住密碼、退房房況' },
           { label: '訂單', path: '/bookings', permission: 'booking.view', description: '查看、搜尋及處理所有訂房' },
-          { label: '房況行事曆', path: '/bookings/calendar', permission: 'calendar.view', description: '每個色塊是一筆訂單，點選可查看詳情' },
           { label: '待辦事項', path: '/bookings/tasks', permission: 'conflict.view', description: '所有需要人工處理的事項：核款、尾款、退款、押金、撞期、轉接' },
           { label: '候補／衝突', path: '/bookings/conflicts', permission: 'conflict.view', description: 'OTA 房況衝突、系統攔下的撞期、候補中的詢問' },
         ],
@@ -210,7 +212,8 @@ export function permissionForPath(pathname: string): Permission | null {
 // 舊網址 → 新網址（§160）。書籤與圖文選單裡的連結不會壞。
 export const LEGACY_REDIRECTS: Record<string, string> = {
   '/orders': '/bookings',
-  '/room-calendar': '/bookings/calendar',
+  '/room-calendar': '/calendar',
+  '/bookings/calendar': '/calendar',
   '/room-pricing': '/pricing',
   '/room-pricing/formula': '/pricing/settings',
   '/room-pricing/quote': '/pricing/simulator',

@@ -73,7 +73,10 @@ t('canAccessRoute：有 role.view 才能進 /access/roles 與 /access/roles/:id�
 t('canAccessRoute：拆出去的入口各自的權限（參數 system.view、操作紀錄 audit.view、錯誤 error_log.view）', canAccessRoute(new Set(['system.view']), '/parameters') && canAccessRoute(new Set(['audit.view']), '/audit') && canAccessRoute(new Set(['error_log.view']), '/errors') && !canAccessRoute(new Set(['audit.view']), '/errors'));
 t('canAccessRoute：沒登記的路徑 default deny，只有 system.manage 能進', !canAccessRoute(new Set(['booking.view']), '/nowhere') && canAccessRoute(new Set(['system.manage']), '/nowhere'));
 t('canAccessRoute：/bookings/:id 用 booking.view', canAccessRoute(new Set(['booking.view']), '/bookings/123') && !canAccessRoute(new Set(['calendar.view']), '/bookings/123'));
-t('defaultRouteFor：沒有工作台就落到第一個進得去的入口', defaultRouteFor(new Set(['dashboard.view'])) === '/' && defaultRouteFor(new Set(['housekeeping.view'])).startsWith('/housekeeping'));
+t('canAccessRoute：首頁是房況行事曆（/calendar 要 calendar.view）', canAccessRoute(new Set(['calendar.view']), '/calendar') && !canAccessRoute(new Set(['dashboard.view']), '/calendar'));
+t('defaultRouteFor：落到選單上第一個進得去的入口', defaultRouteFor(new Set(['calendar.view'])) === '/calendar' && defaultRouteFor(new Set(['dashboard.view'])) === '/dashboard' && defaultRouteFor(new Set(['housekeeping.view'])).startsWith('/housekeeping'));
+t('defaultRouteFor：有行事曆權限的人優先落在行事曆（首頁）', defaultRouteFor(new Set(['calendar.view', 'dashboard.view', 'booking.view'])) === '/calendar');
+t('defaultRouteFor：完全沒權限時回 /（由 LandingRedirect 轉走）', defaultRouteFor(new Set()) === '/');
 
 let ok = true;
 for (const [k, v, d] of checks) { console.log((v ? '✓ ' : '✗ ') + k + (d ? `\n     ${d}` : '')); if (!v) ok = false; }

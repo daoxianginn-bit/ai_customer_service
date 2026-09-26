@@ -77,10 +77,14 @@ export function canAccessRoute(granted: ReadonlySet<string> | readonly string[] 
   return hasPermission(granted, permission);
 }
 
-/** 使用者登入後該落在哪一頁：優先工作台，沒權限就找第一個進得去的入口。 */
+/**
+ * 使用者登入後該落在哪一頁：選單上第一個他進得去的入口。
+ *
+ * 不寫死某一頁：首頁是房況行事曆，但會計這類角色沒有 calendar.view，寫死的話一登入就吃 403。
+ * 順序直接沿用選單順序，所以「把哪一頁放第一個」只要改 navigation.ts。
+ */
 export function defaultRouteFor(granted: ReadonlySet<string> | readonly string[] | null | undefined): string {
   if (!granted) return '/';
-  if (canAccessRoute(granted, '/')) return '/';
   for (const section of navigation) {
     for (const item of section.items) {
       if (hasPermission(granted, item.permission)) return item.path;

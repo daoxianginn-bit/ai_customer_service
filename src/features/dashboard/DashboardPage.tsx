@@ -121,7 +121,7 @@ export default function DashboardPage() {
       {/* 第一列 KPI（§19.1）：桌面 4 欄、平板／手機 2 欄（§134） */}
       <Grid container spacing={1.5} sx={{ mb: 1.5 }}>
         <Grid item xs={6} md={3}><KpiCard label="今日入住" value={kpis?.checkinsToday ?? null} href={`/bookings?from=${today}&to=${today}`} /></Grid>
-        <Grid item xs={6} md={3}><KpiCard label="今日退房" value={kpis?.checkoutsToday ?? null} href="/bookings/calendar" /></Grid>
+        <Grid item xs={6} md={3}><KpiCard label="今日退房" value={kpis?.checkoutsToday ?? null} href="/calendar" /></Grid>
         <Grid item xs={6} md={3}><KpiCard label="待核款" value={kpis?.paymentVerify ?? null} hint="客人已回報匯款，等核對" href="/bookings?status=awaiting_confirmation" tone="warning" /></Grid>
         <Grid item xs={6} md={3}><KpiCard label="待客服" value={kpis?.handovers ?? null} hint={convStats ? `今日對話 ${convStats.conversations} 則・轉接 ${convStats.handovers} 次` : undefined} href="/service" tone="warning" /></Grid>
       </Grid>
