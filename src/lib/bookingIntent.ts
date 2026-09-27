@@ -179,6 +179,104 @@ export function scanRoomComposition(message: string, fields: IntentFieldDef[]): 
   return {};
 }
 
+// 中文數字（含「兩」）轉阿拉伯數字，只處理 1~99 這種口語會出現的範圍。
+const CJK_DIGITS: Record<string, number> = { 零: 0, 一: 1, 二: 2, 兩: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10 };
+function parseCjkNumber(raw: string): number | null {
+  const text = raw.trim();
+  if (/^\d+$/.test(text)) return Number(text);
+  if (!text || /[^零一二兩三四五六七八九十]/.test(text)) return null;
+  if (!text.includes('十')) return text.split('').reduce((n, c) => (n === null ? null : CJK_DIGITS[c] ?? null), 0 as number | null);
+  const [tensPart, onesPart] = text.split('十');
+  const tens = tensPart === '' ? 1 : CJK_DIGITS[tensPart] ?? null;
+  const ones = onesPart === '' ? 0 : CJK_DIGITS[onesPart] ?? null;
+  return tens === null || ones === null ? null : tens * 10 + ones;
+}
+
+const PEOPLE_UNIT = '(?:位|個人|個|名|人|大人|小孩|小朋友|兒童|童|小|老人|長輩|寶寶)';
+const NUMBER_TOKEN = '(?:\\d{1,2}|[零一二兩三四五六七八九十]{1,3})';
+
+/**
+ * 相對的人數變動：「多 1 大人 1 小孩」「再加兩人」「少 1 位」。
+ *
+ * 客人問「如果多 1 大人 1 小孩價格一樣嗎？」時，系統其實算得出 11 人的價格，但這句話沒有
+ * 任何「絕對人數」，掃描器只會抓到句子裡的 1，把 9 人改成 1 人比不回答更糟，所以以前只能
+ * 整句丟給知識庫問答，回一句「稍後由專人回覆」。這裡把它解成「現有人數 ±N」。
+ *
+ * 只有已經收集到人數時才有意義；算出來 ≤ 0 就當作沒抓到（不要報價 0 人）。
+ */
+export function scanHeadcountDelta(message: string, currentHeadcount: number): number | undefined {
+  if (!Number.isFinite(currentHeadcount) || currentHeadcount <= 0) return undefined;
+  const text = message || '';
+  // 一個「多／少」後面可以接好幾組「數字＋單位」：「多1大人1小孩」是一次加兩個
+  const groupRe = new RegExp(`(多|加上?|增加|再加|新增|少|減少?|扣)\\s*((?:${NUMBER_TOKEN}\\s*${PEOPLE_UNIT}\\s*(?:和|跟|與|及|、|,|，|\\+|＋)?\\s*)+)`, 'g');
+  let delta = 0;
+  let matched = false;
+  for (const m of text.matchAll(groupRe)) {
+    const sign = /^(少|減|扣)/.test(m[1]) ? -1 : 1;
+    for (const part of m[2].matchAll(new RegExp(`(${NUMBER_TOKEN})\\s*${PEOPLE_UNIT}`, 'g'))) {
+      const n = parseCjkNumber(part[1]);
+      if (n === null || n <= 0) continue;
+      delta += sign * n;
+      matched = true;
+    }
+  }
+  if (!matched || delta === 0) return undefined;
+  const next = currentHeadcount + delta;
+  return next > 0 ? next : undefined;
+}
+
+/**
+ * 「可以給我 4 間房嗎？」——只講間數、沒講是哪幾間。
+ * 回傳客人要的房間總數；沒講就是 undefined。
+ */
+export function scanRoomTotal(message: string): number | undefined {
+  const m = (message || '').match(new RegExp(`(${NUMBER_TOKEN})\\s*(?:間|間房|房間)`));
+  if (!m) return undefined;
+  const n = parseCjkNumber(m[1]);
+  return n !== null && n > 0 && n <= 20 ? n : undefined;
+}
+
+export interface RoomComposition {
+  layout: Record<number, number>;
+  beds: number;
+  /** 這個組合住得下要求的人數嗎。false 時呼叫端照樣往下走，由報價那邊的「住不下」說明處理 */
+  seatsAll: boolean;
+}
+
+/**
+ * 只給了「要幾間房」時，挑一組房型組合：間數剛好，住得下的裡面選總床位最少的
+ * （多開的床位要算加開房費，客人不會想多付）。沒有任何組合住得下就回床位最多的那組，
+ * 讓後面的「您指定的房間住不下 N 位」照實說明，而不是原封不動把同一張報價再送一次。
+ * 回 null 只代表「根本湊不出這麼多間」（例如客人要 10 間、但總共只有 5 間）。
+ */
+export function composeRoomsForTotal(
+  roomTotal: number,
+  headcount: number,
+  available: { capacity: number; count: number }[],
+): RoomComposition | null {
+  const caps = available.filter((c) => c.capacity > 0 && c.count > 0).sort((a, b) => a.capacity - b.capacity);
+  if (!caps.length || roomTotal <= 0) return null;
+  let fitting: RoomComposition | null = null;
+  let largest: RoomComposition | null = null;
+  const walk = (index: number, roomsLeft: number, beds: number, layout: Record<number, number>) => {
+    if (roomsLeft === 0) {
+      const found: RoomComposition = { layout: { ...layout }, beds, seatsAll: beds >= headcount };
+      if (found.seatsAll) { if (!fitting || beds < fitting.beds) fitting = found; }
+      else if (!largest || beds > largest.beds) largest = found;
+      return;
+    }
+    if (index >= caps.length) return;
+    const { capacity, count } = caps[index];
+    for (let take = Math.min(count, roomsLeft); take >= 0; take--) {
+      if (take > 0) layout[capacity] = take; else delete layout[capacity];
+      walk(index + 1, roomsLeft - take, beds + take * capacity, layout);
+    }
+    delete layout[capacity];
+  };
+  walk(0, roomTotal, 0, {});
+  return fitting ?? largest;
+}
+
 // ------------------------------------------------------------------------
 // 規則版分類器：system 模式（不花 token）與 AI 失敗時的退路。
 // 順序就是優先權：明確指令 > 階段專屬的短答 > 有欄位內容 > 問句 > 階段預設。
@@ -221,6 +319,13 @@ export function classifyByRules(
   // 「2+2+4+4」這種房間組合沒有欄位標籤，上面的擷取器抓不到，但它是明確指定要哪幾間房
   const composition = scanRoomComposition(trimmed, ctx.fields);
   for (const [k, v] of Object.entries(composition)) if (slots[k] === undefined) slots[k] = v;
+
+  // 「多 1 大人 1 小孩」這種相對人數：句子裡沒有絕對人數，只有加減，要用現有人數去算
+  const headcountField = ctx.fields.find((f) => f.quote_field === 'headcount');
+  if (headcountField && slots[headcountField.key] === undefined) {
+    const next = scanHeadcountDelta(trimmed, Number(ctx.collected[headcountField.key]));
+    if (next !== undefined) slots[headcountField.key] = String(next);
+  }
 
   if (Object.keys(slots).length > 0) {
     return rules(ctx.phase === 'collecting' ? 'provide_info' : 'modify', slots);
@@ -314,6 +419,8 @@ ${historyLines.length ? historyLines.join('\n') : '  （無）'}
 - 「大約 8 人」「8 個人左右」：人數就填 8。
 - 房數欄位客人沒提到就不要填，不要填 0。
 - 「2+2+4+4」「2人房兩間、4人房兩間」這種房間組合＝指定各房型各要幾間，拆進對應的房數欄位（這個例子是 2 人房 2 間、4 人房 2 間），沒被提到的房型填 0。
+- 「多 1 大人 1 小孩」「再加兩人」「少 1 位」是**相對**的人數變動：新人數＝目前人數加減這些數字（目前 9 人、「多1大人1小孩」就是 11），不要把句子裡的 1 當成總人數。
+- 「可以給我 4 間房嗎？」只講了間數沒講組合：一樣是 modify，房數欄位不用填，系統會自己挑組合。
 - 「想改成 X 間房」「能給我 2+2+4+4 的報價嗎？」這類**要求用不同條件重新報價**的話一律是 modify，不是 question——就算句尾有問號、語氣像在詢問也一樣。question 只留給「民宿本身的事」（早餐、停車、設施、入住時間、付款方式）。
 - 客人把整張表單（含「入住日期：」這類標籤）貼回來時，逐行對應欄位；留空的行不填。
 - 不確定就 unclear，不要猜。

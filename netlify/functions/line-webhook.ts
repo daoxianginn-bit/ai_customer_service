@@ -26,7 +26,8 @@ import { computeUsage, normalizeChangeCount } from '../../src/lib/linenCost';
 import { LineChannel, isFullServiceRole, channelRoleLabel } from '../../src/lib/lineChannels';
 import {
   buildIntentPrompt, parseIntentResponse, classifyByRules,
-  isYesAnswer, isNoAnswer, isRestartCommand, interpretBareAnswer, scanRoomComposition,
+  isYesAnswer, isNoAnswer, isRestartCommand, interpretBareAnswer,
+  scanRoomComposition, scanHeadcountDelta, scanRoomTotal, composeRoomsForTotal,
   missingEssentialFields, QUOTE_ESSENTIAL_FIELDS,
   type BookingPhase, type IntentContext, type IntentResult,
 } from '../../src/lib/bookingIntent';
@@ -1387,12 +1388,29 @@ function scanDates(message: string): string[] {
 const HEADCOUNT_PATTERNS = [
   /人數\s*[:：]?\s*(?<!\d)(\d{1,3})(?!\d)/,
   /(?<!\d)(\d{1,3})(?!\d)\s*(?:位|個人|大人|人)(?!房)/,
-  /(?<!\d)(\d{1,3})(?!\d)/,
+  // 保底那一條要排掉「4人房」「4間房」：那是在講房型或房數，不是人數。
+  // 第 2 條已經用 (?!房) 擋過帶單位的寫法，但保底這條什麼單位都不看，不擋就會把
+  // 「有4人房嗎」「可以給我4間房嗎」的 4 當成人數，報價直接照 4 人算。
+  /(?<!\d)(\d{1,3})(?!\d)(?!\s*(?:人房|房|間))/,
+];
+
+// 「大人＋小孩」要相加才是總人數。這三種寫法在訂房對話裡最常見：
+//   7+2小／7大2小／2大人1小孩
+// 少了這一條，上面第 2 條規則只會抓到前面的大人數（「7+2小」變成 7 人），報價直接少算兩個人。
+const ADULTS_KIDS_PATTERNS = [
+  /(?<!\d)(\d{1,3})(?!\d)\s*(?:大人|大)\s*[和跟與及、,，]?\s*(?<!\d)(\d{1,3})(?!\d)\s*(?:小孩|小朋友|兒童|幼童|童|小)/,
+  /(?<!\d)(\d{1,3})(?!\d)\s*[+＋]\s*(?<!\d)(\d{1,3})(?!\d)\s*(?:小孩|小朋友|兒童|幼童|童|小|大人|大)/,
 ];
 
 function scanHeadcount(message: string): string | undefined {
   // 先把日期字樣挖掉，否則「7/30 入住」的 7 會被誤判成人數
   const withoutDates = message.replace(DATE_SCAN_RE, ' ');
+  for (const re of ADULTS_KIDS_PATTERNS) {
+    const m = withoutDates.match(re);
+    if (!m) continue;
+    const total = Number(m[1]) + Number(m[2]);
+    if (Number.isFinite(total) && total > 0) return String(total);
+  }
   for (const re of HEADCOUNT_PATTERNS) {
     const m = withoutDates.match(re);
     if (!m) continue;
@@ -1407,9 +1425,9 @@ function scanHeadcount(message: string): string | undefined {
 // bot 問房數、客人回「1」就會把原本的 12 人蓋掉。這裡只收看得出單位或寫法的：
 //   人數：9／9人／9位／2大人／7+2小（大人＋小孩的寫法，最後一組）
 const EXPLICIT_HEADCOUNT_PATTERNS = [
+  ...ADULTS_KIDS_PATTERNS,
   /人數\s*[:：]?\s*(?<!\d)\d{1,3}(?!\d)/,
   /(?<!\d)\d{1,3}(?!\d)\s*(?:位|個人|大人|小孩|名|人)(?!房)/,
-  /(?<!\d)\d{1,3}(?!\d)\s*[+＋]\s*(?<!\d)\d{1,3}(?!\d)\s*(?:大|小|童|老)/,
 ];
 
 export function isDateField(field: FlowFieldDef): boolean {
@@ -1452,6 +1470,9 @@ export function messageStatesFieldExplicitly(message: string, field: FlowFieldDe
   }
   return false;
 }
+
+/** 測試用：人數解析是報價正確與否的關鍵，值得單獨驗 */
+export const scanHeadcountForTest = scanHeadcount;
 
 function scanWholeHouse(message: string): string | undefined {
   const trimmed = message.trim();
@@ -3076,18 +3097,67 @@ function normalizeSlots(fields: FlowFieldDef[], slots: Record<string, string>): 
 }
 
 // 意圖分類：明確的短答不花 AI；system 模式只用規則；AI 模式呼叫 AI，失敗退回規則。
+// 房型容量（幾人房各有幾間）：只在「客人只講了要幾間房」時才需要，跟知識庫的房間清單同一個
+// TTL 快取，不要為了這件事每則訊息都查一次資料庫。
+let roomCapacityCache: { counts: { capacity: number; count: number }[]; fetchedAt: number } | null = null;
+async function fetchRoomCapacityCounts(): Promise<{ capacity: number; count: number }[]> {
+  if (roomCapacityCache && Date.now() - roomCapacityCache.fetchedAt < KB_FILE_CACHE_TTL_MS) return roomCapacityCache.counts;
+  const { data } = await supabase.from('room_types').select('capacity, is_active').eq('type', '房間');
+  const counts = toRoomCapacityCounts(data || []);
+  roomCapacityCache = { counts, fetchedAt: Date.now() };
+  return counts;
+}
+
 /**
- * 「2+2+4+4」這種房間組合的保險：AI 常把「能給我 2+2+4+4 的報價嗎？」判成 question
- * （句尾有問號、內容又在講房型），於是回一句「請找真人客服」，但這個組合系統自己算得出來。
- * 訊息裡出現對得上實際房型人數的組合時，一律改判成「要改房間組合」並帶上房數。
- * 只在「已經報過價」的階段介入：收集中本來就會把抓到的欄位存起來，不需要覆寫意圖。
+ * 報價之後，客人用問句講出新條件時的保險。
+ *
+ * AI 很容易把這幾種句子判成 question（句尾有問號、語氣像在詢問），於是走知識庫問答，
+ * 知識庫裡當然沒有「這位客人的價格」，就回一句「稍後由專人回覆」——但系統自己算得出來：
+ *   「能給我 2+2+4+4 的報價嗎？」→ 指定房間組合
+ *   「如果多 1 大人 1 小孩價格一樣嗎？」→ 人數 9 改 11
+ *   「可以給我 4 間房嗎？」→ 只講間數，挑一組住得下的 4 間房
+ * 只在已經報過價的階段介入；收集中本來就會把抓到的欄位存起來，不需要覆寫意圖。
  */
-function applyRoomCompositionOverride(message: string, ctx: IntentContext, result: IntentResult): IntentResult {
+async function applyRoomCompositionOverride(message: string, ctx: IntentContext, result: IntentResult): Promise<IntentResult> {
   if (result.intent !== 'question' || ctx.phase === 'collecting') return result;
+  const label = (key: string) => ctx.fields.find((f) => f.key === key)?.label ?? key;
+  const describe = (slots: Record<string, string>) =>
+    Object.entries(slots).filter(([, v]) => v !== '0').map(([k, v]) => `${label(k)} ${v}`).join('、');
+
   const composition = scanRoomComposition(message, ctx.fields);
-  if (!Object.keys(composition).length) return result;
-  traceStep(`客人指定了房間組合（${Object.entries(composition).filter(([, v]) => v !== '0').map(([k, v]) => `${ctx.fields.find((f) => f.key === k)?.label ?? k} ${v}`).join('、')}），改判成要重新報價`);
-  return { ...result, intent: 'modify', slots: { ...result.slots, ...composition }, reason: '指定房間組合' };
+  if (Object.keys(composition).length) {
+    traceStep(`客人指定了房間組合（${describe(composition)}），改判成要重新報價`);
+    return { ...result, intent: 'modify', slots: { ...result.slots, ...composition }, reason: '指定房間組合' };
+  }
+
+  const headcountField = ctx.fields.find((f) => f.quote_field === 'headcount');
+  const currentHeadcount = headcountField ? Number(ctx.collected[headcountField.key]) : NaN;
+  if (headcountField && Number.isFinite(currentHeadcount)) {
+    const nextHeadcount = scanHeadcountDelta(message, currentHeadcount);
+    if (nextHeadcount !== undefined) {
+      traceStep(`客人問「人數變成 ${nextHeadcount} 人」的價格（原本 ${currentHeadcount} 人），改判成要重新報價`);
+      return { ...result, intent: 'modify', slots: { ...result.slots, [headcountField.key]: String(nextHeadcount) }, reason: '人數增減' };
+    }
+  }
+
+  // 只講「要幾間房」：自己挑一組住得下、床位最少的組合，不要原封不動把同一張報價再送一次
+  const roomTotal = scanRoomTotal(message);
+  const capacityFields = ctx.fields.filter((f) => f.quote_field === 'room_count' && Number(f.room_capacity) > 0);
+  if (roomTotal !== undefined && capacityFields.length && Number.isFinite(currentHeadcount)) {
+    const chosen = composeRoomsForTotal(roomTotal, currentHeadcount, await fetchRoomCapacityCounts());
+    // 湊不出這麼多間（例如要 10 間、總共只有 5 間）就維持 question：知識庫裡有房間清單，
+    // AI 會照實回答「我們共有 5 間房」，比系統硬掰一個組合好。
+    if (chosen) {
+      const slots: Record<string, string> = {};
+      for (const f of capacityFields) slots[f.key] = String(chosen.layout[Number(f.room_capacity)] ?? 0);
+      // 住不下的組合照樣送出去：報價那邊會回「您指定的房間住不下 N 位…最多 M 人」，
+      // 這比原封不動重送同一張報價（客人以為系統沒聽懂）清楚得多。
+      traceStep(`客人只說要 ${roomTotal} 間房，系統挑了 ${describe(slots)}（${chosen.beds} 床${chosen.seatsAll ? '' : '，住不下 ' + currentHeadcount + ' 位'}），改判成要重新報價`);
+      return { ...result, intent: 'modify', slots: { ...result.slots, ...slots }, reason: '指定間數' };
+    }
+    traceStep(`客人要 ${roomTotal} 間房，但總共沒有這麼多間，交給知識庫回答實際房間數`);
+  }
+  return result;
 }
 
 async function classifyBookingIntent(settings: any, flow: FlowDef, message: string, ctx: IntentContext, nickname: string | null, lineClient: Client | null): Promise<IntentResult> {
@@ -3111,7 +3181,7 @@ async function classifyBookingIntent(settings: any, flow: FlowDef, message: stri
       raw: clipForTrace(raw, 600),
       parsed: parsed ? { intent: parsed.intent, slots: parsed.slots } : null,
     });
-    if (parsed) return applyRoomCompositionOverride(message, ctx, parsed);
+    if (parsed) return await applyRoomCompositionOverride(message, ctx, parsed);
     traceStep('AI 意圖分類回覆無法解析，退回規則判斷');
   } catch (e: any) {
     traceData('intent_ai', { provider: settings.active_ai, latency_ms: Date.now() - startedAt, error: e.message });
