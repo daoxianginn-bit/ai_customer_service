@@ -1353,7 +1353,37 @@ function buildIsoDate(month: number, day: number, year?: number): string | null 
 // 民國年轉西元。民國 115 年＝西元 2026 年，3 碼年份一律當民國——不可能有西元 115 年的訂房。
 const ROC_YEAR_OFFSET = 1911;
 
-function scanDates(message: string): string[] {
+// 「9/29-30」「9月29到30號」這種同月份的日期範圍，結束日只寫了「日」。DATE_SCAN_RE 只認得
+// 前半段的 9/29，剩下的「-30」會落進人數的保底規則被當成 30 人——實際發生過：客人打「9/29-30」，
+// 系統回「還需要補充：退房日期」，補了 9/30 之後又用 30 人去算，回一句「可能超過可接待人數」。
+// 所以掃日期之前先把範圍展開成兩個完整日期（「9/29 ~ 9/30」）。結束日比開始日小代表跨月
+// （「9/30-1」＝9/30~10/1）。後面緊接著人數單位的不算（「9/29-3人」是 9/29、3 人，不是範圍）。
+const SLASH_DATE_RANGE_RE = /(?<!\d)(?:(\d{3,4})[-/.])?(\d{1,2})[/.](\d{1,2})\s*[-~～〜到至]\s*(\d{1,2})(?![\d/.月])(?!\s*(?:人|位|大|小|個|名))/g;
+const CJK_DATE_RANGE_RE = /(\d{1,2})\s*月\s*(\d{1,2})\s*[日號]?\s*[-~～〜到至]\s*(\d{1,2})(?![\d/.月])(?!\s*(?:人|位|大|小|個|名))\s*([日號])?/g;
+
+function rangeEndMonth(month: number, startDay: number, endDay: number): number {
+  return endDay > startDay ? month : (month % 12) + 1;
+}
+
+function expandDateRanges(message: string): string {
+  return message
+    .replace(SLASH_DATE_RANGE_RE, (_all, year: string | undefined, m: string, d: string, d2: string) => {
+      const endMonth = rangeEndMonth(Number(m), Number(d), Number(d2));
+      // 跨年（12/31-1）時帶著年份的寫法要把年份加一；沒帶年份交給 buildIsoDate 自己推算
+      const endYear = year && endMonth < Number(m) ? String(Number(year) + 1) : year;
+      return `${year ? `${year}/` : ''}${m}/${d} ~ ${endYear ? `${endYear}/` : ''}${endMonth}/${d2}`;
+    })
+    .replace(CJK_DATE_RANGE_RE, (_all, m: string, d: string, d2: string) =>
+      `${m}月${d}日 ~ ${rangeEndMonth(Number(m), Number(d), Number(d2))}月${d2}日`);
+}
+
+// 把訊息裡的日期字樣挖掉（含日期範圍的結束日），剩下的才拿去找人數
+function stripDates(message: string): string {
+  return expandDateRanges(message).replace(DATE_SCAN_RE, ' ');
+}
+
+function scanDates(rawMessage: string): string[] {
+  const message = expandDateRanges(rawMessage);
   const found: string[] = [];
   for (const m of message.matchAll(DATE_SCAN_RE)) {
     const g = m.groups || {};
@@ -1405,16 +1435,20 @@ const ADULTS_KIDS_PATTERNS = [
   /(?<!\d)(\d{1,3})(?!\d)\s*[+＋]\s*(?<!\d)(\d{1,3})(?!\d)\s*(?:小孩|小朋友|兒童|幼童|童|小|大人|大)/,
 ];
 
-function scanHeadcount(message: string): string | undefined {
+// allowBareNumber：要不要用 HEADCOUNT_PATTERNS 最後那條「隨便一個數字」的保底規則。
+// 只有 bot 剛問過人數、客人回一個數字時這招才可靠；客人主動開口（沒有 session 的冷啟動）時
+// 沒人問過人數，一個沒單位的數字多半是別的東西，猜成人數只會拿客人沒說過的人數去報價。
+function scanHeadcount(message: string, allowBareNumber = true): string | undefined {
   // 先把日期字樣挖掉，否則「7/30 入住」的 7 會被誤判成人數
-  const withoutDates = message.replace(DATE_SCAN_RE, ' ');
+  const withoutDates = stripDates(message);
   for (const re of ADULTS_KIDS_PATTERNS) {
     const m = withoutDates.match(re);
     if (!m) continue;
     const total = Number(m[1]) + Number(m[2]);
     if (Number.isFinite(total) && total > 0) return String(total);
   }
-  for (const re of HEADCOUNT_PATTERNS) {
+  const patterns = allowBareNumber ? HEADCOUNT_PATTERNS : HEADCOUNT_PATTERNS.slice(0, -1);
+  for (const re of patterns) {
     const m = withoutDates.match(re);
     if (!m) continue;
     const n = Number(m[1]);
@@ -1468,7 +1502,7 @@ export function messageStatesFieldExplicitly(message: string, field: FlowFieldDe
   if (field.label && text.includes(field.label)) return true;
   if (isDateField(field)) return scanDates(text).length > 0;
   if (field.quote_field === 'headcount') {
-    const withoutDates = text.replace(DATE_SCAN_RE, ' ');
+    const withoutDates = stripDates(text);
     return EXPLICIT_HEADCOUNT_PATTERNS.some((re) => re.test(withoutDates));
   }
   return false;
@@ -1510,7 +1544,11 @@ function scanLabelledNumber(message: string, label: string): string | undefined 
   return Number.isFinite(n) && n >= 0 ? String(n) : undefined;
 }
 
-function extractStepFieldsWithoutAi(userMessage: string, fields: FlowFieldDef[]): Record<string, string> {
+function extractStepFieldsWithoutAi(
+  userMessage: string,
+  fields: FlowFieldDef[],
+  opts: { allowBareNumberHeadcount?: boolean } = {}
+): Record<string, string> {
   const result: Record<string, string> = {};
   const message = userMessage || '';
 
@@ -1526,7 +1564,7 @@ function extractStepFieldsWithoutAi(userMessage: string, fields: FlowFieldDef[])
   for (const f of fields) {
     if (result[f.key] !== undefined) continue;
     if (f.quote_field === 'headcount') {
-      const v = scanHeadcount(message);
+      const v = scanHeadcount(message, opts.allowBareNumberHeadcount !== false);
       if (v !== undefined) result[f.key] = v;
     } else if (f.quote_field === 'whole_house') {
       const v = scanWholeHouse(message);
@@ -2133,7 +2171,8 @@ async function tryStartQuoteFromCompleteInfo(
 
     // 便宜的前置關卡：先用純程式擷取（不花 token）。沒有這一關的話，每一則沒有 session 的
     // 閒聊都會多打一次 AI 擷取，等於所有非流程訊息的 AI 成本都翻倍。
-    const gate = normalizeInto(extractStepFieldsWithoutAi(userMessage, quoteFields), quoteFields);
+    // 冷啟動沒有人問過人數，不用「隨便一個數字就是人數」的保底規則（見 scanHeadcount）。
+    const gate = normalizeInto(extractStepFieldsWithoutAi(userMessage, quoteFields, { allowBareNumberHeadcount: false }), quoteFields);
     const missingRequired = requiredFields.filter((f) => gate[f.key] === undefined);
 
     // 三要素沒齊、但至少抓到兩個訂房欄位（例如「我想訂 2/2 到 2/4」有兩個日期、「2/2 12個人」
@@ -2791,9 +2830,31 @@ async function finishBookingFlow(
         .from('bookings')
         .update({ collected_answers: collected, checkin_date: checkinIso, checkout_date: checkoutIso, nights, headcount, updated_at: new Date().toISOString() })
         .eq('id', bookingId);
-      const replyText = '不好意思，這個日期／人數組合目前無法自動試算（可能是超過可接待人數，或低於最少接待人數），您可以改一下人數或日期再試一次，或點選「真人客服」由專人為您確認房況與價格。';
+      // 引擎算不出來只有三種原因（見 computeUnifiedMultiNightQuote），這裡都查得到，就直接講是哪一個、
+      // 帶上客人填的人數。以前一律回「可能是超過可接待人數，或低於最少接待人數」：客人不知道要改
+      // 哪個；人數被誤判（例如「9/29-30」的 30 被當成人數）時，他也看不出系統拿的是 30 人在算。
+      const maxCapacity = toRoomCapacityCounts(data.roomTypes).reduce((s, c) => s + c.capacity * c.count, 0);
+      const minHeadcount = Number(settings.min_group_headcount ?? 1);
+      const stay = `${toSlashDate(checkinIso)}~${toSlashDate(checkoutIso)}、${headcount} 位`;
+      const replyText =
+        headcount > maxCapacity
+          ? `不好意思，您填的是 ${stay}，我們最多可以接待 ${maxCapacity} 位 🙏\n如果人數有誤，直接告訴我正確人數（例如「9人」），我馬上幫您重新試算；人數確實超過的話可以點選「真人客服」，由專人為您安排。`
+          : headcount < minHeadcount
+            ? `不好意思，您填的是 ${stay}，我們最少要 ${minHeadcount} 位才能接待 🙏\n如果人數有誤，直接告訴我正確人數，我馬上幫您重新試算；有其他需求也可以點選「真人客服」。`
+            : `不好意思，${stay} 系統暫時排不出房型、算不出價格，已經請真人客服為您確認，我們會盡快與您聯繫 🙏`;
       await sendReply(replyText);
       await logConversation(userId, nickname, 'outbound', replyText, 'system');
+      if (headcount <= maxCapacity && headcount >= minHeadcount) {
+        // 人數在範圍內卻算不出來是設定或房型庫存的問題，客人自己改不了，一定要有人接手
+        for (const id of parseCsvKeywords(settings.agent_user_ids)) {
+          try {
+            await lineClient.pushMessage(id, {
+              type: 'text',
+              text: `⚠️ 無法試算：【${nickname || '匿名用戶'}】${stay}，人數在可接待範圍內但系統排不出房型，請人工確認並回覆客人。`,
+            });
+          } catch {}
+        }
+      }
       await keepSessionForRetry();
       return;
     }
@@ -3179,22 +3240,37 @@ async function fetchRoomCapacityCounts(): Promise<{ capacity: number; count: num
  *   「如果多 1 大人 1 小孩價格一樣嗎？」→ 人數 9 改 11
  *   「可以給我 4 間房嗎？」→ 只講間數，挑一組住得下的 4 間房
  * 只在已經報過價的階段介入；收集中本來就會把抓到的欄位存起來，不需要覆寫意圖。
+ *
+ * 除了 question，unclear 也要接：同一句「所以你們提供2+4+4的房型嗎? 可以給我4間房嗎?」
+ * AI 有時判 question、有時判 unclear，判成 unclear 就被轉真人，客人一小時後再問一次還是沒答案。
+ * modify／provide_info 只補「間數」：AI 常把句子裡的「2+4+4」抽成房數，但那是在複述目前的報價，
+ * 客人真正要的是後面那句「4 間房」。
  */
 async function applyRoomCompositionOverride(message: string, ctx: IntentContext, result: IntentResult): Promise<IntentResult> {
-  if (result.intent !== 'question' || ctx.phase === 'collecting') return result;
+  if (ctx.phase === 'collecting') return result;
+  const isQuestionLike = result.intent === 'question' || result.intent === 'unclear';
+  const isInfo = result.intent === 'modify' || result.intent === 'provide_info';
+  if (!isQuestionLike && !isInfo) return result;
   const label = (key: string) => ctx.fields.find((f) => f.key === key)?.label ?? key;
   const describe = (slots: Record<string, string>) =>
     Object.entries(slots).filter(([, v]) => v !== '0').map(([k, v]) => `${label(k)} ${v}`).join('、');
+  const capacityFields = ctx.fields.filter((f) => f.quote_field === 'room_count' && Number(f.room_capacity) > 0);
 
+  // 同一句裡同時有組合（2+4+4＝3 間）跟間數（4 間）而且對不上：組合是在複述目前的報價，
+  // 間數才是新的要求，以間數為準。對得上（「2+2+4+4，4 間房」）就照組合。
+  const roomTotal = scanRoomTotal(message);
   const composition = scanRoomComposition(message, ctx.fields);
-  if (Object.keys(composition).length) {
+  const compositionRooms = Object.values(composition).reduce((s, v) => s + Number(v), 0);
+  const compositionUsable = Object.keys(composition).length > 0 && (roomTotal === undefined || compositionRooms === roomTotal);
+
+  if (isQuestionLike && compositionUsable) {
     traceStep(`客人指定了房間組合（${describe(composition)}），改判成要重新報價`);
     return { ...result, intent: 'modify', slots: { ...result.slots, ...composition }, reason: '指定房間組合' };
   }
 
   const headcountField = ctx.fields.find((f) => f.quote_field === 'headcount');
   const currentHeadcount = headcountField ? Number(ctx.collected[headcountField.key]) : NaN;
-  if (headcountField && Number.isFinite(currentHeadcount)) {
+  if (isQuestionLike && headcountField && Number.isFinite(currentHeadcount)) {
     const nextHeadcount = scanHeadcountDelta(message, currentHeadcount);
     if (nextHeadcount !== undefined) {
       traceStep(`客人問「人數變成 ${nextHeadcount} 人」的價格（原本 ${currentHeadcount} 人），改判成要重新報價`);
@@ -3202,11 +3278,14 @@ async function applyRoomCompositionOverride(message: string, ctx: IntentContext,
     }
   }
 
+  // AI 已經判成 modify／provide_info，只有「間數跟組合對不上」這種情況才需要插手
+  if (isInfo && (roomTotal === undefined || compositionUsable)) return result;
+
   // 只講「要幾間房」：自己挑一組住得下、床位最少的組合，不要原封不動把同一張報價再送一次
-  const roomTotal = scanRoomTotal(message);
-  const capacityFields = ctx.fields.filter((f) => f.quote_field === 'room_count' && Number(f.room_capacity) > 0);
-  if (roomTotal !== undefined && capacityFields.length && Number.isFinite(currentHeadcount)) {
-    const chosen = composeRoomsForTotal(roomTotal, currentHeadcount, await fetchRoomCapacityCounts());
+  // 同一句也改了人數（AI 抽到的）就用新的人數挑房
+  const headcountForRooms = headcountField && result.slots[headcountField.key] !== undefined ? Number(result.slots[headcountField.key]) : currentHeadcount;
+  if (roomTotal !== undefined && capacityFields.length && Number.isFinite(headcountForRooms)) {
+    const chosen = composeRoomsForTotal(roomTotal, headcountForRooms, await fetchRoomCapacityCounts());
     // 湊不出這麼多間（例如要 10 間、總共只有 5 間）就維持 question：知識庫裡有房間清單，
     // AI 會照實回答「我們共有 5 間房」，比系統硬掰一個組合好。
     if (chosen) {
@@ -3214,7 +3293,7 @@ async function applyRoomCompositionOverride(message: string, ctx: IntentContext,
       for (const f of capacityFields) slots[f.key] = String(chosen.layout[Number(f.room_capacity)] ?? 0);
       // 住不下的組合照樣送出去：報價那邊會回「您指定的房間住不下 N 位…最多 M 人」，
       // 這比原封不動重送同一張報價（客人以為系統沒聽懂）清楚得多。
-      traceStep(`客人只說要 ${roomTotal} 間房，系統挑了 ${describe(slots)}（${chosen.beds} 床${chosen.seatsAll ? '' : '，住不下 ' + currentHeadcount + ' 位'}），改判成要重新報價`);
+      traceStep(`客人只說要 ${roomTotal} 間房，系統挑了 ${describe(slots)}（${chosen.beds} 床${chosen.seatsAll ? '' : '，住不下 ' + headcountForRooms + ' 位'}），改判成要重新報價`);
       return { ...result, intent: 'modify', slots: { ...result.slots, ...slots }, reason: '指定間數' };
     }
     traceStep(`客人要 ${roomTotal} 間房，但總共沒有這麼多間，交給知識庫回答實際房間數`);
@@ -3442,6 +3521,17 @@ async function handleQuoteConversation(a: QuoteConversationArgs): Promise<boolea
         traceStep('分類為提供資訊但沒有任何可用的欄位值，改走階段預設處理');
         return handleUnclear(a, reply, notifyAgents, phase, missingLabels());
       }
+      // 客人講的條件跟目前這份報價一模一樣（「所以你們提供2+4+4的房型嗎?」）：他是在確認，
+      // 不是在改。直接回答「是，就是這個」，不要作廢舊單、開新單，再把同一張報價原封不動送一次——
+      // 客人會以為系統沒看懂他的問題。
+      if (phase === 'awaiting_confirmation' && session.quote) {
+        const sameAsQuoted = await describeIfSameAsQuote(allFields, session, values);
+        if (sameAsQuoted) {
+          traceStep('客人講的條件跟目前報價相同，直接回答是這個組合，不重新報價');
+          await reply(sameAsQuoted);
+          return true;
+        }
+      }
       // 待確認／待匯款：客人改了內容 → 以新的為準重新報價
       traceStep('報價後客人更改訂房內容，重新試算');
       return quoteFlowDeps.requoteWithCollected(lineClient, lineEvent, settings, userId, nickname, flow, session, merged);
@@ -3504,6 +3594,44 @@ async function handleQuoteConversation(a: QuoteConversationArgs): Promise<boolea
       }
       return handleUnclear(a, reply, notifyAgents, phase, missingLabels());
   }
+}
+
+// 客人這句的條件跟目前報價完全相同時，回一句「是，就是這個組合」；有任何不同就回 null（照常重新報價）。
+// 房數要跟「實際開的房間」比，不是跟 collected 比：客人沒指定房型時 collected 裡根本沒有房數，
+// 報價用的是系統自動配的組合，客人問的「2+4+4」正是在問那一組。
+async function describeIfSameAsQuote(
+  allFields: FlowFieldDef[],
+  session: BookingSession,
+  values: Record<string, string>
+): Promise<string | null> {
+  const roomFields = allFields.filter((f) => f.quote_field === 'room_count' && Number(f.room_capacity) > 0);
+  const isRoomField = (key: string) => roomFields.some((f) => f.key === key);
+  for (const [k, v] of Object.entries(values)) {
+    if (!isRoomField(k) && session.collected[k] !== v) return null;
+  }
+
+  const roomIds = session.quote?.roomIds || [];
+  if (!roomIds.length) return null;
+  const { data } = await supabase.from('room_types').select('id, capacity').in('id', roomIds);
+  const quoted = new Map<number, number>();
+  for (const r of data || []) if (r.capacity) quoted.set(Number(r.capacity), (quoted.get(Number(r.capacity)) || 0) + 1);
+  if (!quoted.size) return null;
+
+  const requestedRooms = Object.keys(values).filter(isRoomField);
+  if (requestedRooms.length) {
+    // 客人指定的組合（沒提到的房型當 0）要跟實際開的每一種房型間數都相同
+    const requested = new Map<number, number>();
+    for (const f of roomFields) {
+      const n = Number(values[f.key] ?? 0);
+      if (n > 0) requested.set(Number(f.room_capacity), (requested.get(Number(f.room_capacity)) || 0) + n);
+    }
+    if (requested.size !== quoted.size) return null;
+    for (const [cap, n] of requested) if (quoted.get(cap) !== n) return null;
+  }
+
+  const layout = Array.from(quoted.entries()).sort((a, b) => a[0] - b[0]).map(([cap, n]) => `${cap}人房 ${n} 間`).join('、');
+  const totalRooms = Array.from(quoted.values()).reduce((s, n) => s + n, 0);
+  return `是的，目前這份報價就是 ${layout}（共 ${totalRooms} 間）😊\n要訂房請回「是」、不訂請回「否」；想換別的組合（例如「${totalRooms + 1}間房」或指定幾人房各幾間），直接告訴我，我馬上重新試算。`;
 }
 
 // 意圖不明時的階段預設：收集中什麼都沒填就當閒聊交給 AI；填了一部分就再問缺的；

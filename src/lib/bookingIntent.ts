@@ -342,8 +342,15 @@ export function classifyByRules(
   }
 
   // 「2+2+4+4」這種房間組合沒有欄位標籤，上面的擷取器抓不到，但它是明確指定要哪幾間房
+  // 但同一句又講了對不上的間數（「2+4+4的房型嗎? 可以給我4間房嗎?」）時，組合是在複述目前的
+  // 報價、間數才是新要求——規則版不知道各房型有幾間、挑不出 4 間的組合，就乾脆不採用組合，
+  // 免得拿複述的內容重新報一張一模一樣的價。
   const composition = scanRoomComposition(trimmed, ctx.fields);
-  for (const [k, v] of Object.entries(composition)) if (slots[k] === undefined) slots[k] = v;
+  const roomTotal = scanRoomTotal(trimmed);
+  const compositionRooms = Object.values(composition).reduce((s, v) => s + Number(v), 0);
+  if (roomTotal === undefined || compositionRooms === roomTotal) {
+    for (const [k, v] of Object.entries(composition)) if (slots[k] === undefined) slots[k] = v;
+  }
 
   // 「多 1 大人 1 小孩」這種相對人數：句子裡沒有絕對人數，只有加減，要用現有人數去算
   const headcountField = ctx.fields.find((f) => f.quote_field === 'headcount');
