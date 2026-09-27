@@ -135,7 +135,9 @@ export async function fetchTemplates(): Promise<MessageTemplate[]> {
   return (data || []) as MessageTemplate[];
 }
 export async function fetchStageTemplates(): Promise<Record<string, string>> {
-  const { data } = await supabase.from('settings').select('stage_templates').limit(1).maybeSingle();
+  // 讀 operational_settings 不是 settings：settings 整列含金鑰，只有系統管理權限讀得到，
+  // 會計、房務讀 settings 會拿到空值，通知對話框就帶不出這一關的預設範本。
+  const { data } = await supabase.from('operational_settings').select('stage_templates').limit(1).maybeSingle();
   return (data?.stage_templates as Record<string, string>) || {};
 }
 

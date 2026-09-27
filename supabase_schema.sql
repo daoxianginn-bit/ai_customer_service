@@ -2025,7 +2025,9 @@ BEGIN
       ('user_states',                       'customer.view,service.view,marketing.view', 'customer.edit,service.handover', 'customer.edit,service.handover', 'OWNER'),
       ('conversations',                     'service.view,customer.view', 'NONE', 'NONE', 'OWNER'),
       ('handover_logs',                     'service.view,customer.view', 'service.handover', 'service.handover', 'OWNER'),
-      ('custom_message_templates',          'marketing.view', 'marketing.template.manage', 'marketing.template.manage', 'marketing.template.manage'),
+      -- 訊息範本本身不是機密，讀取不設權限：會計確認款項、房務發入住密碼時都要在「訂單處理」挑範本通知客人，
+      -- 以前讀取要 marketing.view，沒有行銷權限的人打開通知對話框範本清單是空的。改範本仍然要 manage 權限。
+      ('custom_message_templates',          'ANY', 'marketing.template.manage', 'marketing.template.manage', 'marketing.template.manage'),
       ('consumables',                       'housekeeping.view', 'housekeeping.manage', 'housekeeping.manage', 'housekeeping.manage'),
       ('consumable_spaces',                 'housekeeping.view', 'housekeeping.manage', 'housekeeping.manage', 'housekeeping.manage'),
       -- 權限表本身：角色名稱與權限目錄不是機密（側欄、邀請對話框都要用），寫入一律走 Functions
@@ -2100,7 +2102,9 @@ CREATE OR REPLACE VIEW public.operational_settings AS
     s.id,
     s.whole_house_security_deposit,
     s.deposit_percent,
-    s.peak_season_weekday_tier
+    s.peak_season_weekday_tier,
+    -- 各關卡預設通知範本（只是範本 id 對照表），訂單處理的通知對話框用它帶入這一關的預設範本
+    s.stage_templates
   FROM public.settings s
   WHERE public.can_view();
 
