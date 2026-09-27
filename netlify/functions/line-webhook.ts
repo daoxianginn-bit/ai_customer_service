@@ -27,7 +27,7 @@ import { LineChannel, isFullServiceRole, channelRoleLabel } from '../../src/lib/
 import {
   buildIntentPrompt, parseIntentResponse, classifyByRules,
   isYesAnswer, isNoAnswer, isRestartCommand, interpretBareAnswer,
-  scanRoomComposition, scanHeadcountDelta, scanRoomTotal, composeRoomsForTotal,
+  scanRoomComposition, scanHeadcountDelta, scanRoomTotal, composeRoomsForTotal, scanWaitlistAnswer,
   missingEssentialFields, QUOTE_ESSENTIAL_FIELDS,
   type BookingPhase, type IntentContext, type IntentResult,
 } from '../../src/lib/bookingIntent';
@@ -1085,6 +1085,9 @@ interface BookingSession {
   // awaiting_remittance：顧客已回「是」、預訂單已送出，等顧客回報匯款
   phase: 'in_flow' | 'awaiting_confirmation' | 'awaiting_remittance';
   quote: BookingQuoteInfo | null;
+  // 排不出房時問出去的那句「要不要幫您排候補」，答案就等在這裡（見 WaitlistOffer）。客人轉頭
+  // 改日期、補資料時會被清掉，不會讓幾天後才突然出現的一句「好」被當成同意候補。
+  waitlistOffer?: WaitlistOffer | null;
   updatedAt: number;
 }
 
@@ -1722,6 +1725,39 @@ async function findWaitlistWatchTarget(
     .limit(1)
     .maybeSingle();
   return data || null;
+}
+
+// 排不出房、要問客人「要不要幫您排候補」時，那句話與之後登記候補所需的全部資料。存在 session
+// 裡（BookingSession.waitlistOffer），客人下一句回「好」就直接登記，不用再算一遍。
+export interface WaitlistOffer {
+  bookingId: string;
+  checkinIso: string;
+  checkoutIso: string;
+  headcount: number;
+  /** 缺哪些房型，客人同意時通知客服用 */
+  shortfallText: string;
+  /** 被訂滿的是哪幾天，講給客人聽 */
+  blockedRange: string;
+  /** 問的當下算出的監看對象；客人同意時會重算一次，這個是保底 */
+  watchTargetId: string;
+}
+
+export function waitlistOfferMessage(o: WaitlistOffer): string {
+  return `感謝您提供的資訊！您想預訂 ${toSlashDate(o.checkinIso)}~${toSlashDate(o.checkoutIso)}、${o.headcount}人入住，不過 ${o.blockedRange} 的房間目前已經被訂滿了 🙏\n需要幫您排候補嗎？回覆「好」我們就幫您登記，這段期間一有人取消會第一時間主動通知您；如果想看別的日期，直接告訴我入住與退房日期，我馬上幫您重新試算 😊`;
+}
+
+// 候補問句還沒得到答案、客人又講了一句看不懂的話時再問一次。先認「我沒聽懂」，不要裝作沒發生
+// 過又把同一段話整段複製一次。
+export function waitlistReaskMessage(o: WaitlistOffer): string {
+  return `不好意思，我不太確定您的意思 🙏\n${o.blockedRange} 的房間目前已經訂滿了，需要幫您排候補嗎？回覆「好」我們就幫您登記；想看別的日期的話，直接告訴我入住與退房日期就可以 😊`;
+}
+
+export function waitlistAcceptedMessage(o: WaitlistOffer): string {
+  return `好的，已經幫您排入 ${o.blockedRange} 的候補 ✅\n這段期間一有人取消，我們會第一時間主動通知您。想看別的日期也隨時告訴我，我馬上幫您重新試算 😊`;
+}
+
+export function waitlistDeclinedMessage(): string {
+  return '好的，那就先不排候補 🙏\n想看別的日期的話，直接告訴我入住與退房日期，我馬上幫您重新試算 😊';
 }
 
 // 這位客人自己在同一段日期還有沒有別的活訂單。
@@ -2577,7 +2613,9 @@ async function finishBookingFlow(
   // 實際上完全沒有建立訂單、也沒有通知任何客服，客人卻以為已經送出了，等於直接掉單。
   // 改成把 session 停在最後一個步驟：客人重送表單就會被當成重新回答那一步，直接重算報價。
   // 沒有再送的話，session 自己會逾時（見 IN_FLOW_SESSION_TTL_MS），客人會收到「請重新輸入一次」的提示。
-  const keepSessionForRetry = () =>
+  // waitlistOffer：只有「排不出房」那一次會帶，把「要不要排候補」的問句內容一起存進 session，
+  // 客人下一句回「好」就能直接登記候補（見 acceptWaitlistOffer）。其他情況一律不帶。
+  const keepSessionForRetry = (waitlistOffer: WaitlistOffer | null = null) =>
     saveBookingSession(userId, {
       flowId: flow.id,
       stepIndex: Math.max(0, flow.steps.length - 1),
@@ -2585,6 +2623,7 @@ async function finishBookingFlow(
       bookingId,
       phase: 'in_flow',
       quote: null,
+      waitlistOffer,
     });
 
   const hasAllQuoteFields = QUOTE_ESSENTIAL_FIELDS.every((k) => quoteValues[k] !== undefined);
@@ -2776,9 +2815,14 @@ async function finishBookingFlow(
 
     // 排不出客人指定的房型組合：默默改成別的房型，客人到現場才發現不對，所以不硬湊，轉成候補。
     // 同時間多人詢問到重疊日期時最常見的就是這個分支——先找出是被哪一筆訂單卡住（watchTarget），
-    // 排入候補監看，「排程管理」的候補排程之後會在那筆訂單「有結果」時自動重新試算、主動推播，
-    // 不用客人自己再問一次，也不用客服每筆都手動盯著。真的找不到重疊訂單（理論上不太會發生）
-    // 才維持原本「已經請真人客服為您確認」的做法，直接轉人工。
+    // 客人同意排候補後就掛上監看，「排程管理」的候補排程會在那筆訂單「有結果」時自動重新試算、
+    // 主動推播，不用客人自己再問一次，也不用客服每筆都手動盯著。真的找不到重疊訂單（理論上
+    // 不太會發生）就連候補都不用提，維持原本「已經請真人客服為您確認」的做法，直接轉人工。
+    //
+    // 候補要客人同意才算：這裡只把問句送出去（存成 session 的 waitlistOffer），客人回「好」才
+    // 真的登記（見 acceptWaitlistOffer）。以前是直接幫他排、順口告訴他「已排入候補」——客人
+    // 從來沒答應過，連問兩個日期就被連續排進兩張沒同意過的候補，也少了「其實我改日期就好」
+    // 這個更快的選項。
     if (openedRooms.shortfall.length) {
       if (isRetry) {
         // 候補重新試算還是排不出來：不送候補訊息、不設新的監看對象，交給 attemptWaitlistRetry
@@ -2791,14 +2835,31 @@ async function finishBookingFlow(
       await supabase.from('bookings').update({
         collected_answers: collected,
         status: 'pending_manual_conflict',
-        waitlist_blocked_by: watchTarget?.id ?? null,
+        // 候補要客人同意才算，所以這裡先不寫監看對象——客人回「好」時才寫（acceptWaitlistOffer）。
+        // 在他回覆之前這筆就是一張「系統排不出房」的待人工確認單，客服在「候補／衝突」看得到。
+        waitlist_blocked_by: null,
         updated_at: new Date().toISOString(),
       }).eq('id', bookingId);
 
+      // 問句要用到的資料一次收好，客人下一句回「好」時就不必重算一遍（也避免那時候房況已經變
+      // 了、講出來的日期跟當初問的不一樣）。watchTarget 是 null 代表沒有可監看的訂單，候補會
+      // 永遠等不到「有結果」，那就不要提候補，直接轉真人。
+      const offer: WaitlistOffer | null = watchTarget
+        ? {
+            bookingId,
+            checkinIso,
+            checkoutIso,
+            headcount,
+            shortfallText: describeShortfall(openedRooms.shortfall),
+            blockedRange: formatOverlapRange(checkinIso, checkoutIso, watchTarget.checkin_date, watchTarget.checkout_date),
+            watchTargetId: watchTarget.id,
+          }
+        : null;
+
       // 報價階段不再鎖房之後，會走到這裡就代表房間是被「已經確認要訂」的訂單佔走的，
       // 不是被別人的報價卡住，所以措辭直接講「已經訂滿」，不要含糊說成「有人也在候位」。
-      const replyText = watchTarget
-        ? `感謝您提供的資訊！您想預訂 ${toSlashDate(checkinIso)}~${toSlashDate(checkoutIso)}、${headcount}人入住，不過 ${formatOverlapRange(checkinIso, checkoutIso, watchTarget.checkin_date, watchTarget.checkout_date)} 的房間目前已經被訂滿了 🙏\n我們先幫您排入候補，如果這段期間有人取消，會第一時間主動通知您；也歡迎您直接改其他日期讓我們重新試算。`
+      const replyText = offer
+        ? waitlistOfferMessage(offer)
         : `不好意思，您指定的房型組合目前排不出來（${describeShortfall(openedRooms.shortfall)}），已經請真人客服為您確認實際空房，我們會盡快與您聯繫 🙏`;
       await sendReply(replyText);
       await logConversation(userId, nickname, 'outbound', replyText, 'system');
@@ -2807,13 +2868,13 @@ async function finishBookingFlow(
         try {
           await lineClient.pushMessage(id, {
             type: 'text',
-            text: watchTarget
-              ? `🕒 房型候補中：【${nickname || '匿名用戶'}】${toSlashDate(checkinIso)}~${toSlashDate(checkoutIso)}，${describeShortfall(openedRooms.shortfall)}，已排入自動候補，等卡住的訂單有結果會自動重新試算並通知客人，不用立即處理。`
+            text: offer
+              ? `🕒 房型訂滿，已問客人要不要排候補：【${nickname || '匿名用戶'}】${toSlashDate(checkinIso)}~${toSlashDate(checkoutIso)}，${describeShortfall(openedRooms.shortfall)}。客人回「好」才會登記候補，目前還沒登記；他沒回覆的話可以主動聯繫。`
               : `⚠️ 房型排不出來：【${nickname || '匿名用戶'}】${toSlashDate(checkinIso)}~${toSlashDate(checkoutIso)}，${describeShortfall(openedRooms.shortfall)}，請人工確認。`,
           });
         } catch {}
       }
-      await keepSessionForRetry();
+      await keepSessionForRetry(offer);
       return;
     }
 
@@ -3067,9 +3128,10 @@ function sessionPhaseToIntentPhase(phase: BookingSession['phase']): BookingPhase
 
 // 各階段交給一般 AI 問答時，答完要補的那句提醒
 // 一行就好：這句是接在 AI 回答後面的，客人剛看完答案，只要點一下還有事沒做完。
-function reminderForPhase(phase: BookingPhase, missingLabels: string[], collectedCount: number): string {
+function reminderForPhase(phase: BookingPhase, missingLabels: string[], collectedCount: number, waitlistPending = false): string {
   if (phase === 'awaiting_confirmation') return '📋 報價確認：回「是」訂房／「否」取消／「修改」重填';
   if (phase === 'awaiting_remittance') return '📋 匯款後請回覆帳號末五碼';
+  if (waitlistPending) return '📋 要排候補請回「好」，或直接告訴我其他日期';
   if (missingLabels.length) return `📋 訂房還需要：${missingLabels.join('、')}`;
   if (collectedCount > 0) return '📋 回覆上方問題後即為您試算';
   return '📋 要訂房請回覆上方表單';
@@ -3312,6 +3374,13 @@ async function handleQuoteConversation(a: QuoteConversationArgs): Promise<boolea
     ? []
     : (essentialsMissing.length ? essentialsMissing : currentStepFields.filter((f) => !session.collected[f.key])).map((f) => f.key);
 
+  // 排不出房那次我們只問了「要不要幫您排候補」、沒有自己排下去（見 finishBookingFlow 的 shortfall
+  // 分支），客人這句話可能就是在回答它。讀出來之後就從 session 上拿掉：這句問話只對「下一次真的
+  // 動到 session 的回覆」有效，客人轉頭改日期、補資料就作廢。這一輪如果只是問問題（session 不
+  // 動），資料庫裡那份還在，下一句「好」仍然算在回答候補。
+  const waitlistOffer = session.waitlistOffer ?? null;
+  session.waitlistOffer = null;
+
   // 意圖分類（AI 模式會帶最近對話當脈絡）
   const history = flow.replyMode === 'system' ? [] : (await fetchConversationContext(userId, userMessage)).history;
   const ctx: IntentContext = {
@@ -3321,6 +3390,7 @@ async function handleQuoteConversation(a: QuoteConversationArgs): Promise<boolea
     recentMessages: history.map((h) => ({ role: h.direction === 'inbound' ? 'customer' as const : 'bot' as const, text: h.content })),
     todayIso: dateToIso(taiwanToday()),
     askedKeys,
+    pendingWaitlist: !!waitlistOffer,
   };
   const result = await classifyBookingIntent(settings, flow, userMessage, ctx, nickname, lineClient);
   traceData('intent', { intent: result.intent, slots: result.slots, source: result.source, reason: result.reason ?? null });
@@ -3328,13 +3398,30 @@ async function handleQuoteConversation(a: QuoteConversationArgs): Promise<boolea
 
   const missingLabels = () => missingEssentialFields(allFields, session.collected).map((f) => f.label);
 
+  // 候補問句的答案先收掉：不然「好」會掉進 confirm 的「目前還沒有報價可以確認喔」，答非所問，
+  // 客人也永遠排不進候補。規則判斷優先於 AI——「好」「不用」「幫我排候補」這幾種講法確定得很，
+  // AI 偶爾會把它們判成 unclear 或 question。
+  if (waitlistOffer) {
+    const answer = scanWaitlistAnswer(userMessage)
+      ?? (isYesAnswer(userMessage) ? 'yes' : isNoAnswer(userMessage) ? 'no' : undefined)
+      ?? (result.intent === 'confirm' ? 'yes' : result.intent === 'decline' ? 'no' : undefined);
+    if (answer === 'yes') {
+      traceStep('客人同意排候補，登記監看對象');
+      return acceptWaitlistOffer(a, reply, notifyAgents, waitlistOffer);
+    }
+    if (answer === 'no') {
+      traceStep('客人不排候補，訂單留在待人工確認');
+      return declineWaitlistOffer(a, reply, notifyAgents, waitlistOffer);
+    }
+  }
+
   switch (result.intent) {
     case 'restart':
       return restartQuote(a);
 
     case 'question':
       // 交給一般 AI 問答（知識庫），答完補提醒。session 完全不動。
-      setTurnReminder(reminderForPhase(phase, missingLabels(), Object.keys(session.collected).length));
+      setTurnReminder(reminderForPhase(phase, missingLabels(), Object.keys(session.collected).length, !!waitlistOffer));
       traceStep('客人在問問題，交給一般 AI 問答回答，答完補提醒（session 不動）');
       return false;
 
@@ -3408,6 +3495,13 @@ async function handleQuoteConversation(a: QuoteConversationArgs): Promise<boolea
 
     case 'unclear':
     default:
+      if (waitlistOffer) {
+        // 候補問句還沒得到答案、這句又看不懂：再問一次就好。走 handleUnclear 會因為算價欄位都
+        // 齊了而直接重跑一輪試算，結果一定一樣（還是排不出房），只是白白再推播客服一次。
+        traceStep('候補問句還沒回答、這句看不懂，再問一次要不要排候補');
+        await reply(waitlistReaskMessage(waitlistOffer));
+        return true;
+      }
       return handleUnclear(a, reply, notifyAgents, phase, missingLabels());
   }
 }
@@ -3450,6 +3544,48 @@ async function handleUnclear(
   }
   traceStep('待匯款階段意圖不明，保守當成匯款回報通知客服');
   return quoteFlowDeps.handleRemittanceReport(lineClient, lineEvent, settings, userId, nickname, userMessage, session, false);
+}
+
+// 客人回「好」才真的排候補：這時候才寫 waitlist_blocked_by（候補排程就是靠它找出要重試的訂單），
+// 並通知客服「不用立即處理」。監看對象重算一次——問句送出到客人回覆之間那筆可能已經有結果了，
+// 沿用舊的會讓候補空等一筆早就結案的訂單；真的重算不出來就用當初問的時候那筆保底。
+async function acceptWaitlistOffer(
+  a: QuoteConversationArgs,
+  reply: (text: string) => Promise<void>,
+  notifyAgents: (text: string) => Promise<void>,
+  offer: WaitlistOffer
+): Promise<boolean> {
+  const { userId, nickname, session } = a;
+  const watchTarget = await findWaitlistWatchTarget(offer.checkinIso, offer.checkoutIso, offer.bookingId);
+  await supabase.from('bookings').update({
+    status: 'pending_manual_conflict',
+    waitlist_blocked_by: watchTarget?.id ?? offer.watchTargetId,
+    updated_at: new Date().toISOString(),
+  }).eq('id', offer.bookingId);
+  await saveBookingSession(userId, { ...session, waitlistOffer: null });
+  await reply(waitlistAcceptedMessage(offer));
+  await notifyAgents(
+    `🕒 房型候補中：【${nickname || '匿名用戶'}】${toSlashDate(offer.checkinIso)}~${toSlashDate(offer.checkoutIso)}，${offer.shortfallText}，客人同意排候補，等卡住的訂單有結果會自動重新試算並通知客人，不用立即處理。`
+  );
+  return true;
+}
+
+// 客人說不用排候補：訂單留在「待人工確認」，客服在「候補／衝突」頁看得到，可以主動問要不要換
+// 日期；session 也留著不清掉——客人下一句最常見的就是「那 10/15 呢」，留著才能直接重新試算，
+// 不會掉進一般 AI 問答被回一句「我們會幫您確認」，然後其實沒有任何人接手。
+async function declineWaitlistOffer(
+  a: QuoteConversationArgs,
+  reply: (text: string) => Promise<void>,
+  notifyAgents: (text: string) => Promise<void>,
+  offer: WaitlistOffer
+): Promise<boolean> {
+  const { userId, nickname, session } = a;
+  await saveBookingSession(userId, { ...session, waitlistOffer: null });
+  await reply(waitlistDeclinedMessage());
+  await notifyAgents(
+    `🙅 客人不排候補：【${nickname || '匿名用戶'}】${toSlashDate(offer.checkinIso)}~${toSlashDate(offer.checkoutIso)}（${offer.shortfallText}），訂單留在待人工確認，可主動聯繫看要不要換其他日期。`
+  );
+  return true;
 }
 
 // 重新開始：收集中沿用同一筆 inquiring 訂單重送表單；報價後要走 restartQuoteFlow

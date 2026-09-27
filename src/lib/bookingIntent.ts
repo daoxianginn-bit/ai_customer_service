@@ -52,6 +52,11 @@ export interface IntentContext {
    * 沒給的話退回用所有未填欄位。
    */
   askedKeys?: string[];
+  /**
+   * 客服上一句問的是「要不要幫您排候補」，還在等客人回答（見 line-webhook 的 waitlistOffer）。
+   * 這一題的「好／不用」是在回答候補、不是在確認報價，所以 confirm／decline 的判斷要放寬。
+   */
+  pendingWaitlist?: boolean;
 }
 
 export interface IntentResult {
@@ -87,6 +92,18 @@ export function isYesAnswer(message: string): boolean {
 }
 export function isNoAnswer(message: string): boolean {
   return NO_ANSWERS.has(normalizeShortAnswer(message));
+}
+
+// 「要不要幫您排候補？」的答案。isYesAnswer 只認「整句就是一個好」，但這一題客人很常把關鍵字
+// 帶上（「幫我排候補」「候補好了」「不用候補」），所以另外看一次。回 undefined 代表這句不是在
+// 回答——「候補要等多久？」「候補是什麼」是在問候補這件事本身，該交給知識庫回答。
+export function scanWaitlistAnswer(message: string): 'yes' | 'no' | undefined {
+  const t = message.trim();
+  if (!/候補|候位/.test(t)) return undefined;
+  if (/不(用|要|需要|想)|先不|別排|算了|沒關係/.test(t)) return 'no';
+  if (/多久|多長|什麼|甚麼|怎麼|如何|意思|規則|機制/.test(t)) return undefined;
+  if (/幫我|幫忙|麻煩|請幫|登記|加入|排我|好|要|可以|ok|yes/i.test(t)) return 'yes';
+  return undefined;
 }
 
 export function isRestartCommand(message: string): boolean {
@@ -291,6 +308,14 @@ export function classifyByRules(
 
   if (isRestartCommand(trimmed)) return rules('restart');
 
+  // 客服上一句在問「要不要幫您排候補」：這裡的「好／不用」是在回答那一句，不是在確認報價。
+  // 要比下面的欄位擷取先判斷，不然收集中階段的「好」會一路掉到最後變成 unclear。
+  if (ctx.pendingWaitlist) {
+    const answer = scanWaitlistAnswer(trimmed);
+    if (answer === 'no' || isNoAnswer(trimmed)) return rules('decline');
+    if (answer === 'yes' || isYesAnswer(trimmed)) return rules('confirm');
+  }
+
   if (ctx.phase === 'awaiting_confirmation') {
     if (isNoAnswer(trimmed)) return rules('decline');
     if (isYesAnswer(trimmed)) return rules('confirm');
@@ -376,6 +401,17 @@ export function buildIntentPrompt(ctx: IntentContext): string {
     .map((f) => `  - ${f.label}（${f.key}）：${ctx.collected[f.key]}`);
   const fieldLines = ctx.fields.map((f) => `  - ${f.key}：${f.label}，${describeFieldType(f)}`);
   const historyLines = ctx.recentMessages.slice(-8).map((m) => `  ${m.role === 'customer' ? '客人' : '客服'}：${m.text.replace(/\s+/g, ' ').slice(0, 200)}`);
+  // 客服上一句問的是「要不要排候補」時，confirm 的意思就換成「同意排候補」。不換的話模型會照
+  // 原本的定義說 confirm 只出現在待確認階段，把客人那句「好」判成 unclear。
+  const confirmDefinition = ctx.pendingWaitlist
+    ? '- confirm：同意客服上一句問的事。現在問的是「要不要幫您排候補」，所以「好／要／可以／幫我排」就是 confirm。'
+    : '- confirm：純粹的同意報價、確定要訂，沒有附帶任何其他要求或條件。只有在「待確認」階段才會出現。';
+  const waitlistBlock = ctx.pendingWaitlist
+    ? `【客服上一句問的是「要不要幫您排候補」】
+  同意（好／要／可以／幫我排候補）＝confirm；拒絕（不用／不要／算了／沒關係）＝decline。
+  客人改講別的日期或人數，照常判 provide_info／modify；問候補本身怎麼運作（要等多久、是什麼）＝question。
+`
+    : '';
   const askedLabels = (ctx.askedKeys || [])
     .map((k) => ctx.fields.find((f) => f.key === k))
     .filter((f): f is IntentFieldDef => !!f && !ctx.collected[f.key])
@@ -399,9 +435,9 @@ ${askedLabels.length ? '  ' + askedLabels.join('、') : '  （無）'}
 【最近對話（舊到新）】
 ${historyLines.length ? historyLines.join('\n') : '  （無）'}
 
-【意圖定義】只能是以下之一：
+${waitlistBlock}【意圖定義】只能是以下之一：
 - provide_info：提供或補充訂房資訊（日期、人數、房數、備註）。包含「只回一個數字」補上剩下那一欄的情況。
-- confirm：純粹的同意報價、確定要訂，沒有附帶任何其他要求或條件。只有在「待確認」階段才會出現。
+${confirmDefinition}
 - decline：不訂了、取消。
 - modify：要更改「已收集」的資訊（例如「改成 3 個人」「日期換 10/10」「好啊但改成…」）。一定要把新值放進 slots。
 - question：詢問民宿相關的問題（早餐、停車、入住時間、付款方式、設施…）。
@@ -454,7 +490,8 @@ export function parseIntentResponse(raw: string, ctx: IntentContext): IntentResu
     // 階段不對的意圖降級：待確認以外的階段不可能「確認報價」，待匯款以外不可能「回報匯款」。
     // 模型偶爾會被字面意思帶走（收集中客人回「好」），這裡擋一道。
     let finalIntent = intent;
-    if (intent === 'confirm' && ctx.phase !== 'awaiting_confirmation') finalIntent = 'unclear';
+    // 例外：客服上一句在問「要不要排候補」時，收集中階段的 confirm 是在回答那一句。
+    if (intent === 'confirm' && ctx.phase !== 'awaiting_confirmation' && !ctx.pendingWaitlist) finalIntent = 'unclear';
     if (intent === 'payment_report' && ctx.phase !== 'awaiting_remittance') finalIntent = 'unclear';
     // restart 帶了欄位值等於矛盾——客人是在提供資訊，不是要重來
     if (intent === 'restart' && Object.keys(slots).length > 0) finalIntent = 'provide_info';
