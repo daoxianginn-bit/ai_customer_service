@@ -15,7 +15,7 @@ import { useBreakpoint } from '../../app/useBreakpoint';
 import { Can, usePermission } from '../../app/Can';
 import PageHeaderV2 from '../../components/ui-mui/PageHeaderV2';
 import StatusBadge from '../../components/ui-mui/StatusBadge';
-import { CustomerCell, DatesCell, MoneyCell, RoomCell, StatusCell, checkinHint, paymentState, rowRailSx, tableRailSx, tracksPayment } from './bookingListCells';
+import { CustomerCell, DatesCell, ExtraUnpaidTag, MoneyCell, RoomCell, StatusCell, checkinHint, paymentState, rowRailSx, tableRailSx, tracksPayment } from './bookingListCells';
 import DataTableMui, { type Column } from '../../components/ui-mui/DataTableMui';
 import BatchActionBar from '../../components/ui-mui/BatchActionBar';
 import ResultState from '../../components/ui-mui/ResultState';
@@ -412,7 +412,7 @@ export default function BookingListPage() {
                         <Typography variant="subtitle1" fontWeight={600} noWrap sx={{ fontSize: 16 }}>{r.name || r.nickname || '未取得'}</Typography>
                         <Typography variant="caption" color="text.disabled" sx={{ fontFamily: 'monospace' }}>{r.order_number || '—'}</Typography>
                       </Box>
-                      <StatusBadge status={r.status} />
+                      <Stack alignItems="flex-end" spacing={0.5}><StatusBadge status={r.status} /><ExtraUnpaidTag r={r} /></Stack>
                     </Stack>
 
                     <Stack direction="row" spacing={0.75} alignItems="center" sx={{ mt: 1.25 }}>

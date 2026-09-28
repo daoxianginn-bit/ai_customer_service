@@ -3,6 +3,7 @@ import { MANUAL_ACTION_STATUSES, OCCUPYING_STATUSES } from '../../lib/bookingSta
 import type { LinenItem, LinenUsageRow, RoomLinenDefault } from '../../lib/linenCost';
 import type { RoomOption } from '../../lib/rooms';
 import { addDaysIso, todayIso } from '../../lib/format';
+import { computeBalanceDue } from '../../lib/extraCharges';
 
 // ========================================================================
 // 訂房模組的資料存取層（V2 §98）。頁面只組畫面，不直接寫 supabase 查詢；
@@ -41,6 +42,10 @@ export interface BookingRow {
   damage_found?: boolean | null;
   damage_deduction?: number | null;
   damage_note?: string | null;
+  /** 追加款彙總（資料庫觸發器維護） */
+  extra_unpaid_total?: number | null;
+  extra_paid_total?: number | null;
+  extra_unpaid_detail?: string | null;
   check_in_password?: string | null;
   status: string;
   guest_notes?: string | null;
@@ -225,7 +230,7 @@ export function bookingSourceLabel(row: Pick<BookingRow, 'booking_source' | 'lin
   return row.line_user_id ? 'LINE' : '手動';
 }
 
-/** 尾款＝總額－訂金；沒有總額就算不出來。 */
-export function bookingBalance(row: Pick<BookingRow, 'total_amount' | 'deposit'>): number | null {
-  return row.total_amount != null ? Number(row.total_amount) - Number(row.deposit || 0) : null;
+/** 尾款＝總額－訂金＋未付追加款；沒有總額就算不出來。算法在 extraCharges.ts，各處共用。 */
+export function bookingBalance(row: Pick<BookingRow, 'total_amount' | 'deposit' | 'extra_unpaid_total'>): number | null {
+  return computeBalanceDue(row);
 }

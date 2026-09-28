@@ -22,7 +22,7 @@ const rawHandler: Handler = async (event) => {
   // 前端就不用自己再打一次 Supabase 查 profile。
   const { data: profiles, error: profileError } = await supabaseAdmin
     .from('admin_profiles')
-    .select('id, role, status, display_name, approved_at, mfa_enrolled_at');
+    .select('id, role, status, display_name, approved_at, mfa_enrolled_at, line_channel_id, line_user_id, line_display_name');
   if (profileError) return { statusCode: 500, body: profileError.message };
 
   const profileById = new Map((profiles || []).map((p: any) => [p.id, p]));
@@ -42,6 +42,10 @@ const rawHandler: Handler = async (event) => {
       status: p?.status || 'invited',
       approved_at: p?.approved_at || null,
       mfa_enrolled_at: p?.mfa_enrolled_at || null,
+      // 綁定的 LINE（排程通知依角色／帳號發送時用）。只回有沒有綁與顯示名稱，LINE user ID 本身前端用不到
+      line_bound: !!p?.line_user_id,
+      line_display_name: p?.line_display_name || null,
+      line_channel_id: p?.line_channel_id || null,
     };
   });
 

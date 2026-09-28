@@ -31,6 +31,10 @@ export interface UserRecord {
   created_at: string;
   mfa_enrolled_at: string | null;
   role_ids: string[];
+  /** 綁定的 LINE（排程通知依角色／帳號發送時用） */
+  line_bound?: boolean;
+  line_display_name?: string | null;
+  line_channel_id?: string | null;
 }
 
 async function callFn(path: string, body?: unknown, method = 'POST') {
@@ -137,6 +141,20 @@ export async function setUserStatus(userId: string, status: AccountStatus) {
 }
 
 export const resetUserMfa = (userId: string) => callFn('mfa', { action: 'reset', userId });
+
+// ---------------- 帳號綁定 LINE（staff-line function） ----------------
+export interface LineChannelOption { id: string; name: string; role: string }
+export interface LineContactOption { line_user_id: string; nickname: string | null; last_message_at: string | null }
+export const fetchLineContacts = (channelId?: string): Promise<{ channels: LineChannelOption[]; contacts: LineContactOption[] }> =>
+  callFn('staff-line', { action: 'contacts', channelId: channelId || null });
+export const bindUserLine = (userId: string, channelId: string, lineUserId: string) => callFn('staff-line', { action: 'bind', userId, channelId, lineUserId });
+export const unbindUserLine = (userId: string) => callFn('staff-line', { action: 'unbind', userId });
+
+/** 排程通知挑「角色／個別帳號」收件人用 */
+export interface NoticeRoleOption { id: string; name: string; member_count: number; line_count: number }
+export interface NoticeAccountOption { id: string; name: string; has_line: boolean; role_ids: string[] }
+export const fetchNoticeAccountOptions = (): Promise<{ roles: NoticeRoleOption[]; accounts: NoticeAccountOption[] }> =>
+  callFn('staff-line', { action: 'options' });
 export const deleteUser = (userId: string) => callFn('delete-admin', { userId });
 
 export interface InviteResult { email: string; mailSent: boolean; mailError: string | null; inviteUrl: string }

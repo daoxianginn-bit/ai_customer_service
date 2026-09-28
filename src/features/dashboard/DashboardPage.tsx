@@ -4,7 +4,7 @@ import { Box, Button, Chip, Grid, Link, Paper, Skeleton, Stack, Typography } fro
 import { ArrowRight, RefreshCw } from 'lucide-react';
 import { useAuth } from '../../lib/AuthContext';
 import { usePermissions } from '../../app/PermissionContext';
-import { formatDate, formatShortDate, todayIso, addDaysIso } from '../../lib/format';
+import { formatDate, formatMoney, formatShortDate, todayIso, addDaysIso } from '../../lib/format';
 import { useBreakpoint } from '../../app/useBreakpoint';
 import PageHeaderV2 from '../../components/ui-mui/PageHeaderV2';
 import StatusBadge from '../../components/ui-mui/StatusBadge';
@@ -126,10 +126,17 @@ export default function DashboardPage() {
         <Grid item xs={6} md={3}><KpiCard label="待客服" value={kpis?.handovers ?? null} hint={convStats ? `今日對話 ${convStats.conversations} 則・轉接 ${convStats.handovers} 次` : undefined} href="/service" tone="warning" /></Grid>
       </Grid>
       <Grid container spacing={1.5} sx={{ mb: 3 }}>
-        <Grid item xs={6} md={3}><KpiCard label="待收尾款" value={kpis?.balanceDue ?? null} href="/bookings?status=awaiting_balance" tone="warning" /></Grid>
-        <Grid item xs={6} md={3}><KpiCard label="押金處理" value={kpis?.depositReturn ?? null} hint="已退房，押金待核對／退還" href="/bookings?status=deposit_processing" /></Grid>
-        <Grid item xs={6} md={3}><KpiCard label="待退款" value={kpis?.refund ?? null} href="/bookings?status=awaiting_refund" tone="danger" /></Grid>
-        <Grid item xs={6} md={3}>
+        <Grid item xs={6} md={2.4}><KpiCard label="待收尾款" value={kpis?.balanceDue ?? null} href="/bookings?status=awaiting_balance" tone="warning" /></Grid>
+        {/* 尾款收完之後才加的追加款，沒有下一關會自動收，會計要從這裡知道 */}
+        <Grid item xs={6} md={2.4}>
+          <KpiCard
+            label="未收追加款" value={kpis?.extraUnpaid.count ?? null} href="/bookings/process" tone="warning"
+            hint={kpis?.extraUnpaid.count ? `共 ${formatMoney(kpis.extraUnpaid.amount)}・尾款已收的訂單` : '尾款已收後才新增的追加款'}
+          />
+        </Grid>
+        <Grid item xs={6} md={2.4}><KpiCard label="押金處理" value={kpis?.depositReturn ?? null} hint="已退房，押金待核對／退還" href="/bookings?status=deposit_processing" /></Grid>
+        <Grid item xs={6} md={2.4}><KpiCard label="待退款" value={kpis?.refund ?? null} href="/bookings?status=awaiting_refund" tone="danger" /></Grid>
+        <Grid item xs={6} md={2.4}>
           <KpiCard
             label="候補／衝突"
             value={kpis ? kpis.waitlist + kpis.manualConflict + kpis.otaConflict : null}

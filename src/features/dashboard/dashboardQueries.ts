@@ -1,5 +1,5 @@
 import { supabase } from '../../lib/supabase';
-import { OCCUPYING_STATUSES } from '../../lib/bookingStatus';
+import { BALANCE_PAID_STATUSES, OCCUPYING_STATUSES } from '../../lib/bookingStatus';
 import { addDaysIso, todayIso } from '../../lib/format';
 import type { BookingRow } from '../booking/bookingQueries';
 
@@ -18,13 +18,15 @@ export interface DashboardKpis {
   waitlist: number;        // pending_manual_conflict + waitlist_blocked_by
   manualConflict: number;  // pending_manual_conflict 無候補對象
   otaConflict: number;     // ota_conflict_with 有值
+  /** 尾款已收、還有未付追加款的訂單（筆數與金額）——跟訂單處理的「追加款收款」同一個條件 */
+  extraUnpaid: { count: number; amount: number };
 }
 
 const head = (q: any) => q.then((r: any) => r.count ?? 0);
 
 export async function fetchKpis(): Promise<DashboardKpis> {
   const today = todayIso();
-  const [checkinsToday, checkoutsToday, paymentVerify, handovers, balanceDue, depositReturn, refund, waitlist, manualConflict, otaConflict] = await Promise.all([
+  const [checkinsToday, checkoutsToday, paymentVerify, handovers, balanceDue, depositReturn, refund, waitlist, manualConflict, otaConflict, extraUnpaid] = await Promise.all([
     head(supabase.from('bookings').select('id', { count: 'exact', head: true }).eq('checkin_date', today).in('status', OCCUPYING_STATUSES)),
     head(supabase.from('bookings').select('id', { count: 'exact', head: true }).eq('checkout_date', today).in('status', OCCUPYING_STATUSES)),
     head(supabase.from('bookings').select('id', { count: 'exact', head: true }).eq('status', 'awaiting_confirmation')),
@@ -39,8 +41,11 @@ export async function fetchKpis(): Promise<DashboardKpis> {
     head(supabase.from('bookings').select('id', { count: 'exact', head: true }).eq('status', 'pending_manual_conflict').not('waitlist_blocked_by', 'is', null)),
     head(supabase.from('bookings').select('id', { count: 'exact', head: true }).eq('status', 'pending_manual_conflict').is('waitlist_blocked_by', null)),
     head(supabase.from('bookings').select('id', { count: 'exact', head: true }).not('ota_conflict_with', 'is', null)),
+    // 欄位還沒建立（schema 尚未執行）時查詢失敗，當作 0
+    supabase.from('bookings').select('extra_unpaid_total').in('status', BALANCE_PAID_STATUSES).gt('extra_unpaid_total', 0)
+      .then((r: any) => ({ count: (r.data || []).length, amount: (r.data || []).reduce((s: number, x: any) => s + Number(x.extra_unpaid_total || 0), 0) })),
   ]);
-  return { checkinsToday, checkoutsToday, paymentVerify, handovers, balanceDue, depositReturn, refund, waitlist, manualConflict, otaConflict };
+  return { checkinsToday, checkoutsToday, paymentVerify, handovers, balanceDue, depositReturn, refund, waitlist, manualConflict, otaConflict, extraUnpaid };
 }
 
 /** 未來 7 日（含今天）要入住、且已鎖房的訂單；依入住日排。 */

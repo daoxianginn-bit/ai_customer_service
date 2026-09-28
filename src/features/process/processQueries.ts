@@ -2,6 +2,7 @@ import { supabase } from '../../lib/supabase';
 import { logOperation, logUiError } from '../../lib/logOperation';
 import { LOG_FEATURES, diffRecords } from '../../lib/operationLog';
 import type { BookingRow } from '../booking/bookingQueries';
+import { BALANCE_PAID_STATUSES } from '../../lib/bookingStatus';
 
 // ========================================================================
 // 訂單處理（人工關卡工作台）的資料層。
@@ -42,12 +43,17 @@ const RECENT_DAYS = 7;
 export async function fetchQueues(): Promise<QueueData> {
   const statuses = STAGES.flatMap((s) => s.statuses);
   const since = new Date(Date.now() - RECENT_DAYS * 86400e3).toISOString();
-  const [{ data: bookings, error }, { data: recentActions }] = await Promise.all([
+  const [{ data: bookings, error }, { data: recentActions }, { data: withExtras }] = await Promise.all([
     supabase.from('bookings').select('*').in('status', statuses).order('checkin_date'),
     supabase.from('booking_stage_actions').select('*').gte('confirmed_at', since).order('confirmed_at', { ascending: false }).limit(200),
+    // 追加款收款不看狀態：尾款已收、還有未付追加款的訂單（含已結案的），另外撈。
+    // 欄位還沒建立（schema 尚未執行）時這個查詢會失敗，當作沒有，不擋整頁。
+    supabase.from('bookings').select('*').in('status', BALANCE_PAID_STATUSES).gt('extra_unpaid_total', 0),
   ]);
   if (error) throw error;
-  const rows = (bookings || []) as BookingRow[];
+  const baseRows = (bookings || []) as BookingRow[];
+  const baseIds = new Set(baseRows.map((b) => b.id));
+  const rows = [...baseRows, ...((withExtras || []) as BookingRow[]).filter((b) => !baseIds.has(b.id))];
   const ids = rows.map((b) => b.id);
   const { data: actions } = ids.length ? await supabase.from('booking_stage_actions').select('*').in('booking_id', ids) : { data: [] };
 
@@ -103,7 +109,7 @@ export async function markStageConfirmed(bookingId: string, stage: StageKey, act
 
 // ---------------- 通知（走 booking-process function） ----------------
 
-async function callProcess(action: string, payload: Record<string, unknown> = {}) {
+export async function callProcess(action: string, payload: Record<string, unknown> = {}) {
   const { data: { session } } = await supabase.auth.getSession();
   const res = await fetch('/.netlify/functions/booking-process', {
     method: 'POST',

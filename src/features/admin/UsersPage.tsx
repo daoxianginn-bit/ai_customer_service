@@ -4,7 +4,7 @@ import {
   Alert, Box, Button, Card, CardActionArea, CardContent, Chip, IconButton, InputAdornment, Menu, MenuItem, Skeleton, Stack, TextField, Tooltip, Typography,
 } from '@mui/material';
 import { useSnackbar } from 'notistack';
-import { Ban, CheckCircle2, MoreVertical, Search, ShieldCheck, ShieldOff, Trash2, UserPlus } from 'lucide-react';
+import { Ban, CheckCircle2, MessageCircle, MoreVertical, Search, ShieldCheck, ShieldOff, Trash2, UserPlus } from 'lucide-react';
 import { usePermissions } from '../../app/PermissionContext';
 import { useBreakpoint } from '../../app/useBreakpoint';
 import { formatRelative } from '../../lib/format';
@@ -99,6 +99,11 @@ export default function UsersPage() {
     ? <Stack direction="row" spacing={0.5} alignItems="center" sx={{ color: 'success.main' }}><ShieldCheck size={14} /><Typography variant="caption">已綁定</Typography></Stack>
     : <Stack direction="row" spacing={0.5} alignItems="center" sx={{ color: 'text.disabled' }}><ShieldOff size={14} /><Typography variant="caption">未綁定</Typography></Stack>);
 
+  // 排程通知依角色／帳號發送時，只有綁了 LINE 的人收得到，列表上直接看得出誰還沒綁
+  const lineCell = (u: UserRecord) => (u.line_bound
+    ? <Stack direction="row" spacing={0.5} alignItems="center" sx={{ color: 'success.main' }}><MessageCircle size={14} /><Typography variant="caption" noWrap>{u.line_display_name || '已設定'}</Typography></Stack>
+    : <Stack direction="row" spacing={0.5} alignItems="center" sx={{ color: 'text.disabled' }}><MessageCircle size={14} /><Typography variant="caption">未設定</Typography></Stack>);
+
   const menuButton = (u: UserRecord) => (
     <IconButton size="small" onClick={(e) => { e.stopPropagation(); setMenu({ el: e.currentTarget, user: u }); }} aria-label="更多操作"><MoreVertical size={16} /></IconButton>
   );
@@ -108,6 +113,7 @@ export default function UsersPage() {
     { key: 'roles', header: '角色', render: (u) => <UserRoleChips user={u} roles={roles} /> },
     { key: 'status', header: '狀態', width: 110, render: (u) => <StatusChip status={u.status} /> },
     { key: 'mfa', header: '2FA', width: 110, nowrap: true, render: mfaCell },
+    { key: 'line', header: 'LINE 通知', width: 140, nowrap: true, render: lineCell },
     { key: 'last', header: '最後登入', width: 130, nowrap: true, render: (u) => <Typography variant="body2" color="text.secondary">{u.last_sign_in_at ? formatRelative(u.last_sign_in_at) : '尚未登入'}</Typography> },
   ];
 
@@ -156,6 +162,7 @@ export default function UsersPage() {
                   <Stack direction="row" spacing={1.5} alignItems="center" sx={{ mt: 1 }}>
                     <StatusChip status={u.status} />
                     {mfaCell(u)}
+                    {lineCell(u)}
                     <Typography variant="caption" color="text.secondary" sx={{ ml: 'auto' }}>{u.last_sign_in_at ? formatRelative(u.last_sign_in_at) : '尚未登入'}</Typography>
                   </Stack>
                 </CardContent>

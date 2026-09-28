@@ -225,15 +225,38 @@ async function advanceToAwaitingBalance(config: Record<string, any>, settings: a
   // 取整列而不只是 id：通知範本可以插入訂單變數（[姓名]、[入住日期]...），要有完整欄位才算得出來。
   const { data, error } = await supabase.from('bookings').select('*').eq('status', 'reserved').eq('checkin_date', targetCheckin);
   if (error) return { ok: false, summary: `查詢失敗：${error.message}` };
-  if (!data?.length) return { ok: true, summary: '沒有需要轉為待收尾款的訂單' };
-  const { error: updateError } = await supabase.from('bookings').update({ status: 'awaiting_balance', updated_at: new Date().toISOString() }).in('id', data.map((b) => b.id));
-  if (updateError) return { ok: false, summary: `更新失敗：${updateError.message}` };
-  await logStageAdvance(data, 'reserved', 'awaiting_balance', '入住日前 3 天，排程自動轉為待收尾款');
+  if (data?.length) {
+    const { error: updateError } = await supabase.from('bookings').update({ status: 'awaiting_balance', updated_at: new Date().toISOString() }).in('id', data.map((b) => b.id));
+    if (updateError) return { ok: false, summary: `更新失敗：${updateError.message}` };
+    await logStageAdvance(data, 'reserved', 'awaiting_balance', '入住日前 3 天，排程自動轉為待收尾款');
+  }
 
   // 轉完狀態後可以另外通知內部群組/聯絡人。沒設定範本或收件人就只做狀態轉換，
   // 維持這支排程原本「純狀態轉換」的行為，既有安裝不會因為這次改版突然開始發訊息。
-  const notice = await sendBookingNotice(config, today, data, settings, '待收尾款通知');
-  return { ok: true, summary: `${data.length} 筆訂單已轉為待收尾款${notice ? `；${notice}` : ''}` };
+  // 通知的日子可以跟轉狀態不同天，所以今天沒有要轉的訂單也照樣要檢查通知。
+  const notice = await sendBalanceNotice(config, today, settings);
+  const advanced = data?.length ? `${data.length} 筆訂單已轉為待收尾款` : '沒有需要轉為待收尾款的訂單';
+  return { ok: true, summary: `${advanced}${notice ? `；${notice}` : ''}` };
+}
+
+/** 待收尾款通知在入住日前幾天發（排程設定 notice_days_before，預設 3＝跟轉狀態同一天）。 */
+export function balanceNoticeDaysBefore(config: Record<string, any>): number {
+  const n = Math.round(Number(config?.notice_days_before));
+  return Number.isFinite(n) && n >= 1 && n <= 30 ? n : 3;
+}
+
+// 待收尾款通知：轉狀態固定在入住日前 3 天，通知的日子可以另外設（例如前 5 天先提醒會計準備追款）。
+// 對象是「入住日剛好是 N 天後、尾款還沒收」的訂單——N 大於 3 時它們還是已預定，小於 3 時已經轉成待收尾款，
+// 兩種都算；尾款已經收了（待入住之後）就不用再提醒。
+async function sendBalanceNotice(config: Record<string, any>, today: string, settings: any): Promise<string | null> {
+  if (!readNoticeSetup(config)) return null;
+  const days = balanceNoticeDaysBefore(config);
+  const { data, error } = await supabase.from('bookings').select('*')
+    .in('status', ['reserved', 'awaiting_balance'])
+    .eq('checkin_date', addDaysIso(today, days));
+  if (error) return `待收尾款通知查詢失敗：${error.message}`;
+  if (!data?.length) return `入住日前 ${days} 天沒有尾款未收的訂單，未發通知`;
+  return sendBookingNotice(config, today, data, settings, `待收尾款通知（入住前 ${days} 天，${data.length} 筆）`);
 }
 
 // 入住前提醒：狀態為「待入住」、且入住日就是 2 天後的訂單，發通知給指定的群組/聯絡人。
@@ -287,6 +310,38 @@ export async function resendLaundrySheet(dateIso: string): Promise<{ ok: boolean
   return { ok: !!result && !result.includes('未發送'), summary: result || '未發送' };
 }
 
+/**
+ * 通知管錢的人（會計）一則文字訊息。系統沒有「會計群組」這個設定，所以沿用「尾款提醒」排程設定的
+ * 收件人——那份名單本來就是在收「哪些訂單的錢還沒收」的人。依序試：
+ *   1. 尾款提醒排程的收件人（群組／聯絡人，以及勾選的角色／帳號綁的 LINE）
+ *   2. 尾款提醒排程舊設定的通知名單（notification_group_id）
+ *   3. 系統設定的「轉真人通知名單」
+ * 都沒設定就回報未通知（呼叫端照樣完成操作，會計還看得到儀表板與訂單處理的清單）。
+ */
+export async function notifyPaymentStaff(text: string): Promise<string> {
+  const { data: tasks } = await supabase.from('scheduled_tasks').select('config, is_active').eq('task_type', 'balance_reminder').order('is_active', { ascending: false }).limit(1);
+  const config = tasks?.[0]?.config || {};
+
+  // readNoticeSetup 要求要有範本才算設定完成；這裡只借它讀收件人與 @tag 名單，範本用不到
+  const setup = readNoticeSetup({ ...config, notice_template: 'x' });
+  if (setup) {
+    const targets = await resolveNoticeTargets(setup);
+    if (targets.length) {
+      const pushed = await pushTextToLineTargets(targets, text);
+      if (pushed.pushed) return `已通知會計（尾款提醒排程的收件人 ${pushed.pushed} 個）`;
+    }
+  }
+
+  const { data: settings } = await supabase.from('settings').select('handover_notification_group_id').limit(1).maybeSingle();
+  for (const groupId of [config.notification_group_id, settings?.handover_notification_group_id]) {
+    const group = await fetchNotificationGroup(groupId);
+    if (!group?.line_user_ids?.length) continue;
+    const pushed = await pushTextToLineTargets(group.line_user_ids.map((id: string) => ({ id, channel_id: group.channel_id })), text);
+    if (pushed.pushed) return `已通知「${group.name || '通知名單'}」${pushed.pushed} 個對象`;
+  }
+  return '未通知會計：「尾款提醒」排程與轉真人通知名單都還沒設定收件人';
+}
+
 // 洗滌單：把這批訂單用到的布巾品項數量加總，套進管理員自己編的範本，發到指定的 LINE 群組。
 //
 // 品項名稱優先用「洗滌單簡稱」（例如「床包(中)紅線」）——linen_items 的 category＋spec 是給成本
@@ -302,6 +357,10 @@ interface NoticeSetup {
   // 每個群組各自要 @tag 哪些成員：{ [groupId]: [{ id, name }] }。個別聯絡人不需要 tag
   // （訊息本來就直接發給他），所以這裡實務上只會有群組的 key。
   mentions: Record<string, MentionMember[]>;
+  // 後台帳號收件人：依角色（例如「會計」＝所有會計）或個別帳號，執行時才找出他們綁的 LINE。
+  // 存角色而不是存人：之後新進的會計不用回來改排程，自動就會收到。
+  roleIds: string[];
+  accountIds: string[];
 }
 
 function readNoticeSetup(config: Record<string, any>): NoticeSetup | null {
@@ -312,7 +371,9 @@ function readNoticeSetup(config: Record<string, any>): NoticeSetup | null {
   // 兩個都保留讀取，既有設定不會因為改版失效。
   const legacyGroupIds: string[] = Array.isArray(config?.line_group_ids) ? config.line_group_ids.filter(Boolean) : [];
   const template = String(config?.notice_template ?? config?.laundry_template ?? '').trim();
-  if (!template || (!recipients.length && !legacyGroupIds.length)) return null;
+  const roleIds: string[] = Array.isArray(config?.role_recipients) ? config.role_recipients.filter(Boolean).map(String) : [];
+  const accountIds: string[] = Array.isArray(config?.account_recipients) ? config.account_recipients.filter(Boolean).map(String) : [];
+  if (!template || (!recipients.length && !legacyGroupIds.length && !roleIds.length && !accountIds.length)) return null;
 
   const raw = config?.mention_members;
   const mentions: Record<string, MentionMember[]> = {};
@@ -321,7 +382,42 @@ function readNoticeSetup(config: Record<string, any>): NoticeSetup | null {
       if (Array.isArray(list)) mentions[groupId] = (list as any[]).filter((m) => m?.id).map((m) => ({ id: m.id, name: m.name }));
     }
   }
-  return { template, recipients, legacyGroupIds, mentions };
+  return { template, recipients, legacyGroupIds, mentions, roleIds, accountIds };
+}
+
+/**
+ * 角色／個別帳號 → 這些人綁的 LINE。只算「啟用中」的帳號與角色、而且有綁 LINE 的人；
+ * 沒綁的人收不到（排程設定頁會提示哪些人還沒綁）。
+ */
+export async function resolveAccountRecipients(roleIds: string[], accountIds: string[]): Promise<{ id: string; channel_id: string }[]> {
+  const userIds = new Set(accountIds);
+  if (roleIds.length) {
+    const { data: roles } = await supabase.from('roles').select('id, is_active').in('id', roleIds);
+    const activeRoleIds = (roles || []).filter((r: any) => r.is_active !== false).map((r: any) => r.id);
+    if (activeRoleIds.length) {
+      const { data: members } = await supabase.from('user_roles').select('user_id').in('role_id', activeRoleIds);
+      for (const m of members || []) userIds.add(m.user_id);
+    }
+  }
+  if (!userIds.size) return [];
+  const { data: profiles } = await supabase.from('admin_profiles').select('id, status, line_user_id, line_channel_id').in('id', [...userIds]);
+  return (profiles || [])
+    .filter((p: any) => p.status === 'active' && p.line_user_id && p.line_channel_id)
+    .map((p: any) => ({ id: p.line_user_id, channel_id: p.line_channel_id }));
+}
+
+/** 一份通知設定實際要發給誰：勾的群組／聯絡人＋角色／帳號的 LINE，同一個 LINE 只發一次。 */
+async function resolveNoticeTargets(setup: NoticeSetup): Promise<{ id: string; channel_id: string; mentions: MentionMember[] }[]> {
+  const direct = setup.recipients.length ? setup.recipients : await resolveLegacyGroupRecipients(setup.legacyGroupIds);
+  const accounts = await resolveAccountRecipients(setup.roleIds, setup.accountIds);
+  const seen = new Set<string>();
+  const out: { id: string; channel_id: string; mentions: MentionMember[] }[] = [];
+  for (const r of [...direct, ...accounts]) {
+    if (seen.has(r.id)) continue;
+    seen.add(r.id);
+    out.push({ ...r, mentions: setup.mentions[r.id] || [] });
+  }
+  return out;
 }
 
 /**
@@ -343,10 +439,9 @@ async function mergeOrderFieldsAcrossBookings(bookings: any[], settings: any): P
 
 async function pushNotice(setup: NoticeSetup, text: string, what: string): Promise<string> {
   // 舊設定只存了群組 ID，沒存所屬帳號，得回頭查 line_groups 才知道要用哪個帳號的憑證。
-  const resolved = setup.recipients.length ? setup.recipients : await resolveLegacyGroupRecipients(setup.legacyGroupIds);
-  if (!resolved.length) return `${what}未發送：找不到指定的收件人（群組可能已停用或機器人已被移出）`;
-  const withMentions = resolved.map((r) => ({ ...r, mentions: setup.mentions[r.id] || [] }));
-  const pushed = await pushTextToLineTargets(withMentions, text);
+  const targets = await resolveNoticeTargets(setup);
+  if (!targets.length) return `${what}未發送：找不到指定的收件人（群組可能已停用、機器人已被移出，或勾選的角色／帳號都還沒設定 LINE）`;
+  const pushed = await pushTextToLineTargets(targets, text);
   return pushed.pushed ? `${what}已發送給 ${pushed.pushed} 個對象` : `${what}未發送：所有推播都失敗`;
 }
 
@@ -687,7 +782,7 @@ async function depositAwaitingNotice(config: Record<string, any>, settings: any)
   const today = taiwanTodayIso();
   const { data, error } = await supabase
     .from('bookings')
-    .select('id, order_number, name, nickname, line_user_id, checkin_date, checkout_date, total_amount, deposit, status, created_at, guest_notes')
+    .select('id, order_number, name, nickname, line_user_id, checkin_date, checkout_date, total_amount, deposit, extra_unpaid_total, extra_unpaid_detail, status, created_at, guest_notes')
     .eq('status', 'awaiting_deposit')
     .gte('created_at', `${yesterday}T00:00:00+08:00`)
     .lt('created_at', `${today}T00:00:00+08:00`);
@@ -733,7 +828,7 @@ async function awaitingConfirmationNotice(config: Record<string, any>, settings:
   const today = taiwanTodayIso();
   const { data: createdYesterday, error: cyError } = await supabase
     .from('bookings')
-    .select('id, order_number, name, nickname, line_user_id, checkin_date, checkout_date, total_amount, deposit, status, created_at, guest_notes')
+    .select('id, order_number, name, nickname, line_user_id, checkin_date, checkout_date, total_amount, deposit, extra_unpaid_total, extra_unpaid_detail, status, created_at, guest_notes')
     .eq('status', 'awaiting_confirmation')
     .gte('created_at', `${yesterday}T00:00:00+08:00`)
     .lt('created_at', `${today}T00:00:00+08:00`);
@@ -1473,3 +1568,6 @@ const rawHandler: Handler = async (_event) => {
 
 // 排程同樣是無人看管時執行，出錯只留在 Netlify function log 裡，隔天沒人會發現。
 export const handler: Handler = withErrorLogging(supabase, 'scheduled-tasks-run', rawHandler);
+
+/** 測試用：待收尾款排程（轉狀態＋依天數發通知、依角色／帳號找收件人）不經過排程觸發直接驗 */
+export const __scheduledTaskTesting = { advanceToAwaitingBalance, taiwanTodayIso };

@@ -3,6 +3,7 @@ import { X } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import MessageTemplateEditor from './MessageTemplateEditor';
 import { TemplateVariableBinding } from '../hooks/useTemplateVariables';
+import { fetchNoticeAccountOptions, type NoticeAccountOption, type NoticeRoleOption } from '../features/admin/rbacQueries';
 
 // ========================================================================
 // 「自訂訊息傳送至指定群組與個人」共用元件。
@@ -37,12 +38,26 @@ interface Props {
   templateVars: TemplateVariableBinding;
   placeholder?: string;
   hint?: ReactNode;
+  /** 後台帳號收件人：角色 id（該角色所有人）與個別帳號 id。執行時才找出他們綁的 LINE。 */
+  roleRecipients?: string[];
+  onRoleRecipientsChange?: (value: string[]) => void;
+  accountRecipients?: string[];
+  onAccountRecipientsChange?: (value: string[]) => void;
 }
 
 export default function NoticeComposer({
   label, template, onTemplateChange, recipients, onRecipientsChange,
   mentions, onMentionsChange, templateVars, placeholder, hint,
+  roleRecipients = [], onRoleRecipientsChange, accountRecipients = [], onAccountRecipientsChange,
 }: Props) {
+  const staffEnabled = !!onRoleRecipientsChange && !!onAccountRecipientsChange;
+  const [staffOptions, setStaffOptions] = useState<{ roles: NoticeRoleOption[]; accounts: NoticeAccountOption[] } | null>(null);
+  const [staffError, setStaffError] = useState('');
+  useEffect(() => {
+    if (!staffEnabled) return;
+    fetchNoticeAccountOptions().then(setStaffOptions).catch((e) => setStaffError(e.message || '讀取帳號清單失敗'));
+  }, [staffEnabled]);
+  const toggleIn = (list: string[], id: string) => (list.includes(id) ? list.filter((x) => x !== id) : [...list, id]);
   const [channels, setChannels] = useState<ChannelOption[]>([]);
   const [lineGroups, setLineGroups] = useState<LineGroupOption[]>([]);
   // 先選官方帳號再挑對象：群組與聯絡人都是掛在各自帳號底下的（實務上通常只有廠商用帳號
@@ -167,6 +182,41 @@ export default function NoticeComposer({
         </p>
       </div>
 
+      {staffEnabled && (
+        <div>
+          <label className="block text-xs text-gray-500 mb-1">{label}發送給後台帳號（選填：依角色或個別帳號）</label>
+          {staffError ? (
+            <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">{staffError}</p>
+          ) : !staffOptions ? (
+            <p className="text-xs text-gray-400 px-1">載入中...</p>
+          ) : (
+            <div className="border rounded-lg divide-y max-h-64 overflow-y-auto">
+              <p className="px-3 py-1.5 text-xs text-gray-400 bg-gray-50 sticky top-0">角色（勾了＝這個角色的所有人，之後新加入的人也會收到）</p>
+              {staffOptions.roles.map((r) => (
+                <label key={r.id} className="flex items-center gap-2 px-3 py-2 text-sm cursor-pointer hover:bg-gray-50">
+                  <input type="checkbox" className="w-4 h-4" checked={roleRecipients.includes(r.id)} onChange={() => onRoleRecipientsChange!(toggleIn(roleRecipients, r.id))} />
+                  <span className="text-gray-700">{r.name}</span>
+                  <span className={`text-[11px] ${r.line_count < r.member_count ? 'text-amber-700' : 'text-gray-400'}`}>
+                    {r.member_count} 人{r.member_count ? `・已設定 LINE ${r.line_count} 人` : ''}
+                  </span>
+                </label>
+              ))}
+              <p className="px-3 py-1.5 text-xs text-gray-400 bg-gray-50 sticky top-0">個別帳號</p>
+              {staffOptions.accounts.map((a) => (
+                <label key={a.id} className={`flex items-center gap-2 px-3 py-2 text-sm ${a.has_line ? 'cursor-pointer hover:bg-gray-50' : 'opacity-60'}`}>
+                  <input type="checkbox" className="w-4 h-4" disabled={!a.has_line && !accountRecipients.includes(a.id)} checked={accountRecipients.includes(a.id)} onChange={() => onAccountRecipientsChange!(toggleIn(accountRecipients, a.id))} />
+                  <span className="text-gray-700">{a.name}</span>
+                  {!a.has_line && <span className="text-[11px] text-amber-700">尚未設定 LINE</span>}
+                </label>
+              ))}
+            </div>
+          )}
+          <p className="text-xs text-gray-400 mt-1">
+            只有在「帳號與權限」設定了 LINE 的帳號收得到；還沒設定的人請到帳號詳情的「LINE 通知」設定。同一個人被多個條件選到只會收到一次。
+          </p>
+        </div>
+      )}
+
       <div>
         <label className="block text-xs text-gray-500 mb-1">{label}發送對象（選填，可複選：群組與個別聯絡人）</label>
 
@@ -265,7 +315,7 @@ export default function NoticeComposer({
 
         <p className="text-xs text-gray-400 mt-1">
           已勾選 {recipients.length} 個對象{recipients.length > 0 && channelFilter ? '（切換帳號不會取消其他帳號已勾選的對象）' : ''}。
-          留空＝這支排程不發{label}。要發送的話，上面的「{label}內容」也要一起填。
+          {staffEnabled ? '這裡跟上面的後台帳號都留空' : '留空'}＝這支排程不發{label}。要發送的話，上面的「{label}內容」也要一起填。
         </p>
       </div>
 

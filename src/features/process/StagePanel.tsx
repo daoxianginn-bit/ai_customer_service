@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import {
-  Alert, Box, Button, Chip, Dialog, DialogContent, Divider, IconButton, InputAdornment, Skeleton, Stack, TextField, ToggleButton, ToggleButtonGroup, Tooltip, Typography,
+  Alert, Box, Button, Checkbox, Chip, Dialog, DialogContent, Divider, IconButton, InputAdornment, Skeleton, Stack, TextField, ToggleButton, ToggleButtonGroup, Tooltip, Typography,
 } from '@mui/material';
 import { useSnackbar } from 'notistack';
 import { ArrowRight, Check, Minus, Plus, RotateCcw, Send, Shuffle, X } from 'lucide-react';
@@ -11,6 +11,8 @@ import { formatDateRange, formatDateTime, formatMoney } from '../../lib/format';
 import { bookingStatusLabel } from '../../lib/bookingStatus';
 import { computeUsage, linenItemLabel, normalizeChangeCount, type LinenItem, type LinenUsageRow, type RoomLinenDefault } from '../../lib/linenCost';
 import StatusBadge from '../../components/ui-mui/StatusBadge';
+import { computeBalanceDue, extraChargeCode, hasUnpaidExtraCharges, type ExtraCharge } from '../../lib/extraCharges';
+import { fetchExtraCharges, setExtraChargesPaid } from '../booking/extraChargeQueries';
 import { fetchBookingLinen, fetchLinenSetup, type BookingRow } from '../booking/bookingQueries';
 import { advanceBookingStatus, saveBookingLinen, BookingActionError } from '../booking/bookingActions';
 import { damageSummary, markStageConfirmed, saveStageEdits, type StageAction, type StageDef, type StageEditPatch } from './processQueries';
@@ -75,6 +77,9 @@ export default function StagePanel({ open, stage, booking, action, onClose, onCh
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState<BookingRow | null>(null);
   const [remitError, setRemitError] = useState('');
+  const [extras, setExtras] = useState<ExtraCharge[]>([]);
+  const [extrasPicked, setExtrasPicked] = useState<string[]>([]);
+  const [extrasError, setExtrasError] = useState('');
 
   const has = (f: string) => stage.fields.includes(f as never);
 
@@ -90,7 +95,16 @@ export default function StagePanel({ open, stage, booking, action, onClose, onCh
     setDamaged(booking.damage_found ?? null);
     setDeduction(booking.damage_deduction == null ? '' : String(booking.damage_deduction));
     setDamageNote(booking.damage_note || '');
-    setDone(null); setRemitError(''); setLinen(null);
+    setDone(null); setRemitError(''); setLinen(null); setExtras([]); setExtrasPicked([]); setExtrasError('');
+    // 會計的關卡都看得到追加款明細（尾款裡含了多少、還有哪些沒收）
+    if (stage.money === 'full') {
+      fetchExtraCharges(booking.id).then((rows) => {
+        const active = rows.filter((r) => !r.voided_at);
+        setExtras(active);
+        // 追加款收款：預設全勾（通常是一起收的），沒收到的自己取消勾選
+        setExtrasPicked(active.filter((r) => !r.is_paid).map((r) => r.id));
+      });
+    }
     if (has('linen')) {
       setLinenLoading(true);
       Promise.all([fetchLinenSetup(), fetchBookingLinen(booking.id)])
@@ -114,6 +128,7 @@ export default function StagePanel({ open, stage, booking, action, onClose, onCh
   const run = async (advance: boolean) => {
     if (!canAct) return;
     if (has('remit') && !remit.trim()) { setRemitError('請先填寫匯款末5碼'); return; }
+    if (has('extras') && !extrasPicked.length) { setExtrasError('請勾選已經收到的追加款'); return; }
     setBusy(true);
     try {
       const patch: StageEditPatch = { notes: notes.trim() || null };
@@ -128,8 +143,18 @@ export default function StagePanel({ open, stage, booking, action, onClose, onCh
       await saveStageEdits(booking, patch);
       if (linen) await saveBookingLinen(booking.id, linen.roomIds, linen.usage, true);
       let updated: BookingRow = { ...booking, ...patch } as BookingRow;
+      // 追加款：這一關勾的收款；尾款確認時，尾款裡含的未付追加款就是一起收了，一併標成已付
+      // （不然確認完尾款，那幾筆還是未付，尾款又冒出一筆沒收的錢）。只標開視窗時看到的那幾筆，
+      // 視窗開著期間別人新增的不算在這次收的錢裡。
+      const unpaidShown = extras.filter((r) => !r.is_paid).map((r) => r.id);
+      const toMark = has('extras') ? extrasPicked : stage.key === 'awaiting_balance' ? unpaidShown : [];
+      if (toMark.length) {
+        await setExtraChargesPaid(booking.id, toMark, true);
+        const markedTotal = extras.filter((r) => toMark.includes(r.id)).reduce((sum, r) => sum + r.amount, 0);
+        updated = { ...updated, extra_unpaid_total: Math.max(0, Number(booking.extra_unpaid_total || 0) - markedTotal) };
+      }
       if ((advance || stage.confirmAdvances) && stage.nextStatus) {
-        await advanceBookingStatus(updated, stage.nextStatus, { remitLast5: remit.trim() });
+        await advanceBookingStatus(updated, stage.nextStatus, { remitLast5: remit.trim(), skipExtraCharges: true });
         updated = { ...updated, status: stage.nextStatus, ...(has('remit') ? { remit_last5: remit.trim() } : {}) };
       }
       await markStageConfirmed(booking.id, stage.key, profile?.email || profile?.id || 'unknown');
@@ -141,7 +166,7 @@ export default function StagePanel({ open, stage, booking, action, onClose, onCh
     } finally { setBusy(false); }
   };
 
-  const balance = booking.total_amount != null ? Number(booking.total_amount) - Number(booking.deposit || 0) : null;
+  const balance = computeBalanceDue(booking);
   const nights = booking.nights ?? null;
   const stageAmount = stage.amountOf(booking);
   const damage = damageSummary(booking);
@@ -193,6 +218,36 @@ export default function StagePanel({ open, stage, booking, action, onClose, onCh
           <Field label="訂單總額" value={formatMoney(booking.total_amount)} />
           {booking.guest_notes && <Field label="顧客備註" value={booking.guest_notes} />}
         </Box>
+      )}
+
+      {stage.money === 'full' && extras.length > 0 && (
+        <Box>
+          <Typography variant="subtitle2" gutterBottom>追加款</Typography>
+          <Stack spacing={0.25}>
+            {extras.map((r) => {
+              const pickable = has('extras') && !r.is_paid;
+              return (
+                <Stack key={r.id} direction="row" spacing={1} alignItems="center">
+                  {pickable ? (
+                    <Checkbox size="small" sx={{ p: 0.25 }} checked={extrasPicked.includes(r.id)} disabled={!canAct}
+                      onChange={(e) => { setExtrasError(''); setExtrasPicked((prev) => e.target.checked ? [...prev, r.id] : prev.filter((x) => x !== r.id)); }} />
+                  ) : null}
+                  <Typography variant="body2" sx={{ fontFamily: 'monospace', color: 'text.secondary', whiteSpace: 'nowrap' }}>{extraChargeCode(booking.order_number, r.seq)}</Typography>
+                  <Typography variant="body2" sx={{ flex: 1, minWidth: 0 }} noWrap>{r.title}</Typography>
+                  <Typography variant="body2" sx={{ whiteSpace: 'nowrap' }}>{formatMoney(r.amount)}</Typography>
+                  <Chip size="small" label={r.is_paid ? '已付' : '未付'} color={r.is_paid ? 'success' : 'warning'} variant="outlined" sx={{ height: 20, fontSize: 11 }} />
+                </Stack>
+              );
+            })}
+          </Stack>
+          {stage.key === 'awaiting_balance' && hasUnpaidExtraCharges(booking) && <Typography variant="caption" color="text.secondary">應收尾款已含未付追加款 {formatMoney(booking.extra_unpaid_total)}，確認尾款時會一併標成已付。</Typography>}
+          {extrasError && <Typography variant="caption" color="error" component="div">{extrasError}</Typography>}
+        </Box>
+      )}
+
+      {/* 押金退掉之後就很難再跟客人收，這是最後一道提醒 */}
+      {stage.key === 'deposit_processing' && hasUnpaidExtraCharges(booking) && (
+        <Alert severity="warning" sx={{ py: 0.5 }}>還有 <b>{formatMoney(booking.extra_unpaid_total)}</b> 追加款未收。要從押金扣抵的話，請自己調整下面的實退金額並寫在退款說明。</Alert>
       )}
 
       {/* 押金退款要看得到房務回報了什麼，不用自己跑去問 */}

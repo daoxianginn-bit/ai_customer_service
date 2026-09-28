@@ -4,6 +4,7 @@ import { BALANCE_PAID_STATUSES, DEPOSIT_OR_LATER_STATUSES, bookingStatusMeta, ty
 import { formatMoney, formatShortDate, todayIso } from '../../lib/format';
 import StatusBadge from '../../components/ui-mui/StatusBadge';
 import { bookingSourceLabel, type BookingRow } from './bookingQueries';
+import { hasUnpaidExtraCharges } from '../../lib/extraCharges';
 
 // ========================================================================
 // 訂單列表的欄位呈現（表格與手機卡片共用）。
@@ -49,11 +50,17 @@ export function checkinHint(checkinDate?: string | null): { label: string; urgen
 const NO_PAYMENT_TRACKING = ['external_synced', 'cancelled', 'awaiting_refund', 'refunded'];
 export const tracksPayment = (status: string) => !NO_PAYMENT_TRACKING.includes(status);
 
-/** 依狀態推算已收多少：待確認之前是 0、已預定起收了訂金、待入住起全收 */
+/**
+ * 依狀態推算已收多少：待確認之前是 0、已預定起收了訂金、待入住起全收。
+ * 追加款另外算：已付的算已收、未付的算未收——尾款收完之後才加的追加款，就會讓「款項已結清」的單重新出現未收。
+ */
 export function paymentState(r: BookingRow): { total: number; paid: number; due: number; percent: number } {
-  const total = Number(r.total_amount || 0);
-  const paid = BALANCE_PAID_STATUSES.includes(r.status) ? total
+  const base = Number(r.total_amount || 0);
+  const extraPaid = Number(r.extra_paid_total || 0);
+  const total = base + extraPaid + Number(r.extra_unpaid_total || 0);
+  const basePaid = BALANCE_PAID_STATUSES.includes(r.status) ? base
     : DEPOSIT_OR_LATER_STATUSES.includes(r.status) ? Number(r.deposit || 0) : 0;
+  const paid = basePaid + extraPaid;
   const due = Math.max(0, total - paid);
   return { total, paid, due, percent: total > 0 ? Math.min(100, Math.round((paid / total) * 100)) : 0 };
 }
@@ -130,6 +137,16 @@ export function MoneyCell({ r, align = 'right' }: { r: BookingRow; align?: 'left
   );
 }
 
+/** 尾款已收、還有追加款沒收：會計要另外收，訂單列表上要看得出來 */
+export function ExtraUnpaidTag({ r }: { r: BookingRow }) {
+  if (!BALANCE_PAID_STATUSES.includes(r.status) || !hasUnpaidExtraCharges(r)) return null;
+  return (
+    <Tooltip title={`尾款已收，還有追加款 ${formatMoney(r.extra_unpaid_total)} 未收`}>
+      <Box component="span" sx={{ px: 0.75, py: 0.125, borderRadius: 0.75, fontSize: 11, fontWeight: 700, whiteSpace: 'nowrap', bgcolor: '#fef9c3', color: '#a16207' }}>未收追加款</Box>
+    </Tooltip>
+  );
+}
+
 /** 狀態：Badge 前面補流程編號，跟篩選列的 1~9 對得起來 */
 export function StatusCell({ r }: { r: BookingRow }) {
   const meta = bookingStatusMeta(r.status);
@@ -142,6 +159,7 @@ export function StatusCell({ r }: { r: BookingRow }) {
         }}>{meta.order}</Box>
       )}
       <StatusBadge status={r.status} />
+      <ExtraUnpaidTag r={r} />
     </Stack>
   );
 }

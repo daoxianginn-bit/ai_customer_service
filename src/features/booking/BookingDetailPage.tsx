@@ -24,6 +24,7 @@ import {
 import { deleteBooking } from './bookingActions';
 import BookingEditDialog from './BookingEditDialog';
 import AdvanceStatusDialog from './AdvanceStatusDialog';
+import ExtraChargesSection from './ExtraChargesSection';
 
 // ========================================================================
 // 訂單詳情（V2 §22–24）。列表點一列進來；回答「這張單現在在哪、下一步要做什麼、錢收到哪」。
@@ -196,12 +197,16 @@ export default function BookingDetailPage() {
       <Grid item xs={6} sm={3}><Field label="押金" value={formatMoney(b.security_deposit)} /></Grid>
       <Grid item xs={6} sm={3}><Field label="訂單總額" value={<b>{formatMoney(b.total_amount) || '—'}</b>} /></Grid>
       <Grid item xs={6} sm={3}><Field label="訂金" value={formatMoney(b.deposit)} /></Grid>
-      <Grid item xs={6} sm={3}><Field label="尾款" value={balance != null ? formatMoney(balance) : null} /></Grid>
+      <Grid item xs={6} sm={3}><Field label={Number(b.extra_unpaid_total || 0) > 0 ? '尾款（含未付追加款）' : '尾款'} value={balance != null ? formatMoney(balance) : null} /></Grid>
+      {Number(b.extra_unpaid_total || 0) > 0 && <Grid item xs={6} sm={3}><Field label="未付追加款" value={formatMoney(b.extra_unpaid_total)} /></Grid>}
       <Grid item xs={6} sm={3}><Field label="匯款末5碼" value={b.remit_last5} mono /></Grid>
       <Grid item xs={6} sm={3}><Field label="匯款期限" value={formatDateTime(b.payment_deadline_at)} /></Grid>
       <Grid item xs={6} sm={3}><Field label="入住密碼" value={b.check_in_password} mono /></Grid>
     </Grid>
   );
+
+  // 追加款改了會動到尾款（訂單上的彙總由資料庫觸發器維護），所以存完要重抓訂單
+  const extraCharges = <ExtraChargesSection booking={b} onChanged={() => load({ silent: true })} />;
 
   const notes = (
     <Stack spacing={1.5}>
@@ -366,6 +371,7 @@ export default function BookingDetailPage() {
               <>
                 <Section title="狀態與流程" collapsible>{statusPanel}</Section>
                 <Section title="金額與付款" collapsible>{paymentInfo}</Section>
+                <Section title="追加款明細" collapsible defaultExpanded={Number(b.extra_unpaid_total || 0) > 0}>{extraCharges}</Section>
                 <Section title="客戶" collapsible defaultExpanded={false}>{customerPanel}</Section>
                 <Section title="備註" collapsible defaultExpanded={!!(b.guest_notes || b.notes)}>{notes}</Section>
                 {linen && <Section title="布巾洗滌" collapsible defaultExpanded={false}>{linen}</Section>}
@@ -374,6 +380,7 @@ export default function BookingDetailPage() {
             ) : (
               <>
                 <Section title="金額與付款">{paymentInfo}</Section>
+                <Section title="追加款明細">{extraCharges}</Section>
                 <Section title="備註">{notes}</Section>
                 {linen && <Section title="布巾洗滌">{linen}</Section>}
               </>

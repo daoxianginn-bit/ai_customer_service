@@ -1031,6 +1031,74 @@ ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS damage_found BOOLEAN;      
 ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS damage_deduction NUMERIC;   -- 建議扣款
 ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS damage_note TEXT;
 
+-- 追加款：訂單成立後人工另外加收的項目（烤肉用具租借、延遲退房、代訂餐點…）。
+-- 床位與人數異動不走這裡——那是照固定公式重新報價。追加款一律由後台人員手動輸入，
+-- LINE 機器人（line-webhook）沒有任何寫入這張表的程式碼，也不會從對話內容自動帶入。
+--
+-- 編號＝訂單編號＋"-"＋字母（K7M2QX-A）。資料庫只存字母，完整編號由畫面組出來。字母 A~Z 依序配發、
+-- 作廢的不回收：已經跟客人說過「B 是烤肉費」，B 就不能再變成別的東西。一筆訂單最多 26 項。
+-- 寫入只走 booking-process function（service role）：權限（新增要訂單編輯或款項核對、勾已付只限款項核對）、
+-- 字母配發、「已付的不能改」這些規則都在那裡檢查，前端 RLS 只開讀取。
+CREATE TABLE IF NOT EXISTS public.booking_extra_charges (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    booking_id UUID NOT NULL REFERENCES public.bookings(id) ON DELETE CASCADE,
+    seq CHAR(1) NOT NULL CHECK (seq BETWEEN 'A' AND 'Z'),
+    title TEXT NOT NULL CHECK (length(btrim(title)) > 0),   -- 客人會看到
+    amount NUMERIC NOT NULL CHECK (amount > 0),
+    internal_note TEXT,                                     -- 只有後台看得到
+    is_paid BOOLEAN NOT NULL DEFAULT false,
+    paid_at TIMESTAMPTZ,
+    paid_by TEXT,
+    voided_at TIMESTAMPTZ,
+    voided_by TEXT,
+    created_by TEXT,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now(),
+    UNIQUE (booking_id, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_booking_extra_charges_booking ON public.booking_extra_charges(booking_id);
+
+-- 追加款彙總存回訂單本身：尾款、訊息變數、訂單列表的標記、會計的關卡都是讀訂單那一列，
+-- 不用每個地方各自再去查一次明細（尾款以前就是在 5 個地方各算各的，再多一張表只會更容易算不一致）。
+--   extra_unpaid_total  未付、未作廢的合計（會併進尾款）
+--   extra_paid_total    已付、未作廢的合計（取消退款時要一起退）
+--   extra_unpaid_detail 未付明細文字，給 [追加款明細] 變數直接用
+ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS extra_unpaid_total NUMERIC NOT NULL DEFAULT 0;
+ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS extra_paid_total NUMERIC NOT NULL DEFAULT 0;
+ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS extra_unpaid_detail TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_bookings_extra_unpaid ON public.bookings(extra_unpaid_total) WHERE extra_unpaid_total > 0;
+
+CREATE OR REPLACE FUNCTION public.refresh_booking_extra_totals() RETURNS TRIGGER
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_booking UUID := COALESCE(NEW.booking_id, OLD.booking_id);
+BEGIN
+  UPDATE public.bookings b SET
+    extra_unpaid_total = COALESCE(t.unpaid, 0),
+    extra_paid_total = COALESCE(t.paid, 0),
+    extra_unpaid_detail = COALESCE(t.detail, '')
+  FROM (
+    SELECT
+      SUM(amount) FILTER (WHERE NOT is_paid) AS unpaid,
+      SUM(amount) FILTER (WHERE is_paid) AS paid,
+      string_agg(
+        CASE WHEN NOT is_paid THEN
+          COALESCE(bk.order_number || '-', '') || c.seq || ' ' || c.title || ' NT$' || to_char(c.amount, 'FM999,999,999,990')
+        END, E'\n' ORDER BY c.seq) AS detail
+    FROM public.booking_extra_charges c
+    JOIN public.bookings bk ON bk.id = c.booking_id
+    WHERE c.booking_id = v_booking AND c.voided_at IS NULL
+  ) t
+  WHERE b.id = v_booking;
+  RETURN NULL;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_booking_extra_totals ON public.booking_extra_charges;
+CREATE TRIGGER trg_booking_extra_totals
+  AFTER INSERT OR UPDATE OR DELETE ON public.booking_extra_charges
+  FOR EACH ROW EXECUTE FUNCTION public.refresh_booking_extra_totals();
+
 -- 原本「待入住／入住中」是一關（checkin），2026-09 拆成 洗滌清單(linen) 與 入住密碼(checkin_password) 兩關。
 UPDATE public.booking_stage_actions SET stage = 'checkin_password' WHERE stage = 'checkin';
 
@@ -1280,6 +1348,12 @@ ALTER TABLE public.admin_profiles ADD COLUMN IF NOT EXISTS approved_at TIMESTAMP
 ALTER TABLE public.admin_profiles ADD COLUMN IF NOT EXISTS approved_by UUID;
 ALTER TABLE public.admin_profiles ADD COLUMN IF NOT EXISTS mfa_enrolled_at TIMESTAMPTZ;
 ALTER TABLE public.admin_profiles ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now();
+-- 後台帳號綁定的 LINE：排程通知可以「依角色／個別帳號」發送（例如所有會計），執行時才找出這些帳號綁的 LINE。
+-- LINE 的 user ID 是跟著官方帳號走的（同一個人在不同官方帳號是不同 ID），所以一定連同所屬官方帳號一起存；
+-- 值只能從該官方帳號的聯絡人（傳過訊息的人）挑，不能手打——手打的 LINE ID 推播不出去。
+ALTER TABLE public.admin_profiles ADD COLUMN IF NOT EXISTS line_channel_id UUID REFERENCES public.line_channels(id) ON DELETE SET NULL;
+ALTER TABLE public.admin_profiles ADD COLUMN IF NOT EXISTS line_user_id TEXT;
+ALTER TABLE public.admin_profiles ADD COLUMN IF NOT EXISTS line_display_name TEXT;
 
 -- 舊狀態值搬遷到新的狀態機。必須在套用新 CHECK 之前做完，否則既有列會違反新限制。
 --   approved → pending_mfa：這批人已經是合法使用者，但都還沒綁過 2FA，
@@ -2021,6 +2095,8 @@ BEGIN
       ('booking_rooms',                     'booking.view', 'booking.create,booking.edit,booking.linen.manage', 'booking.create,booking.edit,booking.linen.manage', 'booking.create,booking.edit,booking.linen.manage'),
       ('booking_room_nights',               'booking.view', 'booking.create,booking.edit', 'booking.create,booking.edit', 'booking.create,booking.edit'),
       ('booking_linen_usage',               'booking.view', 'booking.create,booking.edit,booking.linen.manage', 'booking.create,booking.edit,booking.linen.manage', 'booking.create,booking.edit,booking.linen.manage'),
+      -- 追加款：前端只讀，寫入一律走 booking-process function（字母配發、已付不能改、勾已付限會計都在那裡檢查）
+      ('booking_extra_charges',             'booking.view', 'NONE', 'NONE', 'NONE'),
       ('booking_stage_actions',             'booking.view', 'booking.edit,booking.payment.verify,booking.refund.process,booking.linen.manage,booking.checkin_password.manage,booking.room_check', 'booking.edit,booking.payment.verify,booking.refund.process,booking.linen.manage,booking.checkin_password.manage,booking.room_check', 'NONE'),
       ('user_states',                       'customer.view,service.view,marketing.view', 'customer.edit,service.handover', 'customer.edit,service.handover', 'OWNER'),
       ('conversations',                     'service.view,customer.view', 'NONE', 'NONE', 'OWNER'),

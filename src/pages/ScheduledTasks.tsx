@@ -40,14 +40,14 @@ const TASK_TYPE_OPTIONS: {
     value: 'advance_to_awaiting_balance',
     label: '訂單狀態：已預定→待收尾款',
     description:
-      '入住日剩 3 天的「已預定」訂單，自動轉為「待收尾款」。' +
-      '另外可以選填「待收尾款通知內容」與「發送對象」：填了就會把這批訂單彙整成一則訊息，發給指定的 LINE 群組或聯絡人；' +
-      '兩者都留空就只做狀態轉換、不發任何訊息。建議設定為每天 00:00。',
+      '入住日剩 3 天的「已預定」訂單，自動轉為「待收尾款」（固定 3 天）。' +
+      '另外可以選填「待收尾款通知」：在入住日前幾天（自己設定，預設 3 天）把「尾款還沒收」的訂單彙整成一則訊息，' +
+      '發給指定的後台帳號（例如所有會計）、LINE 群組或聯絡人；通知內容與對象都留空就只做狀態轉換、不發任何訊息。建議設定為每天 00:00。',
     needsLineGroups: true,
     noticeScope: 'booking',
     noticeLabel: '待收尾款通知',
     noticePlaceholder: `日期:[日期]
-以下 [訂單數] 筆訂單入住日剩 3 天，尚未收尾款：
+以下 [訂單數] 筆訂單即將入住，尚未收尾款：
 [姓名]／[入住日期]
 請協助追款`,
   },
@@ -225,6 +225,11 @@ type TaskForm = {
   // 通知內容直接寫在排程設定裡，不從「客製訊息範本」挑——它的變數（布巾品項數量、押金金額）
   // 只有這支排程算得出來，放進共用範本庫對其他排程沒有意義。
   notice_template: string;
+  // 後台帳號收件人：角色 id（該角色所有人）與個別帳號 id，執行時才找出他們綁的 LINE
+  role_recipients: string[];
+  account_recipients: string[];
+  // 已預定→待收尾款：通知在入住日前幾天發（轉狀態固定 3 天，這個只管通知）
+  notice_days_before: number;
 };
 
 const emptyForm = (): TaskForm => ({
@@ -241,6 +246,9 @@ const emptyForm = (): TaskForm => ({
   line_recipients: [],
   mention_members: {},
   notice_template: '',
+  role_recipients: [],
+  account_recipients: [],
+  notice_days_before: 3,
 });
 
 function formToConfig(form: TaskForm): ScheduleConfig {
@@ -266,7 +274,10 @@ function buildTaskConfig(form: TaskForm): Record<string, any> {
     config.line_recipients = form.line_recipients;
     config.notice_template = form.notice_template;
     config.mention_members = form.mention_members;
+    config.role_recipients = form.role_recipients;
+    config.account_recipients = form.account_recipients;
   }
+  if (form.task_type === 'advance_to_awaiting_balance') config.notice_days_before = form.notice_days_before;
   return config;
 }
 
@@ -384,6 +395,9 @@ export default function ScheduledTasks() {
       // notice_template 是現在的欄位名；laundry_template 是這個功能最初只有洗滌單時的舊名稱，
       // 保留讀取，既有排程設定不會因為改版變空白。
       notice_template: row.config?.notice_template ?? row.config?.laundry_template ?? '',
+      role_recipients: Array.isArray(row.config?.role_recipients) ? row.config.role_recipients : [],
+      account_recipients: Array.isArray(row.config?.account_recipients) ? row.config.account_recipients : [],
+      notice_days_before: Number(row.config?.notice_days_before) >= 1 ? Number(row.config?.notice_days_before) : 3,
     });
     setFormError('');
     setShowForm(true);
@@ -400,8 +414,13 @@ export default function ScheduledTasks() {
     if (currentTaskType?.needsLineGroups) {
       const noticeLabel = `${currentTaskType.noticeLabel || '通知'}內容`;
       const hasTemplate = !!form.notice_template.trim();
-      if (hasTemplate && !form.line_recipients.length) return setFormError(`已填寫${noticeLabel}，請一併勾選要發送的對象`);
-      if (!hasTemplate && form.line_recipients.length) return setFormError(`已勾選發送對象，請一併填寫${noticeLabel}`);
+      const recipientCount = form.line_recipients.length + form.role_recipients.length + form.account_recipients.length;
+      if (hasTemplate && !recipientCount) return setFormError(`已填寫${noticeLabel}，請一併勾選要發送的對象`);
+      if (!hasTemplate && recipientCount) return setFormError(`已勾選發送對象，請一併填寫${noticeLabel}`);
+    }
+    if (form.task_type === 'advance_to_awaiting_balance') {
+      const n = form.notice_days_before;
+      if (!Number.isInteger(n) || n < 1 || n > 30) return setFormError('待收尾款通知的天數請填 1～30');
     }
     if (currentTaskType?.needsGroup && !form.notification_group_id) return setFormError('這個排程類型需要選擇一個通知名單');
 
@@ -637,6 +656,23 @@ export default function ScheduledTasks() {
           </div>
         )}
 
+        {form.task_type === 'advance_to_awaiting_balance' && (
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">待收尾款通知在入住日前幾天發</label>
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-gray-600">入住日前</span>
+              <input type="number" min={1} max={30} value={form.notice_days_before}
+                onChange={(e) => setForm((f) => ({ ...f, notice_days_before: Math.round(Number(e.target.value)) }))}
+                className="w-20 px-3 py-2 border rounded-lg" />
+              <span className="text-sm text-gray-600">天</span>
+            </div>
+            <p className="text-xs text-gray-400 mt-1">
+              只影響通知的日子。訂單轉成「待收尾款」固定在入住前 3 天；設 5 天＝轉狀態之前兩天先提醒，設 1 天＝入住前一天還沒收到尾款的再提醒一次。
+              尾款已經收了（待入住之後）的訂單不會出現在通知裡。
+            </p>
+          </div>
+        )}
+
         {currentTaskType?.needsLineGroups && (
           <NoticeComposer
             label={currentTaskType.noticeLabel || '通知'}
@@ -649,6 +685,10 @@ export default function ScheduledTasks() {
             templateVars={templateVars}
             placeholder={currentTaskType.noticePlaceholder}
             hint={currentTaskType.noticeHint}
+            roleRecipients={form.role_recipients}
+            onRoleRecipientsChange={(v) => setForm((f) => ({ ...f, role_recipients: v }))}
+            accountRecipients={form.account_recipients}
+            onAccountRecipientsChange={(v) => setForm((f) => ({ ...f, account_recipients: v }))}
           />
         )}
 

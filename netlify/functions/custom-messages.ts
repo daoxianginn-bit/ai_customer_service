@@ -4,6 +4,7 @@ import { createClient } from '@supabase/supabase-js';
 import fetch from 'node-fetch';
 import { buildMergeFields, buildStandardFields, MessageVariable, computeTodayTomorrowFields } from '../../src/lib/messageVariables';
 import { LineChannel } from '../../src/lib/lineChannels';
+import { computeBalanceDue } from '../../src/lib/extraCharges';
 import { withErrorLogging } from '../../src/lib/operationLog';
 import { requirePermission } from '../../src/lib/requireRole';
 
@@ -304,7 +305,7 @@ async function listOrders(settings: any, filters: OrderFilters): Promise<{ varia
   const bookingsForBroadcast = bookings.filter((b: any) => !customerByUser[b.line_user_id]?.marketing_opt_out);
 
   const rows = bookingsForBroadcast.map((b: any) => {
-    const balanceDue = b.total_amount != null ? b.total_amount - (b.deposit ?? 0) : null;
+    const balanceDue = computeBalanceDue(b);
     const ctx = { booking: b, customer: customerByUser[b.line_user_id] || { nickname: b.nickname, line_user_id: b.line_user_id }, settings };
     const fields = {
       // 標準欄位先鋪底（管理員沒在「參數設定」建過對照也能用），自訂的同名變數蓋過去

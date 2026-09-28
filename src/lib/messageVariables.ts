@@ -6,6 +6,7 @@
 // ========================================================================
 
 import { bookingStatusLabel } from './bookingStatus';
+import { computeBalanceDue } from './extraCharges';
 
 export type VariableSource = 'booking' | 'customer' | 'settings';
 
@@ -58,6 +59,9 @@ export interface BookingCtx {
   security_deposit?: number | null;
   total_amount?: number | null;
   deposit?: number | null;
+  /** 追加款彙總（資料庫觸發器維護，見 extraCharges.ts） */
+  extra_unpaid_total?: number | null;
+  extra_unpaid_detail?: string | null;
   status?: string | null;
 }
 
@@ -98,7 +102,9 @@ export const BOOKING_FIELD_OPTIONS: { value: string; label: string }[] = [
   { value: 'security_deposit', label: '押金' },
   { value: 'total_amount', label: '訂單總額（房價＋押金）' },
   { value: 'deposit', label: '訂金（房價的固定比例）' },
-  { value: 'balance_due', label: '尾款（訂單總額－訂金，自動計算）' },
+  { value: 'balance_due', label: '尾款（訂單總額－訂金＋未付追加款，自動計算）' },
+  { value: 'extra_unpaid_detail', label: '追加款明細（未付）' },
+  { value: 'extra_unpaid_total', label: '追加款合計（未付）' },
 ];
 
 export const CUSTOMER_FIELD_OPTIONS: { value: string; label: string }[] = [
@@ -174,6 +180,8 @@ const FIELD_SECTION: Record<string, string> = {
   total_amount: VARIABLE_SECTIONS.fee,
   deposit: VARIABLE_SECTIONS.fee,
   balance_due: VARIABLE_SECTIONS.fee,
+  extra_unpaid_detail: VARIABLE_SECTIONS.fee,
+  extra_unpaid_total: VARIABLE_SECTIONS.fee,
   status: VARIABLE_SECTIONS.payment,
   business_name: VARIABLE_SECTIONS.business,
   customer_service_line: VARIABLE_SECTIONS.business,
@@ -398,7 +406,9 @@ export function resolveVariable(source: VariableSource, fieldKey: string, ctx: V
       case 'security_deposit': return currency(b.security_deposit);
       case 'total_amount': return currency(b.total_amount);
       case 'deposit': return currency(b.deposit);
-      case 'balance_due': return b.total_amount != null ? currency(Number(b.total_amount) - Number(b.deposit || 0)) : '';
+      case 'balance_due': return currency(computeBalanceDue(b));
+      case 'extra_unpaid_detail': return b.extra_unpaid_detail || '';
+      case 'extra_unpaid_total': return currency(Number(b.extra_unpaid_total || 0));
       default: return '';
     }
   }
@@ -441,6 +451,8 @@ const STANDARD_FIELD_ALIASES: Record<string, string> = {
   'total_amount': '訂單總額',
   'deposit': '訂金',
   'balance_due': '尾款',
+  'extra_unpaid_detail': '追加款明細',
+  'extra_unpaid_total': '追加款合計',
 };
 
 export function buildStandardFields(ctx: VariableResolveContext): Record<string, string> {

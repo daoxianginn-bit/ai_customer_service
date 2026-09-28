@@ -16,7 +16,7 @@ import { useConfirm } from '../../components/ui-mui/ConfirmDialogProvider';
 import type { BookingRow } from '../booking/bookingQueries';
 import {
   DEFAULT_WINDOW_DAYS, GROUP_HINTS, GROUP_LABELS, STAGES, WINDOW_OPTIONS, damageSummary, fetchQueues, fetchStageTemplates, fetchTemplates,
-  groupsOf, resendLaundry, saveStageTemplates, sortQueue, stageByKey, stageUsesWindow, withinCheckinWindow,
+  groupsOf, resendLaundry, saveStageTemplates, sortQueue, stageApplies, stageByKey, stageUsesWindow, withinCheckinWindow,
   type MessageTemplate, type QueueData, type StageAction, type StageDef, type StageGroup, type StageKey,
 } from './processQueries';
 import StagePanel from './StagePanel';
@@ -164,14 +164,14 @@ export default function ProcessPage() {
   // 自己的操作立刻反映在清單上（不用等重抓）
   const applyLocal = (updated: BookingRow) => {
     setData((prev) => {
-      const still = STAGES.some((s) => s.statuses.includes(updated.status));
+      const still = STAGES.some((s) => stageApplies(s, updated));
       const bookings = prev.bookings.filter((b) => b.id !== updated.id);
       return { ...prev, bookings: still ? [...bookings, updated] : bookings };
     });
     load(true);
   };
 
-  const bookingsFor = (stage: StageDef) => data.bookings.filter((b) => stage.statuses.includes(b.status) && (!stageUsesWindow(stage) || withinCheckinWindow(b, windowDays)));
+  const bookingsFor = (stage: StageDef) => data.bookings.filter((b) => stageApplies(stage, b) && (!stageUsesWindow(stage) || withinCheckinWindow(b, windowDays)));
   const rowsFor = (group: StageGroup) => {
     const active = filter[group] || 'all';
     return myStages.filter((s) => s.group === group && (active === 'all' || s.key === active))
@@ -282,7 +282,7 @@ export default function ProcessPage() {
           <Stack divider={<Box sx={{ borderBottom: '1px solid', borderColor: 'divider' }} />}>
             {items.map(({ action: a, booking: b }) => {
               const stage = stageByKey(a.stage);
-              const stillHere = stage.statuses.includes(b.status);
+              const stillHere = stageApplies(stage, b);
               return (
                 <Stack key={`${a.booking_id}-${a.stage}`} direction={isMobile ? 'column' : 'row'} spacing={1} alignItems={isMobile ? 'stretch' : 'center'} sx={{ py: 1 }}>
                   <Chip label={stage.action} size="small" sx={{ bgcolor: stage.colorLight, color: stage.color, fontWeight: 600, alignSelf: 'flex-start' }} />

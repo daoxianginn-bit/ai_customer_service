@@ -59,6 +59,7 @@ export const LOG_FUNCTION_NAMES = [
   'line-profile',
   'invite-admin',
   'list-admins',
+  'staff-line',
   'delete-admin',
   'delete-customer-data',
   'ai-test',

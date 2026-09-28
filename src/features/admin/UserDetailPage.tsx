@@ -14,6 +14,7 @@ import { assignUserRoles, fetchGrantable, fetchPrimaryAdmin, fetchRoles, fetchUs
 import { RoleCheckList } from './InviteUserDialog';
 import { StatusChip, UserRoleChips, useUserActions } from './useUserActions';
 import { RiskChip, groupByModule } from './PermissionMatrix';
+import UserLineCard from './UserLineCard';
 
 // ========================================================================
 // 使用者詳情（權限管理 V2 §45）：基本資料／角色／登入安全／有效權限／操作紀錄。
@@ -98,6 +99,7 @@ export default function UserDetailPage() {
   const deleteReason = actions.deleteBlockReason(user);
 
   const profileTab = (
+    <>
     <Card><CardContent>
       <Grid container spacing={2}>
         <Grid item xs={12} sm={6}><Field label="姓名" value={user.display_name || '（尚未登入，未取得 Google 名稱）'} /></Grid>
@@ -109,6 +111,8 @@ export default function UserDetailPage() {
       </Grid>
       {actions.isPrimary(user) && <Alert severity="info" sx={{ mt: 2 }}>這是主帳號：永遠擁有全部權限，不能被停權、移除或指派角色。要換人請到「安全性」頁設定。</Alert>}
     </CardContent></Card>
+    <UserLineCard user={user} canEdit={actions.canEdit} onChanged={load} />
+    </>
   );
 
   const rolesTab = (

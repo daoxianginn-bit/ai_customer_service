@@ -5,6 +5,8 @@ import { logOperation, logUiError } from '../../lib/logOperation';
 import { LOG_FEATURES, diffRecords, labelRecord } from '../../lib/operationLog';
 import type { LinenUsageRow } from '../../lib/linenCost';
 import type { BookingRow } from './bookingQueries';
+import { hasUnpaidExtraCharges } from '../../lib/extraCharges';
+import { setExtraChargesPaid } from './extraChargeQueries';
 
 // ========================================================================
 // 訂房模組的寫入動作（V2 §98）。每個動作＝寫資料庫＋寫操作紀錄，成功／失敗都在這裡處理，
@@ -18,7 +20,7 @@ export class BookingActionError extends Error {}
 /**
  * 推進到下一關（或任何指定狀態）。推到「已預定」時必須帶匯款末5碼——那一關代表訂金已核對入帳。
  */
-export async function advanceBookingStatus(order: BookingRow, nextStatus: string, opts: { remitLast5?: string } = {}) {
+export async function advanceBookingStatus(order: BookingRow, nextStatus: string, opts: { remitLast5?: string; skipExtraCharges?: boolean } = {}) {
   const needsRemit = nextStatus === REQUIRES_REMIT_LAST5_STATUS;
   const remit = (opts.remitLast5 || '').trim();
   if (needsRemit && !remit) throw new BookingActionError('請先填寫匯款末5碼再推進到「已預定」。');
@@ -28,6 +30,12 @@ export async function advanceBookingStatus(order: BookingRow, nextStatus: string
     if (needsRemit) payload.remit_last5 = remit;
     const { error } = await supabase.from('bookings').update(payload).eq('id', order.id);
     if (error) throw error;
+
+    // 從「待收尾款」推進＝尾款收到了；尾款裡含的未付追加款也是一起收的，標成已付。
+    // 訂單處理的尾款關卡自己會處理（只標視窗裡看到的那幾筆），所以帶 skipExtraCharges 進來。
+    if (!opts.skipExtraCharges && order.status === 'awaiting_balance' && nextStatus === 'awaiting_checkin' && hasUnpaidExtraCharges(order)) {
+      await setExtraChargesPaid(order.id, null, true);
+    }
 
     const diff = diffRecords(order, payload, Object.keys(payload));
     await logOperation({

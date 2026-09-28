@@ -1,4 +1,6 @@
 import type { BookingRow } from '../booking/bookingQueries';
+import { computeBalanceDue, hasUnpaidExtraCharges } from '../../lib/extraCharges';
+import { BALANCE_PAID_STATUSES } from '../../lib/bookingStatus';
 
 // ========================================================================
 // 訂單處理的關卡定義與純函式（不碰資料庫，測試直接 import）。資料存取在 processQueries.ts。
@@ -9,10 +11,10 @@ import type { BookingRow } from '../booking/bookingQueries';
 // ========================================================================
 
 export type StageKey =
-  | 'awaiting_confirmation' | 'awaiting_balance' | 'deposit_processing' | 'awaiting_refund'
+  | 'awaiting_confirmation' | 'awaiting_balance' | 'extra_charges' | 'deposit_processing' | 'awaiting_refund'
   | 'linen' | 'checkin_password' | 'room_check';
 export type StageGroup = 'payment' | 'checkin' | 'checkout';
-export type EditableField = 'remit' | 'balance_remit' | 'refund' | 'password' | 'linen' | 'damage';
+export type EditableField = 'remit' | 'balance_remit' | 'refund' | 'password' | 'linen' | 'damage' | 'extras';
 
 export const GROUP_LABELS: Record<StageGroup, string> = { payment: '款項處理', checkin: '入住準備', checkout: '退房檢查' };
 export const GROUP_HINTS: Record<StageGroup, string> = {
@@ -27,6 +29,11 @@ export interface StageDef {
   /** 佇列標題 */
   title: string;
   statuses: string[];
+  /**
+   * 不看狀態、看訂單內容決定要不要出現在這一關（statuses 留空）。追加款收款就是這種：
+   * 尾款已收的訂單只要還有未付追加款就要出現，跟它現在是待入住、入住中還是押金處理無關。
+   */
+  appliesTo?: (b: BookingRow) => boolean;
   /** 高亮動作鈕文字 */
   action: string;
   /** 高亮鈕與標籤的顏色（每關不同，一眼分得出來） */
@@ -53,7 +60,9 @@ export interface StageDef {
 }
 
 const num = (v: unknown) => (v == null || v === '' ? null : Number(v));
-const balanceOf = (b: BookingRow) => (num(b.total_amount) == null ? null : Number(b.total_amount) - Number(b.deposit || 0));
+const balanceOf = (b: BookingRow) => computeBalanceDue(b);
+/** 取消退款的應退：訂金＋已付追加款 */
+const paidOf = (b: BookingRow) => (num(b.deposit) == null && !Number(b.extra_paid_total || 0) ? null : Number(b.deposit || 0) + Number(b.extra_paid_total || 0));
 const CHECKIN_STATUSES = ['awaiting_checkin', 'checked_in'];
 
 export const STAGES: StageDef[] = [
@@ -73,6 +82,16 @@ export const STAGES: StageDef[] = [
     hint: '尾款末五碼預設帶訂金那一組，不同再改。要讓訂單進到「待入住」請按「確認並推進」。',
   },
   {
+    // 尾款收完之後才加的追加款：沒有下一關會自動收，所以另外列一關給會計。還沒到尾款關卡的訂單，
+    // 未付追加款已經算進尾款，會在「尾款入款」一起收，不重複出現在這裡。
+    key: 'extra_charges', group: 'payment', title: '追加款收款', statuses: [], action: '追加款確認',
+    appliesTo: (b) => BALANCE_PAID_STATUSES.includes(b.status) && hasUnpaidExtraCharges(b),
+    color: '#ca8a04', colorLight: '#fef9c3', nextStatus: null, confirmAdvances: false, fields: ['extras'],
+    money: 'full', amountLabel: '未收追加款', amountOf: (b) => num(b.extra_unpaid_total),
+    templateTitle: null, permission: 'booking.payment.verify',
+    hint: '尾款收完之後才新增的追加款。勾選已經收到的項目按確認，全部收齊這筆訂單就會離開清單。',
+  },
+  {
     key: 'deposit_processing', group: 'payment', title: '押金退款', statuses: ['deposit_processing'], action: '押金退款',
     color: '#4f46e5', colorLight: '#e0e7ff', nextStatus: 'completed', confirmAdvances: false, fields: ['refund'],
     money: 'full', amountLabel: '應退押金', amountOf: (b) => num(b.security_deposit),
@@ -84,8 +103,9 @@ export const STAGES: StageDef[] = [
   {
     key: 'awaiting_refund', group: 'payment', title: '取消退款', statuses: ['awaiting_refund'], action: '退款完成',
     color: '#e11d48', colorLight: '#ffe4e6', nextStatus: 'refunded', confirmAdvances: false, fields: ['refund'],
-    money: 'full', amountLabel: '已收訂金', amountOf: (b) => num(b.deposit),
-    defaultRefund: (b) => num(b.deposit),
+    // 已付的追加款也要一起退，不然取消時會漏退
+    money: 'full', amountLabel: '已收款項', amountOf: (b) => paidOf(b),
+    defaultRefund: (b) => paidOf(b),
     templateTitle: '取消退款', permission: 'booking.refund.process',
     hint: '填實際退回客人的金額（沒退滿可以寫原因）。「確認並推進」會把訂單標成「已退款」。',
   },
@@ -117,6 +137,8 @@ export const STAGES: StageDef[] = [
 ];
 
 export const stageByKey = (key: StageKey) => STAGES.find((s) => s.key === key)!;
+/** 這筆訂單目前在不在這一關 */
+export const stageApplies = (stage: StageDef, b: BookingRow) => stage.statuses.includes(b.status) || !!stage.appliesTo?.(b);
 /** 這個狀態會出現在哪幾個關卡（一筆訂單可以同時有好幾張卡） */
 export const stagesForStatus = (status: string) => STAGES.filter((s) => s.statuses.includes(status));
 export const groupsOf = (stages: StageDef[]): StageGroup[] => (['payment', 'checkin', 'checkout'] as StageGroup[]).filter((g) => stages.some((s) => s.group === g));
