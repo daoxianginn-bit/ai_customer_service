@@ -97,13 +97,57 @@ export function isNoAnswer(message: string): boolean {
 // 「要不要幫您排候補？」的答案。isYesAnswer 只認「整句就是一個好」，但這一題客人很常把關鍵字
 // 帶上（「幫我排候補」「候補好了」「不用候補」），所以另外看一次。回 undefined 代表這句不是在
 // 回答——「候補要等多久？」「候補是什麼」是在問候補這件事本身，該交給知識庫回答。
+//
+// 判斷順序有講究：
+//   1. 明確的否定（不用／不要／先不／別排）最先——「不要幫我排候補」裡也有「幫我」。
+//   2. 問候補本身（多久、怎麼運作、排到了沒）不是回答。
+//   3. 明確的請求（幫我、麻煩、登記、排我）優先於「算了」「沒關係」——這兩個詞在口語裡常常只是
+//      語氣（「沒關係，幫我排候補」「算了，還是排候補好了」），不能先當成拒絕。
+//   4. 只剩「算了」「沒關係」才是拒絕；最後才看一般的「好／要／可以」。
 export function scanWaitlistAnswer(message: string): 'yes' | 'no' | undefined {
   const t = message.trim();
   if (!/候補|候位/.test(t)) return undefined;
-  if (/不(用|要|需要|想)|先不|別排|算了|沒關係/.test(t)) return 'no';
-  if (/多久|多長|什麼|甚麼|怎麼|如何|意思|規則|機制/.test(t)) return undefined;
-  if (/幫我|幫忙|麻煩|請幫|登記|加入|排我|好|要|可以|ok|yes/i.test(t)) return 'yes';
+  if (/不(用|要|需要|想)|先不|別排/.test(t)) return 'no';
+  if (/多久|多長|什麼|甚麼|怎麼|如何|意思|規則|機制|好了沒|排到|輪到|進度|第幾/.test(t)) return undefined;
+  if (/幫我|幫忙|麻煩|請幫|登記|加入|排我|排一下|還是(要|排|幫|候補)/.test(t)) return 'yes';
+  if (/算了|沒關係/.test(t)) return 'no';
+  if (/好|要|可以|ok|yes/i.test(t)) return 'yes';
   return undefined;
+}
+
+// AI 抽出的欄位值，這句話裡要看得到根據才採用。
+//
+// AI 模式帶了最近對話當脈絡，模型偶爾會把「對話裡講過、但客人這句沒講」的值也填進 slots
+// （例如客人只回「好」「有早餐嗎」，模型卻順手填了人數或日期），這個值會直接進重新報價，
+// 客人拿到一張依他沒說過的條件算出來的價格。這裡不驗證值對不對，只驗證「這句話有沒有在講
+// 這一類東西」：日期要有數字或日期用語、人數要有數字或「中文數字＋人的單位」、房數要有數字或
+// 「中文數字＋間／房」。其餘欄位（包棟、備註等）不檢查。跟已收集的值相同的不用檢查——沒有改變任何事。
+const DATE_WORDS_RE = /\d|今天|明天|後天|下週|下周|下禮拜|下星期|這週|這周|本週|週[一二三四五六日天末]|周[一二三四五六日天末]|星期|禮拜|[一二兩三四五六七八九十]+\s*[月號日晚夜天]|連假|過年|春節|中秋|端午|元旦|跨年|聖誕|月底|月初|下旬|上旬|中旬/;
+const HEADCOUNT_WORDS_RE = /\d|[一二兩三四五六七八九十]+\s*(?:位|個|人|大|小|名)/;
+const ROOM_WORDS_RE = /\d|[一二兩三四五六七八九十]+\s*(?:間|房)/;
+
+export function dropUngroundedSlots(
+  message: string,
+  fields: IntentFieldDef[],
+  collected: Record<string, string>,
+  slots: Record<string, string>
+): { slots: Record<string, string>; dropped: string[] } {
+  const text = message || '';
+  const kept: Record<string, string> = {};
+  const dropped: string[] = [];
+  for (const [key, value] of Object.entries(slots)) {
+    const field = fields.find((f) => f.key === key);
+    const qf = field?.quote_field;
+    const grounded =
+      !field || collected[key] === value ||
+      (qf === 'checkin_date' || qf === 'checkout_date' ? DATE_WORDS_RE.test(text)
+        : qf === 'headcount' ? HEADCOUNT_WORDS_RE.test(text)
+          : qf === 'room_count' ? ROOM_WORDS_RE.test(text)
+            : true);
+    if (grounded) kept[key] = value;
+    else dropped.push(key);
+  }
+  return { slots: kept, dropped };
 }
 
 export function isRestartCommand(message: string): boolean {
@@ -247,7 +291,9 @@ export function scanHeadcountDelta(message: string, currentHeadcount: number): n
  * 回傳客人要的房間總數；沒講就是 undefined。
  */
 export function scanRoomTotal(message: string): number | undefined {
-  const m = (message || '').match(new RegExp(`(${NUMBER_TOKEN})\\s*(?:間|間房|房間)`));
+  // 「第2間房有浴缸嗎」的 2 是在指某一間，不是要 2 間
+  // 數字前面也不能還有數字，否則「第12間」會從 2 開始比對、變成 2 間
+  const m = (message || '').match(new RegExp(`(?<!第\\s*)(?<![\\d零一二兩三四五六七八九十])(${NUMBER_TOKEN})\\s*(?:間|間房|房間)`));
   if (!m) return undefined;
   const n = parseCjkNumber(m[1]);
   return n !== null && n > 0 && n <= 20 ? n : undefined;

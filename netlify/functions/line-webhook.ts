@@ -27,7 +27,7 @@ import { LineChannel, isFullServiceRole, channelRoleLabel } from '../../src/lib/
 import {
   buildIntentPrompt, parseIntentResponse, classifyByRules,
   isYesAnswer, isNoAnswer, isRestartCommand, interpretBareAnswer,
-  scanRoomComposition, scanHeadcountDelta, scanRoomTotal, composeRoomsForTotal, scanWaitlistAnswer,
+  scanRoomComposition, scanHeadcountDelta, scanRoomTotal, composeRoomsForTotal, scanWaitlistAnswer, dropUngroundedSlots,
   missingEssentialFields, QUOTE_ESSENTIAL_FIELDS,
   type BookingPhase, type IntentContext, type IntentResult,
 } from '../../src/lib/bookingIntent';
@@ -275,6 +275,8 @@ async function logAiFailure(context: string, nickname: string | null, userMessag
 // 不然 AI 說「稍後由專人回覆您」之後根本沒有人會知道要回。
 // 模型偶爾會漏掉標記，所以另外用制式句子的關鍵片語當備援判斷。
 export const NEEDS_HUMAN_MARKER = '[[需專人]]';
+// 跟 KB_BOUNDARY_INSTRUCTION 裡要模型講的那一句相同，模型沒講出來時由系統補上
+const NEEDS_HUMAN_REPLY = '不好意思，這部分我幫您確認一下，稍後由專人回覆您 🙏';
 const NEEDS_HUMAN_PHRASES = ['稍後由專人回覆', '請專人為您確認', '由專人為您回覆', '幫您確認一下，稍後'];
 export function splitNeedsHumanMarker(text: string): { text: string; needsHuman: boolean } {
   const hasMarker = text.includes(NEEDS_HUMAN_MARKER);
@@ -755,8 +757,22 @@ async function processLineEvent(
     }
 
     // 5. 呼叫 AI
+    // AI 關閉時不能已讀不回：回一句會有人接手，並開轉接紀錄通知客服。已經有未結案的轉接紀錄就
+    // 不再重複通知——客人連傳好幾句時，客服只需要被叫一次。
     if (!settings.is_ai_enabled) {
-      traceStep('AI 功能已關閉（系統設定），不回覆');
+      traceStep('AI 功能已關閉（系統設定），回覆「稍後由專人回覆」並通知客服');
+      const replyText = '已收到您的訊息，稍後由專人回覆您，謝謝您的耐心等候 🙏';
+      const via = await replyOrPush(lineClient, lineEvent.replyToken, userId, replyText);
+      if (via) await logConversation(userId, nickname, 'outbound', replyText, 'system');
+      const { data: openLog } = await supabase.from('handover_logs').select('id')
+        .eq('channel_id', channel.id).eq('line_user_id', userId).eq('status', 'open').limit(1);
+      if (!openLog?.length) {
+        await supabase.from('handover_logs').insert({
+          channel_id: channel.id, line_user_id: userId, nickname,
+          triggered_keyword: 'AI 已關閉', started_at: new Date().toISOString(), status: 'open',
+        });
+        await notifyHandover(settings, lineClient, `🔕 AI 已關閉，請人工回覆：【${nickname || '匿名用戶'}】\n客人說：${userMessage}`);
+      }
       return;
     }
 
@@ -813,22 +829,30 @@ async function processLineEvent(
     // AI 說這題民宿資訊裡沒有、要請專人回覆：拿掉標記後照送，另外開待人工＋通知客服。
     if (aiResult) {
       const split = splitNeedsHumanMarker(aiResult);
-      aiResult = split.text;
+      // 模型只回了一個 [[需專人]] 標記、沒有任何文字：拿掉標記後是空字串，以前就整則不回。
+      // 補上提示詞裡要它講的那一句，客人至少知道有人會回覆。
+      aiResult = split.text || (split.needsHuman ? NEEDS_HUMAN_REPLY : '');
       if (split.needsHuman) {
         try { await flagAiNeedsHuman(settings, lineClient, channel.id, userId, nickname, userMessage, aiResult); } catch (e: any) { traceError(`開待人工紀錄失敗：${e.message}`); }
       }
     }
 
+    // 最後一道保底：走到這裡還是沒有任何文字（理論上上面都擋掉了，但這是「客人已讀不回」的最後一關），
+    // 回一句會有人接手的話，並通知客服。
+    if (!aiResult) {
+      traceError('AI 回覆是空的，改送保底回覆並通知客服');
+      aiResult = NEEDS_HUMAN_REPLY;
+      try { await flagAiNeedsHuman(settings, lineClient, channel.id, userId, nickname, userMessage, '（AI 沒有產生任何回覆）'); } catch (e: any) { traceError(`開待人工紀錄失敗：${e.message}`); }
+    }
+
     // 訂房流程把這句交過來時留下的提醒（「報價仍在等您確認」之類）：AI 答完接在後面，
     // 不然客人問完早餐可能以為就沒事了，報價一直懸著。
     const reminder = takeTurnReminder();
-    if (aiResult && reminder) aiResult += `\n\n${reminder}`;
+    if (reminder) aiResult += `\n\n${reminder}`;
 
-    if (aiResult) {
-      const via = await replyOrPush(lineClient, lineEvent.replyToken, userId, aiResult);
-      if (!via) throw new Error('AI 回覆送不出去（reply 與 push 都失敗）');
-      await logConversation(userId, nickname, 'outbound', aiResult, settings.active_ai === 'gpt' ? 'ai_gpt' : 'ai_gemini');
-    }
+    const via = await replyOrPush(lineClient, lineEvent.replyToken, userId, aiResult);
+    if (!via) throw new Error('AI 回覆送不出去（reply 與 push 都失敗）');
+    await logConversation(userId, nickname, 'outbound', aiResult, settings.active_ai === 'gpt' ? 'ai_gpt' : 'ai_gemini');
   } catch (e: any) {
     console.error(`[Event] Unhandled error processing event ${eventId}:`, e.message);
     traceError(`處理過程發生未預期的錯誤：${e.message}`);
@@ -1328,8 +1352,14 @@ async function extractStepFields(settings: any, userMessage: string, fields: Flo
 // 把它排前面的話，「2026/08/26」的開頭「2026」會先被它吃掉（月份 20 不合法而作廢），
 // 剩下的「/08/26」再被當成另一個日期，整串日期就被讀歪了。放最後，帶分隔符與 7/8 碼的寫法
 // 都會先比對成功，4 碼只會在「真的只有 4 個獨立數字」時才輪到。
-const DATE_SCAN_RE =
-  /(?<!\d)(?<ce8>\d{8})(?!\d)|(?<!\d)(?<roc7>\d{7})(?!\d)|(?<!\d)(?<fy>\d{3,4})[-/.](?<fm>\d{1,2})[-/.](?<fd>\d{1,2})(?!\d)|(?<cm>\d{1,2})\s*月\s*(?<cd>\d{1,2})\s*[日號]?|(?<!\d)(?<sm>\d{1,2})[-/.](?<sd>\d{1,2})(?!\d)|(?<!\d)(?<md4>\d{4})(?!\d)/g;
+// 月日（sm）與 4 碼月日（md4）後面接著金額、時間單位的是數字不是日期：「預算8-9萬」「1.5萬」
+// 「1030元」以前會被讀成 8/9、1/5、10/30，客人問價格時系統自己多出一個入住日。
+// （也涵蓋「1.5-2萬」這種數字範圍：單位在範圍後面，要跳過「-2」再看。）
+const NUMBER_UNIT_AHEAD = String.raw`(?!\s*(?:[-~～到至]\s*\d{1,3}(?:\.\d+)?)?\s*(?:萬|千|百|元|塊|k|K|小時|hr|分鐘|%|％|倍|坪|公))`;
+const DATE_SCAN_RE = new RegExp(
+  String.raw`(?<!\d)(?<ce8>\d{8})(?!\d)|(?<!\d)(?<roc7>\d{7})(?!\d)|(?<!\d)(?<fy>\d{3,4})[-/.](?<fm>\d{1,2})[-/.](?<fd>\d{1,2})(?!\d)|(?<cm>\d{1,2})\s*月\s*(?<cd>\d{1,2})\s*[日號]?|(?<!\d)(?<sm>\d{1,2})[-/.](?<sd>\d{1,2})(?!\d)${NUMBER_UNIT_AHEAD}|(?<!\d)(?<md4>\d{4})(?!\d)${NUMBER_UNIT_AHEAD}`,
+  'g'
+);
 
 function taiwanToday(): Date {
   const tw = new Date(Date.now() + 8 * 60 * 60 * 1000);
@@ -1358,8 +1388,10 @@ const ROC_YEAR_OFFSET = 1911;
 // 系統回「還需要補充：退房日期」，補了 9/30 之後又用 30 人去算，回一句「可能超過可接待人數」。
 // 所以掃日期之前先把範圍展開成兩個完整日期（「9/29 ~ 9/30」）。結束日比開始日小代表跨月
 // （「9/30-1」＝9/30~10/1）。後面緊接著人數單位的不算（「9/29-3人」是 9/29、3 人，不是範圍）。
-const SLASH_DATE_RANGE_RE = /(?<!\d)(?:(\d{3,4})[-/.])?(\d{1,2})[/.](\d{1,2})\s*[-~～〜到至]\s*(\d{1,2})(?![\d/.月])(?!\s*(?:人|位|大|小|個|名))/g;
-const CJK_DATE_RANGE_RE = /(\d{1,2})\s*月\s*(\d{1,2})\s*[日號]?\s*[-~～〜到至]\s*(\d{1,2})(?![\d/.月])(?!\s*(?:人|位|大|小|個|名))\s*([日號])?/g;
+// 金額、時間、倍數也不算：「預算1.5-2萬」「2.5-3小時」的「1.5」「2.5」是小數，不是 1/5、2/5。
+const NOT_RANGE_END = '(?!\\s*(?:人|位|大|小|個|名|萬|千|百|元|塊|k|K|小時|hr|分鐘|%|％|倍|坪|公))';
+const SLASH_DATE_RANGE_RE = new RegExp(`(?<!\\d)(?:(\\d{3,4})[-/.])?(\\d{1,2})[/.](\\d{1,2})\\s*[-~～〜到至]\\s*(\\d{1,2})(?![\\d/.月])${NOT_RANGE_END}`, 'g');
+const CJK_DATE_RANGE_RE = new RegExp(`(\\d{1,2})\\s*月\\s*(\\d{1,2})\\s*[日號]?\\s*[-~～〜到至]\\s*(\\d{1,2})(?![\\d/.月])${NOT_RANGE_END}\\s*([日號])?`, 'g');
 
 function rangeEndMonth(month: number, startDay: number, endDay: number): number {
   return endDay > startDay ? month : (month % 12) + 1;
@@ -1424,7 +1456,8 @@ const HEADCOUNT_PATTERNS = [
   // 保底那一條要排掉「4人房」「4間房」：那是在講房型或房數，不是人數。
   // 第 2 條已經用 (?!房) 擋過帶單位的寫法，但保底這條什麼單位都不看，不擋就會把
   // 「有4人房嗎」「可以給我4間房嗎」的 4 當成人數，報價直接照 4 人算。
-  /(?<!\d)(\d{1,3})(?!\d)(?!\s*(?:人房|房|間))/,
+  // 金額、時間、小數也不是人數（「預算2萬」「1.5」）
+  /(?<![\d.])(\d{1,3})(?![\d.])(?!\s*(?:人房|房|間|萬|千|百|元|塊|k|K|小時|hr|分鐘|%|％|倍|坪))/,
 ];
 
 // 「大人＋小孩」要相加才是總人數。這三種寫法在訂房對話裡最常見：
@@ -3239,7 +3272,7 @@ async function fetchRoomCapacityCounts(): Promise<{ capacity: number; count: num
  *   「能給我 2+2+4+4 的報價嗎？」→ 指定房間組合
  *   「如果多 1 大人 1 小孩價格一樣嗎？」→ 人數 9 改 11
  *   「可以給我 4 間房嗎？」→ 只講間數，挑一組住得下的 4 間房
- * 只在已經報過價的階段介入；收集中本來就會把抓到的欄位存起來，不需要覆寫意圖。
+ * 只在「報價後、等客人確認」介入；收集中本來就會把抓到的欄位存起來，待匯款不能被改成重新報價。
  *
  * 除了 question，unclear 也要接：同一句「所以你們提供2+4+4的房型嗎? 可以給我4間房嗎?」
  * AI 有時判 question、有時判 unclear，判成 unclear 就被轉真人，客人一小時後再問一次還是沒答案。
@@ -3247,7 +3280,9 @@ async function fetchRoomCapacityCounts(): Promise<{ capacity: number; count: num
  * 客人真正要的是後面那句「4 間房」。
  */
 async function applyRoomCompositionOverride(message: string, ctx: IntentContext, result: IntentResult): Promise<IntentResult> {
-  if (ctx.phase === 'collecting') return result;
+  // 只在「報價後、等客人確認」介入。待匯款階段看不懂的話保守當成匯款回報（漏接一筆匯款比較
+  // 嚴重），「已匯4間房的訂金」裡的「4間」不能被當成要改成 4 間房、重新報價又多開一張單。
+  if (ctx.phase !== 'awaiting_confirmation') return result;
   const isQuestionLike = result.intent === 'question' || result.intent === 'unclear';
   const isInfo = result.intent === 'modify' || result.intent === 'provide_info';
   if (!isQuestionLike && !isInfo) return result;
@@ -3322,7 +3357,13 @@ async function classifyBookingIntent(settings: any, flow: FlowDef, message: stri
       raw: clipForTrace(raw, 600),
       parsed: parsed ? { intent: parsed.intent, slots: parsed.slots } : null,
     });
-    if (parsed) return await applyRoomCompositionOverride(message, ctx, parsed);
+    if (parsed) {
+      const grounded = dropUngroundedSlots(message, ctx.fields, ctx.collected, parsed.slots);
+      if (grounded.dropped.length) {
+        traceStep(`AI 填了這句沒講到的欄位（${grounded.dropped.map((k) => `${ctx.fields.find((f) => f.key === k)?.label ?? k}=${parsed.slots[k]}`).join('、')}），不採用`);
+      }
+      return await applyRoomCompositionOverride(message, ctx, { ...parsed, slots: grounded.slots });
+    }
     traceStep('AI 意圖分類回覆無法解析，退回規則判斷');
   } catch (e: any) {
     traceData('intent_ai', { provider: settings.active_ai, latency_ms: Date.now() - startedAt, error: e.message });
@@ -3631,7 +3672,20 @@ async function describeIfSameAsQuote(
 
   const layout = Array.from(quoted.entries()).sort((a, b) => a[0] - b[0]).map(([cap, n]) => `${cap}人房 ${n} 間`).join('、');
   const totalRooms = Array.from(quoted.values()).reduce((s, n) => s + n, 0);
-  return `是的，目前這份報價就是 ${layout}（共 ${totalRooms} 間）😊\n要訂房請回「是」、不訂請回「否」；想換別的組合（例如「${totalRooms + 1}間房」或指定幾人房各幾間），直接告訴我，我馬上重新試算。`;
+  // 客人問的可能是房型（「有提供2+4+4嗎」），也可能是日期或人數（「9個人可以嗎」），
+  // 所以把整份報價的條件都講一次，不管問哪一項都答得到。
+  const valueOf = (qf: string) => {
+    const f = allFields.find((x) => x.quote_field === qf);
+    return f ? session.collected[f.key] : undefined;
+  };
+  const checkin = valueOf('checkin_date');
+  const checkout = valueOf('checkout_date');
+  const headcount = valueOf('headcount');
+  const stay = [
+    checkin && checkout ? `${toSlashDate(checkin)}~${toSlashDate(checkout)}` : null,
+    headcount ? `${headcount} 位` : null,
+  ].filter(Boolean).join('、');
+  return `是的，目前這份報價就是${stay ? ` ${stay}，` : ' '}${layout}（共 ${totalRooms} 間）😊\n要訂房請回「是」、不訂請回「否」；想換別的組合（例如「${totalRooms + 1}間房」或指定幾人房各幾間），直接告訴我，我馬上重新試算。`;
 }
 
 // 意圖不明時的階段預設：收集中什麼都沒填就當閒聊交給 AI；填了一部分就再問缺的；
@@ -4370,14 +4424,25 @@ export async function callGPT(
     // Temperature 刻意不帶：GPT-5 推理模型不接受這個參數，帶了會 400。
     const maxOutput = Number(settings.gpt_max_tokens);
     if (Number.isFinite(maxOutput) && maxOutput > 0) body.max_output_tokens = Math.round(maxOutput);
-    const res = await fetch('https://api.openai.com/v1/responses', {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${settings.gpt_api_key}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
-    });
-    const result: any = await res.json();
-    if (!res.ok || result.error) throw new Error(result.error?.message || res.statusText);
-    const text = extractResponsesApiText(result);
+    const post = async (payload: any) => {
+      const res = await fetch('https://api.openai.com/v1/responses', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${settings.gpt_api_key}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const json: any = await res.json();
+      if (!res.ok || json.error) throw new Error(json.error?.message || res.statusText);
+      return json;
+    };
+    let result: any = await post(body);
+    let text = extractResponsesApiText(result);
+    // 推理把額度吃光、一個字都沒剩給回答（status=incomplete、reason=max_output_tokens）：放寬額度再試
+    // 一次。不重試的話客人收到的是「系統忙線」而不是答案——問題出在後台額度設太小，不是 AI 掛了。
+    if (!text && result.status === 'incomplete' && result.incomplete_details?.reason === 'max_output_tokens' && body.max_output_tokens) {
+      traceStep(`GPT 推理用完輸出額度（${body.max_output_tokens}）沒有產生回答，放寬額度重試一次`);
+      result = await post({ ...body, max_output_tokens: Math.max(body.max_output_tokens * 3, 4000) });
+      text = extractResponsesApiText(result);
+    }
     // 有回應但抽不出文字，代表回應格式跟預期不同（API 改版、或被安全機制擋下只回 refusal）。
     // 以前這裡默默回空字串：問答就整則不回、欄位擷取全空、客人被回「全部欄位都要補充」。
     // 現在當成錯誤丟出去，客服會收到「AI 呼叫失敗」通知、流程退回規則版。
@@ -4395,7 +4460,16 @@ export async function callGPT(
     params.temperature = settings.gpt_temperature;
   }
   const completion = await openai.chat.completions.create(params);
-  return { text: completion.choices[0].message.content || '' };
+  const choice = completion.choices[0];
+  const text = (choice?.message?.content || '').trim();
+  // 跟上面 Responses API 同一個道理：空內容（被安全機制擋下只回 refusal、或額度用完一個字都沒有）
+  // 以前回空字串，一般問答就整則不回——客人已讀不回，客服也不知道。改成丟錯誤，走「系統忙線」
+  // 保底回覆並通知客服；欄位擷取／意圖判斷則會退回規則版。
+  if (!text) {
+    const refusal = (choice?.message as any)?.refusal;
+    throw new Error(`Chat Completions 回應裡沒有文字（finish_reason=${choice?.finish_reason || '?'}${refusal ? `，refusal：${refusal}` : ''}）`);
+  }
+  return { text };
 }
 
 export async function callGemini(
