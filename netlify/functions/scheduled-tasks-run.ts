@@ -961,7 +961,37 @@ async function checkOtaConflict(channel: any, ev: { startIso: string; endIso: st
   return roomLinks?.length ? roomLinks[0].booking_id : null;
 }
 
-async function syncOneOtaChannel(channel: any): Promise<{ summary: string; conflictLines: string[] }> {
+/**
+ * 把這些訂單在 Google 行事曆上的事件刪掉。給「要刪訂單之前」用——訂單列一刪，
+ * bookings.google_event_id 就跟著消失，Google 上的事件再也沒有東西指向它。
+ * 刪不掉就只記 log，不要讓第三方服務的狀況擋住訂單同步；漏網的由
+ * 「串接管理 → Google 行事曆 → 檢查行事曆」列出來清。
+ */
+async function removeGoogleEventsFor(settings: any, rows: { google_event_id?: string | null }[]): Promise<void> {
+  const eventIds = rows.map((r) => r.google_event_id).filter(Boolean) as string[];
+  if (!eventIds.length) return;
+
+  const calendarId = settings?.google_calendar_id;
+  const serviceAccountJson = settings?.google_service_account_json;
+  if (!calendarId || !serviceAccountJson) return;
+
+  let accessToken: string;
+  try {
+    accessToken = await getGoogleAccessToken(serviceAccountJson);
+  } catch (e: any) {
+    console.error('[GoogleCalendar] detach auth failed:', e.message);
+    return;
+  }
+  await runInBatches(eventIds, GOOGLE_SYNC_CONCURRENCY, async (id) => {
+    try {
+      await deleteGoogleEvent(accessToken, calendarId, id);
+    } catch (e: any) {
+      console.error(`[GoogleCalendar] detach failed for event ${id}:`, e.message);
+    }
+  });
+}
+
+async function syncOneOtaChannel(channel: any, settings: any): Promise<{ summary: string; conflictLines: string[] }> {
   const nowIso = new Date().toISOString();
   let icsText: string;
   try {
@@ -997,7 +1027,7 @@ async function syncOneOtaChannel(channel: any): Promise<{ summary: string; confl
 
   const { data: existingRows } = await supabase
     .from('bookings')
-    .select('id, external_uid, checkin_date, checkout_date, order_number, status')
+    .select('id, external_uid, checkin_date, checkout_date, order_number, status, google_event_id')
     .eq('external_channel_id', channel.id);
 
   // 過濾規則上線前就已經被當成訂單匯入的關房事件（例如平台那筆長達數個月的「超出可預訂範圍」
@@ -1068,6 +1098,9 @@ async function syncOneOtaChannel(channel: any): Promise<{ summary: string; confl
         after: { 說明: `${channel.name}：該筆房況已從平台行事曆消失，訂單自動刪除` },
       });
     }
+    // 刪訂單之前先把它在 Google 行事曆上的事件收掉。訂單一刪，google_event_id 就跟著消失，
+    // 那個事件從此沒人認領，會一直留在行事曆上。順序反過來就補不回來了。
+    await removeGoogleEventsFor(settings, disappeared);
     await supabase.from('bookings').delete().in('id', disappeared.map((r: any) => r.id));
   }
   const removedIds = new Set(disappeared.map((r: any) => r.id));
@@ -1480,7 +1513,7 @@ async function syncCalendars(_config: Record<string, any>, settings: any): Promi
   const conflictAlerts: string[] = [];
   if (channels?.length) {
     for (const channel of channels) {
-      const { summary, conflictLines } = await syncOneOtaChannel(channel);
+      const { summary, conflictLines } = await syncOneOtaChannel(channel, settings);
       results.push(summary);
       conflictAlerts.push(...conflictLines);
     }

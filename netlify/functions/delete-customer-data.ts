@@ -2,6 +2,7 @@ import { Handler } from '@netlify/functions';
 import { createClient } from '@supabase/supabase-js';
 import { withErrorLogging } from '../../src/lib/operationLog';
 import { requirePermission } from '../../src/lib/requireRole';
+import { removeCalendarEventsForBookings } from './calendar-detach';
 
 // ========================================================================
 // 清除單一客人在系統裡的所有個資（個資法「刪除請求」用）：訂單、對話紀錄、
@@ -32,12 +33,19 @@ const rawHandler: Handler = async (event) => {
   const { lineUserId } = JSON.parse(event.body || '{}');
   if (!lineUserId || typeof lineUserId !== 'string') return { statusCode: 400, body: JSON.stringify({ error: 'lineUserId is required' }) };
 
+  // Google 行事曆沒清乾淨時，個資還是要照清（第三方服務的狀況不該卡住刪除請求），
+  // 但要把原因回報給呼叫端，才不會變成沒人知道的殘影。
+  let calendarNote = '';
+
   try {
     // 先刪訂單底下的關聯資料，再刪訂單本身，避免外鍵擋住；user_states 是這位客人的
     // 「身分」紀錄，放最後刪。任何一步找不到資料表/資料都不當成錯誤，盡量清乾淨。
     const { data: bookings } = await supabaseAdmin.from('bookings').select('id').eq('line_user_id', lineUserId);
     const bookingIds = (bookings || []).map((b: any) => b.id);
     if (bookingIds.length) {
+      // 訂單一刪，bookings.google_event_id 就跟著消失，Google 行事曆上的事件從此沒人認領、
+      // 永遠留在那裡。一定要趕在刪訂單之前把事件收掉。
+      calendarNote = (await removeCalendarEventsForBookings(supabaseAdmin, bookingIds)).note;
       await supabaseAdmin.from('booking_rooms').delete().in('booking_id', bookingIds);
       await supabaseAdmin.from('booking_room_nights').delete().in('booking_id', bookingIds);
       await supabaseAdmin.from('booking_linen_usage').delete().in('booking_id', bookingIds);
@@ -48,7 +56,7 @@ const rawHandler: Handler = async (event) => {
     const { error: stateError } = await supabaseAdmin.from('user_states').delete().eq('line_user_id', lineUserId);
     if (stateError) throw stateError;
 
-    return { statusCode: 200, body: JSON.stringify({ success: true }) };
+    return { statusCode: 200, body: JSON.stringify({ success: true, ...(calendarNote ? { calendarNote } : {}) }) };
   } catch (e: any) {
     return { statusCode: 500, body: JSON.stringify({ error: e.message || '清除失敗' }) };
   }

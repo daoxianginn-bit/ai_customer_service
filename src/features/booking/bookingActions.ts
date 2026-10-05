@@ -18,6 +18,35 @@ import { setExtraChargesPaid } from './extraChargeQueries';
 export class BookingActionError extends Error {}
 
 /**
+ * 刪訂單之前，先請後端把它在 Google 行事曆上的事件收掉。
+ *
+ * 事件 ID 存在 bookings.google_event_id，訂單一刪就跟著消失，Google 上那個事件從此沒有
+ * 任何東西指向它，不會被更新也不會被刪除，就留在行事曆上變成殘影——同一段日期之後再建
+ * 新訂單，行事曆上看起來就是重複。所以順序一定是「先刪事件、後刪訂單」：反過來的話事件
+ * 就永遠沒人認領了，而這個順序萬一訂單沒刪成功，下次同步會自己把事件補回來。
+ *
+ * 刪不掉不擋訂單刪除（Google 掛掉不該卡住日常營運），改成把原因回報出去寫進操作紀錄；
+ * 真的有漏網的，「串接管理 → Google 行事曆 → 檢查行事曆」會把它列出來。
+ */
+async function detachCalendarEvents(bookingIds: string[]): Promise<string> {
+  try {
+    const { data: sessionData } = await supabase.auth.getSession();
+    const res = await fetch('/.netlify/functions/calendar-detach', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${sessionData.session?.access_token}` },
+      body: JSON.stringify({ bookingIds }),
+    });
+    const raw = await res.text();
+    let data: any = null;
+    try { data = raw ? JSON.parse(raw) : null; } catch {}
+    if (!res.ok) return `Google 行事曆事件未刪除：${data?.error || `HTTP ${res.status}`}`;
+    return data?.note || '';
+  } catch (e: any) {
+    return `Google 行事曆事件未刪除：${e.message}`;
+  }
+}
+
+/**
  * 推進到下一關（或任何指定狀態）。推到「已預定」時必須帶匯款末5碼——那一關代表訂金已核對入帳。
  */
 export async function advanceBookingStatus(order: BookingRow, nextStatus: string, opts: { remitLast5?: string; skipExtraCharges?: boolean } = {}) {
@@ -59,6 +88,7 @@ export function cancelBooking(order: BookingRow) {
 /** 刪除是唯一救不回來的操作，異動前的內容一定要留下來，之後才查得到「被刪掉的是什麼」。 */
 export async function deleteBooking(order: BookingRow) {
   try {
+    const calendarNote = await detachCalendarEvents([order.id]);
     const { error } = await supabase.from('bookings').delete().eq('id', order.id);
     if (error) throw error;
     await logOperation({
@@ -66,7 +96,7 @@ export async function deleteBooking(order: BookingRow) {
       action: '刪除',
       target: order.order_number || order.id,
       before: labelRecord(order, ['order_number', 'name', 'phone', 'checkin_date', 'checkout_date', 'headcount', 'room_type_label', 'total_amount', 'deposit', 'status']),
-      after: null,
+      after: calendarNote ? { 注意: calendarNote } : null,
     });
   } catch (err: any) {
     await logUiError({ feature: LOG_FEATURES.order, action: '刪除失敗', target: order.order_number || null, error: err });
@@ -81,6 +111,7 @@ export async function deleteBooking(order: BookingRow) {
 export async function deleteBookings(rows: BookingRow[]) {
   const ids = rows.map((r) => r.id);
   try {
+    const calendarNote = await detachCalendarEvents(ids);
     const { error } = await supabase.from('bookings').delete().in('id', ids);
     if (error) throw error;
     await logOperation({
@@ -88,7 +119,7 @@ export async function deleteBookings(rows: BookingRow[]) {
       action: '批次刪除',
       target: `共 ${rows.length} 筆`,
       before: { 訂單編號: rows.map((r) => r.order_number || r.id).join('、') },
-      after: null,
+      after: calendarNote ? { 注意: calendarNote } : null,
     });
   } catch (err: any) {
     await logUiError({ feature: LOG_FEATURES.order, action: '批次刪除失敗', target: `共 ${ids.length} 筆`, error: err });
