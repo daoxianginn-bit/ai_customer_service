@@ -1032,8 +1032,27 @@ async function syncOneOtaChannel(channel: any): Promise<{ summary: string; confl
   // 都是 ON DELETE SET NULL，所以直接刪不會留下孤兒資料。
   //
   // 刪除救不回來，所以刪之前把內容寫進操作紀錄——那是事後唯一查得到「這幾天曾經被平台訂走」的地方。
-  const disappeared = (existingRows || []).filter(
-    (r: any) => !seenKeys.has(dateKey(r.checkin_date, r.checkout_date))
+  //
+  // 下面兩道保護在擋同一件事：不要因為「這次抓到的東西不對」或「平台不再提這一筆」就把訂單刪掉。
+  //
+  //   1. 整份 feed 一筆事件都解析不出來（平台回 200 但內容是空的、格式改了、網址被導去登入頁），
+  //      照原本的判斷等於「全部都消失了」，該頻道的訂單會被刪光；下次抓成功再重建一批全新的
+  //      訂單（order_number 都不一樣）。訂單列一刪，bookings.google_event_id 跟著消失，
+  //      Google 行事曆上那些事件就再也沒有人認領，變成永遠刪不掉的殘影。抓到 0 筆一律視為
+  //      這次同步不可信，只警告、不刪。
+  //
+  //   2. 已經退房的訂單不再跟著 feed 走。OTA 的 iCal 只列「現在到未來」的房況，客人住完那一筆
+  //      就會從 feed 裡消失——照原本的判斷，每一筆第三方訂單住完都會被自動刪除。那是已經發生的
+  //      住宿紀錄，不是可以跟著平台一起消失的鏡像資料；而且每刪一筆就在行事曆上留一個殘影，
+  //      這正是行事曆出現大量重複事件的來源。
+  //
+  // 兩道保護都只會讓「刪得比較少」，不會造成超賣：沒刪到的訂單仍然佔著房況。
+  const feedUnusable = allEvents.length === 0;
+  const todayIso = taiwanTodayIso();
+  const disappeared = feedUnusable ? [] : (existingRows || []).filter(
+    (r: any) =>
+      !seenKeys.has(dateKey(r.checkin_date, r.checkout_date)) &&
+      String(r.checkout_date ?? '').slice(0, 10) >= todayIso
   );
   if (disappeared.length) {
     for (const r of disappeared) {
@@ -1132,6 +1151,7 @@ async function syncOneOtaChannel(channel: any): Promise<{ summary: string; confl
   }
 
   const parts = [`新增 ${created} 筆`, `更新 ${updated} 筆`];
+  if (feedUnusable) parts.push('⚠️ 這次沒有解析到任何事件，已略過「來源移除」判斷，既有訂單保持不動');
   if (blockedKeys.size) parts.push(`略過關房 ${blockedKeys.size} 筆`);
   if (disappeared.length) parts.push(`來源移除 ${disappeared.length} 筆（已刪除）`);
   if (conflictLines.length) parts.push(`⚠️ ${conflictLines.length} 筆疑似撞期`);
@@ -1167,7 +1187,7 @@ function base64url(input: Buffer | string): string {
   return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
-async function getGoogleAccessToken(serviceAccountJson: string): Promise<string> {
+export async function getGoogleAccessToken(serviceAccountJson: string): Promise<string> {
   const creds = JSON.parse(serviceAccountJson);
   const now = Math.floor(Date.now() / 1000);
   const signingInput = `${base64url(JSON.stringify({ alg: 'RS256', typ: 'JWT' }))}.${base64url(
@@ -1229,12 +1249,62 @@ async function patchGoogleEvent(accessToken: string, calendarId: string, eventId
   });
 }
 
-async function deleteGoogleEvent(accessToken: string, calendarId: string, eventId: string): Promise<void> {
+export async function deleteGoogleEvent(accessToken: string, calendarId: string, eventId: string): Promise<void> {
   try {
     await googleCalendarRequest(accessToken, calendarId, 'DELETE', eventId);
   } catch (e: any) {
     if (e.status !== 404 && e.status !== 410) throw e; // 404/410＝Google 那邊已經沒有這個事件，當作成功
   }
+}
+
+export interface GoogleCalendarEvent {
+  id: string;
+  summary?: string;
+  start?: { date?: string; dateTime?: string };
+  end?: { date?: string; dateTime?: string };
+  created?: string;
+  htmlLink?: string;
+  creator?: { email?: string };
+}
+
+/**
+ * 列出行事曆在指定期間內的事件。對帳用：推送流程只會「照著訂單往 Google 寫」，
+ * 不會回頭看 Google 上實際有什麼，所以一旦訂單列被刪掉，對應的事件就沒有任何東西指向它。
+ * 要查出那些沒人認領的事件，只能反過來從 Google 這一側列出來比對。
+ *
+ * maxResults 上限是 2500，超過要用 nextPageToken 逐頁拿；fields 只要我們用得到的欄位，
+ * 回應會小很多（這支要在一次 HTTP 請求的時間內跑完）。
+ */
+export async function listGoogleEvents(
+  accessToken: string,
+  calendarId: string,
+  timeMinIso: string,
+  timeMaxIso: string
+): Promise<GoogleCalendarEvent[]> {
+  const items: GoogleCalendarEvent[] = [];
+  let pageToken: string | undefined;
+  do {
+    const params = new URLSearchParams({
+      timeMin: timeMinIso,
+      timeMax: timeMaxIso,
+      singleEvents: 'true',
+      showDeleted: 'false',
+      maxResults: '2500',
+      fields: 'nextPageToken,items(id,summary,start,end,created,htmlLink,creator)',
+    });
+    if (pageToken) params.set('pageToken', pageToken);
+    const url = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events?${params.toString()}`;
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+    if (!res.ok) {
+      const err: any = new Error(`HTTP ${res.status} ${await res.text()}`);
+      err.status = res.status;
+      throw err;
+    }
+    const data = (await res.json()) as { items?: GoogleCalendarEvent[]; nextPageToken?: string };
+    items.push(...(data.items || []));
+    pageToken = data.nextPageToken;
+  } while (pageToken);
+  return items;
 }
 
 // 每個 Google API 呼叫都要等對方回應，訂單一多、依序打就很容易超過 Netlify 單次執行的時間上限

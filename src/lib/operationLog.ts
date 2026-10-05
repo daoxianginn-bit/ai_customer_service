@@ -67,6 +67,7 @@ export const LOG_FUNCTION_NAMES = [
   'knowledge-test',
   'roles-admin',
   'booking-process',
+  'calendar-audit',
 ];
 
 /** 系統自動異動時的固定異動者名稱。 */
@@ -253,6 +254,12 @@ export function withErrorLogging(client: any, functionName: string, handler: any
           statusCode: code,
           errorMessage: extractErrorMessage(res?.body),
         });
+      }
+      // 5xx 的內文常是資料庫或程式的原始錯誤（資料表、欄位、約束名稱）。完整內容已經寫進操作紀錄，
+      // 回給呼叫端的只留通用訊息，不然任何人打這支 function 都能從錯誤訊息推出資料結構。4xx 是給使用者看的
+      // 驗證訊息（「金額要大於 0」），保留原樣。
+      if (typeof code === 'number' && code >= 500) {
+        return { ...res, body: JSON.stringify({ error: '伺服器發生錯誤，請稍後再試' }) };
       }
       return res;
     } catch (e: any) {
