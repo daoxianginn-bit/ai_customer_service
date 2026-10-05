@@ -1355,7 +1355,7 @@ async function runInBatches<T>(items: T[], concurrency: number, worker: (item: T
   }
 }
 
-async function pushBookingsToGoogleCalendar(settings: any): Promise<string> {
+export async function pushBookingsToGoogleCalendar(settings: any): Promise<string> {
   const calendarId = settings.google_calendar_id;
   const serviceAccountJson = settings.google_service_account_json;
   if (!calendarId || !serviceAccountJson) return 'Google 行事曆尚未設定，略過推送';

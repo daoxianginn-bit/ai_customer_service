@@ -3,7 +3,7 @@ import {
   Alert, Box, Button, Checkbox, Chip, CircularProgress, Link, Stack,
   Table, TableBody, TableCell, TableHead, TableRow, TextField, Typography,
 } from '@mui/material';
-import { CheckCircle2, XCircle, ClipboardCheck, ExternalLink } from 'lucide-react';
+import { CheckCircle2, XCircle, ClipboardCheck, ExternalLink, Eraser, RefreshCw } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { useSettings } from '../../lib/useSettings';
 import SettingsShell, { SettingsSection } from '../../components/ui-mui/SettingsShell';
@@ -47,18 +47,22 @@ interface AuditReport {
   failed?: { eventId: string; error: string }[];
 }
 
+interface PurgeResult { purged: number; remaining: number; failed: number; note: string }
+interface ResyncResult { resynced: boolean; summary: string }
+
 export default function GoogleCalendarSettings() {
   const s = useSettings();
   const { settings, handleChange } = s;
   const lastOk = settings?.google_calendar_last_sync_status === 'success';
   const confirm = useConfirm();
 
-  const [busy, setBusy] = useState<'' | 'check' | 'delete'>('');
+  const [busy, setBusy] = useState<'' | 'check' | 'delete' | 'purge' | 'resync'>('');
   const [report, setReport] = useState<AuditReport | null>(null);
   const [auditError, setAuditError] = useState('');
+  const [actionMsg, setActionMsg] = useState('');
   const [picked, setPicked] = useState<Set<string>>(new Set());
 
-  const callAudit = async (payload: Record<string, unknown>): Promise<AuditReport | null> => {
+  const callAudit = async (payload: Record<string, unknown>): Promise<any> => {
     const { data: sessionData } = await supabase.auth.getSession();
     const res = await fetch('/.netlify/functions/calendar-audit', {
       method: 'POST',
@@ -69,15 +73,22 @@ export default function GoogleCalendarSettings() {
     const raw = await res.text();
     let data: any = null;
     try { data = raw ? JSON.parse(raw) : null; } catch {}
-    if (!res.ok || !data) throw new Error(data?.error || `伺服器回應異常（HTTP ${res.status}）`);
-    return data as AuditReport;
+    if (!res.ok || !data) {
+      // 回應是空的通常代表這次處理的量超過伺服器單次執行上限而被中斷，不是設定錯誤。
+      // 這兩個整批操作都設計成可以重複按（接著做、不會重複），所以直接把做法講出來。
+      throw new Error(data?.error || (!raw
+        ? `伺服器回應是空的（HTTP ${res.status}）。這次要處理的筆數可能太多而超過單次執行上限，再按一次會接著處理剩下的。`
+        : `伺服器回應異常（HTTP ${res.status}）`));
+    }
+    return data;
   };
 
   const runCheck = async () => {
     setBusy('check');
     setAuditError('');
+    setActionMsg('');
     try {
-      const data = await callAudit({ action: 'check' });
+      const data: AuditReport = await callAudit({ action: 'check' });
       setReport(data);
       // 預設全部勾起來：會被列出來的都是已經確認沒有訂單對應的事件，
       // 讓使用者「取消不想刪的」比「一個一個勾」合理。
@@ -104,9 +115,76 @@ export default function GoogleCalendarSettings() {
     setBusy('delete');
     setAuditError('');
     try {
-      const data = await callAudit({ action: 'delete', eventIds: ids });
+      const data: AuditReport = await callAudit({ action: 'delete', eventIds: ids });
       setReport(data);
       setPicked(new Set((data?.orphans || []).map((o) => o.eventId)));
+    } catch (e: any) {
+      setAuditError(e.message);
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const runPurge = async () => {
+    const ok = await confirm({
+      title: '確定要清空這個 Google 行事曆嗎？',
+      message: (
+        <>
+          會把本系統推上去的訂單事件<strong>全部刪除</strong>，包含第三方平台匯入的訂單。
+          <br />
+          <br />
+          ・<strong>訂單資料不會被刪</strong>，只是從 Google 行事曆上移除，清完後按「重新同步行事曆」就會全部長回來。
+          <br />
+          ・你自己在 Google 日曆上手動建立的行程<strong>不受影響</strong>（判斷依據是事件的建立者）。
+        </>
+      ),
+      confirmLabel: '清空',
+      danger: true,
+    });
+    if (!ok) return;
+
+    setBusy('purge');
+    setAuditError('');
+    setActionMsg('');
+    try {
+      const r: PurgeResult = await callAudit({ action: 'purge' });
+      const parts = [`已從 Google 行事曆刪除 ${r.purged} 筆事件`];
+      if (r.remaining) parts.push(`還有 ${r.remaining} 筆沒處理完（單次執行時間上限），再按一次「清空現有行事曆」就會接著清`);
+      if (r.note) parts.push(r.note);
+      setActionMsg(parts.join('；'));
+      setReport(null);
+      setPicked(new Set());
+    } catch (e: any) {
+      setAuditError(e.message);
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const runResync = async () => {
+    const ok = await confirm({
+      title: '確定要重新同步整個行事曆嗎？',
+      message: (
+        <>
+          會把目前所有佔用中的訂單（直接訂房與第三方平台匯入的都算）<strong>整批重新推送</strong>到 Google 行事曆。
+          <br />
+          <br />
+          已經在行事曆上的事件會被更新成最新內容，缺的會補上。訂單筆數多的時候需要一點時間。
+        </>
+      ),
+      confirmLabel: '重新同步',
+    });
+    if (!ok) return;
+
+    setBusy('resync');
+    setAuditError('');
+    setActionMsg('');
+    try {
+      const r: ResyncResult = await callAudit({ action: 'resync' });
+      setActionMsg(`重新同步完成：${r.summary}`);
+      setReport(null);
+      setPicked(new Set());
+      await s.refetch();
     } catch (e: any) {
       setAuditError(e.message);
     } finally {
@@ -165,6 +243,35 @@ export default function GoogleCalendarSettings() {
                 判斷依據是事件的建立者：只有<strong>服務帳號建立的事件</strong>會被列入，你自己在 Google 日曆上手動加的行程不會被碰到。
               </Alert>
 
+              {/* 整批操作：清空與重新同步是一組的——清空只是把行事曆擦乾淨，訂單資料都還在，
+                  按重新同步就會依目前的訂單清單重新長回來。放在一起才看得出這層關係。 */}
+              <Box sx={{ border: 1, borderColor: 'divider', borderRadius: 1, p: 2 }}>
+                <Typography variant="subtitle2" sx={{ mb: 0.5 }}>整批操作</Typography>
+                <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+                  行事曆亂掉時的重來一次：先「清空」把系統推上去的事件全部移除，再「重新同步」依目前的訂單清單重建。兩個動作都不會更動訂單資料。
+                </Typography>
+                <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5}>
+                  <Button
+                    variant="outlined"
+                    color="error"
+                    startIcon={busy === 'purge' ? <CircularProgress size={16} color="inherit" /> : <Eraser size={18} />}
+                    onClick={runPurge}
+                    disabled={!!busy}
+                  >
+                    清空現有行事曆
+                  </Button>
+                  <Button
+                    variant="contained"
+                    startIcon={busy === 'resync' ? <CircularProgress size={16} color="inherit" /> : <RefreshCw size={18} />}
+                    onClick={runResync}
+                    disabled={!!busy}
+                  >
+                    重新同步行事曆
+                  </Button>
+                </Stack>
+              </Box>
+
+              {actionMsg && <Alert severity="success" onClose={() => setActionMsg('')}>{actionMsg}</Alert>}
               {auditError && <Alert severity="error">{auditError}</Alert>}
 
               {report && (

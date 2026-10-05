@@ -3,7 +3,10 @@ import { createClient } from '@supabase/supabase-js';
 import { withErrorLogging, writeOperationLog, LOG_FEATURES } from '../../src/lib/operationLog';
 import { requirePermission } from '../../src/lib/requireRole';
 import { OCCUPYING_STATUSES } from '../../src/lib/bookingStatus';
-import { getGoogleAccessToken, listGoogleEvents, deleteGoogleEvent, type GoogleCalendarEvent } from './scheduled-tasks-run';
+import {
+  getGoogleAccessToken, listGoogleEvents, deleteGoogleEvent,
+  pushBookingsToGoogleCalendar, type GoogleCalendarEvent,
+} from './scheduled-tasks-run';
 
 const supabase = createClient(process.env.SUPABASE_URL || '', process.env.SUPABASE_SERVICE_ROLE_KEY || '');
 
@@ -77,6 +80,8 @@ async function audit(): Promise<{
   rangeTo: string;
   calendarId: string;
   accessToken: string;
+  /** 這個行事曆上由服務帳號建立的所有事件（含有訂單認領的）。「清空行事曆」用這一份。 */
+  ours: GoogleCalendarEvent[];
 }> {
   const { data: settings } = await supabase
     .from('settings')
@@ -146,7 +151,7 @@ async function audit(): Promise<{
     }))
     .sort((a, b) => a.checkin.localeCompare(b.checkin));
 
-  return { orphans, missing, scannedEvents: events.length, ourEvents: ourEvents.length, rangeFrom, rangeTo, calendarId, accessToken };
+  return { orphans, missing, scannedEvents: events.length, ourEvents: ourEvents.length, rangeFrom, rangeTo, calendarId, accessToken, ours: ourEvents };
 }
 
 const rawHandler: Handler = async (event) => {
@@ -154,11 +159,49 @@ const rawHandler: Handler = async (event) => {
 
   let body: any = {};
   try { body = JSON.parse(event.body || '{}'); } catch { return { statusCode: 400, body: JSON.stringify({ error: '請求格式錯誤' }) }; }
-  const action = body.action === 'delete' ? 'delete' : 'check';
+  const ACTIONS = ['check', 'delete', 'purge', 'resync'] as const;
+  const action = (ACTIONS as readonly string[]).includes(body.action) ? body.action : 'check';
 
   // 看報告只要「檢視整合設定」，真的要動行事曆才需要「管理整合設定」。
-  const guard = await requirePermission(supabase, event as any, action === 'delete' ? 'integration.manage' : 'integration.view');
+  const guard = await requirePermission(supabase, event as any, action === 'check' ? 'integration.view' : 'integration.manage');
   if ('error' in guard) return { statusCode: guard.error.statusCode, body: JSON.stringify({ error: guard.error.body }) };
+
+  // ---- 重新同步：把全部訂單重推一次 ----
+  //
+  // 不另外寫一套推送邏輯，只是把所有訂單的 google_synced_at 清成 null——推送流程本來就是
+  // 「沒有 google_synced_at 或 updated_at 比它新就推」，清掉之後整批都會被視為需要重推。
+  // 這樣做還有一個好處：萬一這支 HTTP 函式跑到一半超過單次執行上限被中斷，沒推完的訂單
+  // 仍然是 null，下一次「行事曆整合同步」排程會自動把剩下的補完，不會卡在半套狀態。
+  if (action === 'resync') {
+    const { data: settings } = await supabase
+      .from('settings')
+      .select('id, google_calendar_id, google_service_account_json')
+      .limit(1)
+      .maybeSingle();
+    if (!settings?.google_calendar_id || !settings?.google_service_account_json) {
+      return { statusCode: 400, body: JSON.stringify({ error: '尚未設定 Google 行事曆 ID 或服務帳號金鑰' }) };
+    }
+
+    const { error: markError } = await supabase
+      .from('bookings')
+      .update({ google_synced_at: null })
+      .not('google_synced_at', 'is', null);
+    if (markError) return { statusCode: 500, body: JSON.stringify({ error: `標記重推失敗：${markError.message}` }) };
+
+    const summary = await pushBookingsToGoogleCalendar(settings);
+
+    await writeOperationLog(supabase, {
+      feature: LOG_FEATURES.calendarSync,
+      action: '重新同步',
+      target: 'Google 行事曆',
+      actorType: 'user',
+      actorName: guard.user.email || guard.user.id,
+      before: null,
+      after: { 說明: '管理員手動觸發整批重推', 結果: summary },
+    });
+
+    return { statusCode: 200, body: JSON.stringify({ resynced: true, summary }) };
+  }
 
   let result: Awaited<ReturnType<typeof audit>>;
   try {
@@ -177,6 +220,63 @@ const rawHandler: Handler = async (event) => {
   };
 
   if (action === 'check') return { statusCode: 200, body: JSON.stringify(report) };
+
+  // ---- 清空行事曆：把服務帳號建立的事件全部刪掉 ----
+  //
+  // 「全部」的範圍刻意只到「服務帳號建立的」為止：這個行事曆有可能同時被拿來記別的事情，
+  // 管理員自己手動加的行程不是本系統的資料，沒有立場替他清掉（判斷依據一樣是 creator.email）。
+  //
+  // 刪成功的事件要立刻把對應訂單的 google_event_id 清掉。少了這一步，萬一這次沒刪完，
+  // 下一次排程推送會對著已經不存在的事件 patch、收到 404 後重建一個——等於邊清邊長。
+  if (action === 'purge') {
+    const deleted: string[] = [];
+    const failures: string[] = [];
+
+    // Netlify 的一般函式有單次執行時間上限，事件一多就會在回應送出前被切斷（呼叫端只會收到
+    // 空白回應）。留時間預算，時間快到就先收工並回報還剩幾筆，讓管理員再按一次接著清——
+    // 每一輪都是從 Google 現況重新列出來的，接著清不會重複也不會漏。
+    const deadline = Date.now() + 7000;
+    let remaining = 0;
+
+    for (const ev of result.ours) {
+      if (Date.now() > deadline) { remaining++; continue; }
+      try {
+        await deleteGoogleEvent(result.accessToken, result.calendarId, ev.id);
+        deleted.push(ev.id);
+      } catch (e: any) {
+        failures.push(e.message);
+      }
+    }
+
+    if (deleted.length) {
+      // 分批更新：google_event_id 是用 IN 比對的，一次塞太多個值會把查詢字串撐爆。
+      for (let i = 0; i < deleted.length; i += 100) {
+        await supabase
+          .from('bookings')
+          .update({ google_event_id: null, google_synced_at: null })
+          .in('google_event_id', deleted.slice(i, i + 100));
+      }
+      await writeOperationLog(supabase, {
+        feature: LOG_FEATURES.calendarSync,
+        action: '清空行事曆',
+        target: `Google 行事曆事件 ${deleted.length} 筆`,
+        actorType: 'user',
+        actorName: guard.user.email || guard.user.id,
+        before: { 刪除筆數: deleted.length },
+        after: { 說明: '管理員手動清空；只刪除本系統（服務帳號）建立的事件，手動建立的行程未受影響' },
+      });
+    }
+
+    return {
+      statusCode: 200,
+      body: JSON.stringify({
+        purged: deleted.length,
+        remaining,
+        failed: failures.length,
+        note: failures.length ? `${failures.length} 筆刪除失敗：${failures.slice(0, 2).join('；')}` : '',
+      }),
+    };
+  }
 
   // ---- 刪除 ----
   const requested: string[] = Array.isArray(body.eventIds) ? body.eventIds.filter((x: any) => typeof x === 'string') : [];
