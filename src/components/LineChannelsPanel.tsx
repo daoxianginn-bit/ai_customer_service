@@ -229,6 +229,7 @@ export default function LineChannelsPanel() {
             type="password"
             value={form.value.channel_access_token}
             onChange={(e) => form.setValue({ ...form.value, channel_access_token: e.target.value })}
+            helperText="LINE Developers Console →（這個帳號的）Messaging API 分頁 → 最下方 Channel access token (long-lived) 按 Issue／Reissue。注意 Reissue 會讓舊的立刻失效。"
           />
           <TextField
             label="Channel Secret"
@@ -236,7 +237,7 @@ export default function LineChannelsPanel() {
             type="password"
             value={form.value.channel_secret}
             onChange={(e) => form.setValue({ ...form.value, channel_secret: e.target.value })}
-            helperText="用來驗證 webhook 請求真的來自 LINE，填錯的話這個帳號會完全收不到訊息。"
+            helperText="在 Basic settings 分頁最下方，跟上面的 token 不同頁，而且必須是同一個 channel 的。用來驗證 webhook 請求真的來自 LINE，填錯的話這個帳號會完全收不到訊息。"
           />
           <Stack direction="row" alignItems="center" spacing={1}>
             <Switch
