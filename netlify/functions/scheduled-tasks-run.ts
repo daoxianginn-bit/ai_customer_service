@@ -1390,7 +1390,7 @@ const GOOGLE_SYNC_CONCURRENCY = 6;
 
 // 事件標題/內容的格式版本。改了 summary/description 的組法就把這個數字加一，
 // 下一次同步會忽略「這張訂單沒異動」的判斷、整批重推一次，讓行事曆上既有的事件跟著換成新格式。
-const GOOGLE_EVENT_FORMAT_VERSION = 2;
+const GOOGLE_EVENT_FORMAT_VERSION = 3;
 
 async function runInBatches<T>(items: T[], concurrency: number, worker: (item: T) => Promise<void>): Promise<void> {
   for (let i = 0; i < items.length; i += concurrency) {
@@ -1455,26 +1455,27 @@ async function pushBookingsToGoogleCalendar(settings: any): Promise<string> {
     const sourcePrefix = isExternal ? `【${platformLabel}】` : '';
     const hasRealName = isExternal && b.name && b.name !== `${platformLabel} 訂單`;
     const code = b.external_confirmation_code ? ` (${b.external_confirmation_code})` : '';
-    // 標題＝訂單編號 姓名 人數人（例：Z12AX9 王XX 10人）。本地訂單不再加【Line】前綴——
-    // 我們自己的訂單編號本來就認得出來，前綴只是在標題最前面佔位；第三方訂單仍保留平台前綴，
-    // 因為那是分辨檔期來源的唯一線索。
+    // 標題＝姓名 人數人（例：王XX 10人）。訂單編號移到內容裡——行事曆的月檢視一格就那麼寬，
+    // 編號擺在最前面會把真正要一眼看到的姓名與人數擠掉，而查編號的時候本來就會點開事件。
+    // 本地訂單不加【Line】前綴；第三方訂單仍保留平台前綴，那是分辨檔期來源的唯一線索。
     const who = `${b.name || b.nickname || '未填姓名'}${b.headcount != null ? ` ${b.headcount}人` : ''}`;
-    const orderNo = b.order_number ? `${b.order_number} ` : '';
     const summaryParts = isExternal
       ? [`${sourcePrefix}${hasRealName ? `${b.name}${b.headcount ? ` ${b.headcount}人` : ''}` : '已預訂'}${code}`]
-      : [`${orderNo}${who}`];
+      : [who];
     if ((!isExternal || hasRealName) && b.whole_house) summaryParts.push('·包棟');
     if (!isExternal && !BALANCE_PAID_STATUSES.includes(b.status)) summaryParts.push(' ⚠️尾款未收');
     if (b.ota_conflict_detected_at) summaryParts.push(' ⚠️疑似撞期');
     const summary = summaryParts.join('');
 
-    // 內容只留房型與備註：訂單編號、姓名、人數都已經在標題上，在內容再列一次只是把
-    // 行事曆的預覽卡片撐長。第三方訂單另外帶來源平台與平台訂單編號——那兩項標題塞不下。
+    // 內容＝訂單編號、房型、備註。姓名與人數已經在標題上，不在這裡重複。
+    // 訂單編號放在房型上面：要回後台查這筆訂單時，編號是唯一拿得到的入口。
+    // 第三方訂單另外帶來源平台與平台訂單編號——那兩項標題塞不下。
     const descParts: string[] = [];
     if (isExternal) {
       descParts.push(`來源平台: ${platformLabel}`);
       if (b.external_confirmation_code) descParts.push(`平台訂單編號: ${b.external_confirmation_code}`);
     }
+    if (b.order_number) descParts.push(`訂單編號：${b.order_number}`);
     descParts.push(`房型：${b.room_type_label || (b.whole_house ? '包棟' : '')}`);
     descParts.push(`備註：${b.notes || ''}`);
 
