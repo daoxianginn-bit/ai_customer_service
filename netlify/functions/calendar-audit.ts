@@ -5,7 +5,7 @@ import { requirePermission } from '../../src/lib/requireRole';
 import { OCCUPYING_STATUSES } from '../../src/lib/bookingStatus';
 import {
   getGoogleAccessToken, listGoogleEvents, deleteGoogleEvent,
-  pushBookingsToGoogleCalendar, type GoogleCalendarEvent,
+  syncCalendars, type GoogleCalendarEvent,
 } from './scheduled-tasks-run';
 
 const supabase = createClient(process.env.SUPABASE_URL || '', process.env.SUPABASE_SERVICE_ROLE_KEY || '');
@@ -166,12 +166,15 @@ const rawHandler: Handler = async (event) => {
   const guard = await requirePermission(supabase, event as any, action === 'check' ? 'integration.view' : 'integration.manage');
   if ('error' in guard) return { statusCode: guard.error.statusCode, body: JSON.stringify({ error: guard.error.body }) };
 
-  // ---- 重新同步：把全部訂單重推一次 ----
+  // ---- 重新同步：重抓第三方平台，再把全部訂單重推一次 ----
   //
-  // 不另外寫一套推送邏輯，只是把所有訂單的 google_synced_at 清成 null——推送流程本來就是
-  // 「沒有 google_synced_at 或 updated_at 比它新就推」，清掉之後整批都會被視為需要重推。
-  // 這樣做還有一個好處：萬一這支 HTTP 函式跑到一半超過單次執行上限被中斷，沒推完的訂單
-  // 仍然是 null，下一次「行事曆整合同步」排程會自動把剩下的補完，不會卡在半套狀態。
+  // 跑的就是「行事曆整合同步」排程本身那一套（syncCalendars）：先把各 OTA 頻道的 iCal 重新
+  // 抓一次更新訂單，再推送到 Google。不另外寫一份，否則兩邊的行為遲早會各走各的。
+  //
+  // 推送前先把所有訂單的 google_synced_at 清成 null：推送流程本來就是「沒有 google_synced_at
+  // 或 updated_at 比它新就推」，清掉之後整批都會被視為需要重推，不必為了「強制」再開一個參數。
+  // 這樣做還有一個好處——萬一這支 HTTP 函式跑到一半超過單次執行上限被中斷，沒推完的訂單仍然
+  // 是 null，下一次排程會自動把剩下的補完，不會卡在半套狀態。
   if (action === 'resync') {
     const { data: settings } = await supabase
       .from('settings')
@@ -188,7 +191,7 @@ const rawHandler: Handler = async (event) => {
       .not('google_synced_at', 'is', null);
     if (markError) return { statusCode: 500, body: JSON.stringify({ error: `標記重推失敗：${markError.message}` }) };
 
-    const summary = await pushBookingsToGoogleCalendar(settings);
+    const { ok, summary } = await syncCalendars({}, settings);
 
     await writeOperationLog(supabase, {
       feature: LOG_FEATURES.calendarSync,
@@ -197,10 +200,10 @@ const rawHandler: Handler = async (event) => {
       actorType: 'user',
       actorName: guard.user.email || guard.user.id,
       before: null,
-      after: { 說明: '管理員手動觸發整批重推', 結果: summary },
+      after: { 說明: '管理員手動觸發：重抓第三方平台並整批重推', 結果: summary },
     });
 
-    return { statusCode: 200, body: JSON.stringify({ resynced: true, summary }) };
+    return { statusCode: 200, body: JSON.stringify({ resynced: ok, summary }) };
   }
 
   let result: Awaited<ReturnType<typeof audit>>;

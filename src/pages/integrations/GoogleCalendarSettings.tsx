@@ -166,10 +166,15 @@ export default function GoogleCalendarSettings() {
       title: '確定要重新同步整個行事曆嗎？',
       message: (
         <>
-          會把目前所有佔用中的訂單（直接訂房與第三方平台匯入的都算）<strong>整批重新推送</strong>到 Google 行事曆。
+          跟「自動化排程 → 行事曆整合同步」做的事情完全一樣，只是現在就跑：
           <br />
           <br />
-          已經在行事曆上的事件會被更新成最新內容，缺的會補上。訂單筆數多的時候需要一點時間。
+          1. <strong>重新抓一次各第三方平台的 iCal</strong>，更新訂單（平台上新增的會進來，已取消的未來檔期會移除）
+          <br />
+          2. 把所有佔用中的訂單<strong>整批重新推送</strong>到 Google 行事曆
+          <br />
+          <br />
+          第 1 步會更動訂單資料；若偵測到新的疑似撞期，也會照常通知客服。訂單筆數多的時候需要一點時間。
         </>
       ),
       confirmLabel: '重新同步',
@@ -248,7 +253,7 @@ export default function GoogleCalendarSettings() {
               <Box sx={{ border: 1, borderColor: 'divider', borderRadius: 1, p: 2 }}>
                 <Typography variant="subtitle2" sx={{ mb: 0.5 }}>整批操作</Typography>
                 <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
-                  行事曆亂掉時的重來一次：先「清空」把系統推上去的事件全部移除，再「重新同步」依目前的訂單清單重建。兩個動作都不會更動訂單資料。
+                  行事曆亂掉時的重來一次：先「清空」把系統推上去的事件全部移除，再「重新同步」重抓第三方平台並依訂單清單重建。清空不會更動訂單資料；重新同步會依平台最新狀況更新第三方訂單。
                 </Typography>
                 <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5}>
                   <Button

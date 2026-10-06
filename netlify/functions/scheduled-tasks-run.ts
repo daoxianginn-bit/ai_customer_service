@@ -1355,7 +1355,7 @@ async function runInBatches<T>(items: T[], concurrency: number, worker: (item: T
   }
 }
 
-export async function pushBookingsToGoogleCalendar(settings: any): Promise<string> {
+async function pushBookingsToGoogleCalendar(settings: any): Promise<string> {
   const calendarId = settings.google_calendar_id;
   const serviceAccountJson = settings.google_service_account_json;
   if (!calendarId || !serviceAccountJson) return 'Google 行事曆尚未設定，略過推送';
@@ -1501,7 +1501,7 @@ export async function pushBookingsToGoogleCalendar(settings: any): Promise<strin
 // （不分來源的完整佔用狀態）再一次推送到 Google 行事曆。兩步驟包在同一個排程類型裡，
 // 管理員只要設定一筆排程（建議每 15~30 分鐘）就能同時涵蓋「匯入」跟「同步到 Google」，
 // 不用自己再另外排一個順序、猜兩個排程誰先跑。
-async function syncCalendars(_config: Record<string, any>, settings: any): Promise<{ ok: boolean; summary: string }> {
+export async function syncCalendars(_config: Record<string, any>, settings: any): Promise<{ ok: boolean; summary: string }> {
   const { data: channels, error } = await supabase
     .from('ota_channels')
     .select('*')
