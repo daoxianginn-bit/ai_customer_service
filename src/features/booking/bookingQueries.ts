@@ -162,6 +162,45 @@ export async function fetchRooms(): Promise<RoomOption[]> {
   return (data || []) as RoomOption[];
 }
 
+export interface LineContact {
+  lineUserId: string;
+  nickname: string | null;
+  lastMessageAt: string | null;
+}
+
+/**
+ * 人工建單時可以選的 LINE 聯絡人。
+ *
+ * 只取「客戶用」官方帳號底下的人：訂單上的 line_user_id 指的是訂房客人，廠商帳號與內部
+ * 帳號的聯絡人放進來只會讓清單變難找。LINE 的 user ID 是跟著官方帳號走的（同一個人在不同
+ * 官方帳號是不同 ID），所以不能跨頻道混在一起比對。
+ *
+ * 依最後發言時間排序並設上限：這是一個給人挑的下拉選單，最近聊過的才是會被選到的那些；
+ * 真的要找很久以前的客人，欄位仍然可以直接貼 user ID（見 BookingEditDialog 的 freeSolo）。
+ */
+export async function fetchLineContacts(): Promise<LineContact[]> {
+  const { data: channels } = await supabase
+    .from('line_channels')
+    .select('id')
+    .eq('role', 'customer')
+    .eq('is_active', true);
+  const channelIds = (channels || []).map((c: any) => c.id);
+  if (!channelIds.length) return [];
+
+  const { data } = await supabase
+    .from('user_states')
+    .select('line_user_id, nickname, last_message_at')
+    .in('channel_id', channelIds)
+    .order('last_message_at', { ascending: false, nullsFirst: false })
+    .limit(1000);
+
+  return (data || []).map((r: any) => ({
+    lineUserId: r.line_user_id,
+    nickname: r.nickname,
+    lastMessageAt: r.last_message_at,
+  }));
+}
+
 /** 押金與訂金比例的預設值來自「訂房規則」，人工建單按「重算」會套用同一套算法，跟 LINE 自動報價一致。 */
 export async function fetchMoneyDefaults(): Promise<{ wholeHouseSecurity: number; percent: number }> {
   const { data } = await supabase.from('operational_settings').select('whole_house_security_deposit, deposit_percent').single();

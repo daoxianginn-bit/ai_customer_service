@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import {
-  Alert, Box, Button, Chip, Dialog, DialogActions, DialogContent, DialogTitle, Divider, FormControlLabel,
+  Alert, Autocomplete, Box, Button, Chip, Dialog, DialogActions, DialogContent, DialogTitle, Divider, FormControlLabel,
   Grid, IconButton, Link, MenuItem, Paper, Stack, Checkbox, Table, TableBody, TableCell, TableFooter,
   TableHead, TableRow, TextField, Tooltip, Typography, type TextFieldProps,
 } from '@mui/material';
-import { RefreshCw, X } from 'lucide-react';
+import { useSnackbar } from 'notistack';
+import { Plus, RefreshCw, X } from 'lucide-react';
+import { isBlankExtraChargeInput, remainingExtraChargeSlots, validateExtraChargeInput } from '../../lib/extraCharges';
 import {
   BOOKING_STATUS_OPTIONS, SYSTEM_ONLY_STATUSES, REQUIRES_REMIT_LAST5_STATUS, CHECKIN_PASSWORD_STATUSES,
   FLOW_STEP_STATUSES, flowStepIndex, bookingStatusLabel, nextFlowStatus, MANUAL_ACTION_STATUSES,
@@ -19,8 +21,10 @@ import { formatDateTime, formatMoney } from '../../lib/format';
 import { useBreakpoint } from '../../app/useBreakpoint';
 import { usePermission } from '../../app/Can';
 import StatusBadge from '../../components/ui-mui/StatusBadge';
-import { fetchLinenSetup, fetchMoneyDefaults, fetchRooms, fetchBookingLinen, type BookingRow } from './bookingQueries';
+import { fetchLinenSetup, fetchMoneyDefaults, fetchRooms, fetchBookingLinen, fetchLineContacts, type BookingRow, type LineContact } from './bookingQueries';
 import { logBookingSaveFailed, logBookingSaved, saveBookingLinen, upsertBooking } from './bookingActions';
+import { addExtraCharges } from './extraChargeQueries';
+import ExtraChargesSection from './ExtraChargesSection';
 
 // ========================================================================
 // 訂單編輯對話框（V2 §22、§97）。從舊的 OrderManagement.tsx 抽出來，表單狀態、金額重算、
@@ -104,6 +108,11 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
   );
 }
 
+// 新增訂單時還沒有訂單編號可掛，追加款先暫存在表單裡，訂單存好之後才送出
+interface PendingExtra { key: number; title: string; amount: string; note: string }
+let pendingExtraKey = 0;
+const emptyPendingExtra = (): PendingExtra => ({ key: ++pendingExtraKey, title: '', amount: '', note: '' });
+
 interface Props {
   open: boolean;
   /** null＝新增訂單 */
@@ -117,6 +126,10 @@ export default function BookingEditDialog({ open, booking, onClose, onSaved }: P
   // 狀態相關的按鈕依權限顯示：推進／指定狀態＝確認付款、取消＝取消訂單；沒有權限的人只能改資料
   const canAdvance = usePermission('booking.payment.verify');
   const canCancel = usePermission('booking.cancel');
+  const canEditOrder = usePermission('booking.edit');
+  const canAddExtras = canEditOrder || canAdvance;
+  const { enqueueSnackbar } = useSnackbar();
+  const [newExtras, setNewExtras] = useState<PendingExtra[]>([emptyPendingExtra()]);
   const editingId = booking?.id ?? null;
 
   // 查詢用的參考資料：房間、布巾、押金／訂金比例預設。掛載時抓一次，之後每次開啟共用。
@@ -124,15 +137,17 @@ export default function BookingEditDialog({ open, booking, onClose, onSaved }: P
   const [linenItems, setLinenItems] = useState<LinenItem[]>([]);
   const [linenDefaults, setLinenDefaults] = useState<RoomLinenDefault[]>([]);
   const [moneyDefaults, setMoneyDefaults] = useState({ wholeHouseSecurity: 3000, percent: 30 });
+  const [lineContacts, setLineContacts] = useState<LineContact[]>([]);
   const [lookupsReady, setLookupsReady] = useState(false);
 
   useEffect(() => {
     (async () => {
-      const [r, linen, money] = await Promise.all([fetchRooms(), fetchLinenSetup(), fetchMoneyDefaults()]);
+      const [r, linen, money, contacts] = await Promise.all([fetchRooms(), fetchLinenSetup(), fetchMoneyDefaults(), fetchLineContacts()]);
       setRooms(r);
       setLinenItems(linen.items);
       setLinenDefaults(linen.defaults);
       setMoneyDefaults(money);
+      setLineContacts(contacts);
       setLookupsReady(true);
     })();
   }, []);
@@ -156,6 +171,7 @@ export default function BookingEditDialog({ open, booking, onClose, onSaved }: P
     if (initialisedKey.current === key) return;
     initialisedKey.current = key;
     setFormError('');
+    setNewExtras([emptyPendingExtra()]);
     if (booking) {
       originalRef.current = booking;
       setForm(rowToForm(booking));
@@ -239,6 +255,14 @@ export default function BookingEditDialog({ open, booking, onClose, onSaved }: P
       setFormError('狀態改成「已預定」時，請先填寫匯款末5碼再儲存。');
       return;
     }
+    // 新增訂單順便填的追加款：先驗好，有錯就擋在這裡，不要訂單建起來了追加款才發現填錯
+    const extraRows = editingId || !canAddExtras
+      ? []
+      : newExtras.filter((r) => !isBlankExtraChargeInput({ title: r.title, amount: r.amount, internal_note: r.note }));
+    for (const r of extraRows) {
+      const e = validateExtraChargeInput({ title: r.title, amount: r.amount });
+      if (e) { setFormError(`追加款：${e.title || e.amount}`); return; }
+    }
     setSaving(true);
     setFormError('');
     try {
@@ -286,6 +310,14 @@ export default function BookingEditDialog({ open, booking, onClose, onSaved }: P
       const { id, orderNumber } = await upsertBooking(editingId, payload);
       await saveBookingLinen(id, selectedRoomIds, usageRows, linenItems.length > 0);
       await logBookingSaved({ editingId, original: originalRef.current, payload, orderNumber: editingId ? (form.order_number || '') : orderNumber });
+      if (extraRows.length) {
+        try {
+          await addExtraCharges(id, extraRows.map((r) => ({ title: r.title.trim(), amount: Number(r.amount), internal_note: r.note.trim() || null, paid: false })));
+        } catch (err: any) {
+          // 訂單已經建好，不能因為這裡失敗就當整筆沒存；提醒去詳情頁補登
+          enqueueSnackbar(`訂單已建立，但追加款沒有存進去（${err.message}），請到訂單詳情的「追加款明細」補登。`, { variant: 'warning' });
+        }
+      }
       onSaved(id);
     } catch (err: any) {
       setFormError(`儲存失敗：${err.message}`);
@@ -410,8 +442,60 @@ export default function BookingEditDialog({ open, booking, onClose, onSaved }: P
                       <TextField fullWidth size="small" label="訂單編號" value={editingId ? form.order_number || '' : '（儲存後自動產生）'} disabled />
                     </Grid>
                     <Grid item xs={12} sm={6}>
-                      {/* 只有新增訂單時能填；訂單一旦建立就鎖住——LINE user ID 決定這張訂單屬於哪位聯絡人。 */}
-                      {field('line_user_id', 'LINE User ID', { disabled: !!editingId, placeholder: '非 LINE 客戶可留空' })}
+                      {/* 只有新增訂單時能填；訂單一旦建立就鎖住——LINE user ID 決定這張訂單屬於哪位聯絡人。
+                          下拉選單顯示暱稱（user ID 是一長串亂碼，沒有人認得出哪個是誰），選到誰就把
+                          暱稱一併帶進下面的欄位。freeSolo 保留直接貼 user ID 的做法：清單只收最近
+                          互動的聯絡人，很久沒聊的客人或還沒傳過訊息的人不會在裡面。 */}
+                      <Autocomplete
+                        freeSolo
+                        disabled={!!editingId}
+                        options={lineContacts}
+                        // 比對得到聯絡人就把「物件」交給 Autocomplete，輸入框才會顯示暱稱；
+                        // 直接給字串的話顯示出來的是 user ID 那串亂碼，等於白做。
+                        value={lineContacts.find((c) => c.lineUserId === form.line_user_id) ?? form.line_user_id}
+                        isOptionEqualToValue={(o, v) => o.lineUserId === (typeof v === 'string' ? v : v.lineUserId)}
+                        getOptionLabel={(o) => (typeof o === 'string' ? o : o.nickname || o.lineUserId)}
+                        filterOptions={(opts, state) => {
+                          const kw = state.inputValue.trim().toLowerCase();
+                          if (!kw) return opts.slice(0, 50);
+                          return opts
+                            .filter((o) => (o.nickname || '').toLowerCase().includes(kw) || o.lineUserId.toLowerCase().includes(kw))
+                            .slice(0, 50);
+                        }}
+                        onChange={(_e, picked) => {
+                          if (!picked) { setForm({ ...form, line_user_id: '' }); return; }
+                          if (typeof picked === 'string') { setForm({ ...form, line_user_id: picked.trim() }); return; }
+                          setForm({ ...form, line_user_id: picked.lineUserId, nickname: picked.nickname || form.nickname });
+                        }}
+                        onInputChange={(_e, text, reason) => {
+                          // 使用者自己打字時才同步回表單；reset 是選取後元件自己把輸入框換成標籤文字，
+                          // 跟著寫回去會把 user ID 覆蓋成暱稱。
+                          if (reason === 'input') setForm({ ...form, line_user_id: text.trim() });
+                        }}
+                        renderOption={(props, o) => (
+                          <li {...props} key={o.lineUserId}>
+                            <Box>
+                              <Typography variant="body2">{o.nickname || '（沒有暱稱）'}</Typography>
+                              <Typography variant="caption" color="text.secondary" sx={{ fontFamily: 'monospace' }}>{o.lineUserId}</Typography>
+                            </Box>
+                          </li>
+                        )}
+                        renderInput={(params) => (
+                          <TextField
+                            {...params}
+                            fullWidth
+                            size="small"
+                            label="LINE 聯絡人"
+                            placeholder="非 LINE 客戶可留空"
+                            helperText={editingId ? undefined : '選暱稱即可，也可以直接貼 LINE User ID'}
+                          />
+                        )}
+                      />
+                      {!editingId && !!form.line_user_id && (
+                        <Typography variant="caption" color="text.secondary" sx={{ fontFamily: 'monospace', wordBreak: 'break-all' }}>
+                          {form.line_user_id}
+                        </Typography>
+                      )}
                     </Grid>
                     <Grid item xs={12} sm={6}>{field('name', '客戶姓名')}</Grid>
                     <Grid item xs={12} sm={6}>{field('nickname', 'LINE 暱稱')}</Grid>
@@ -509,6 +593,36 @@ export default function BookingEditDialog({ open, booking, onClose, onSaved }: P
                     <Grid item xs={12}>{field('notes', '內部備註', { multiline: true, minRows: 3, placeholder: '內部備註，客戶不會看到' })}</Grid>
                   </Grid>
                 </Section>
+
+                {booking ? (
+                  <Section title="追加款明細">
+                    <ExtraChargesSection booking={booking} onChanged={() => {}} />
+                  </Section>
+                ) : canAddExtras && (
+                  <Section title="追加款（選填）">
+                    <Stack spacing={1}>
+                      <Typography variant="caption" color="text.secondary">
+                        訂單成立時就要加收的項目（烤肉用具、加床…）。「追加名稱」客人會看到；金額會併進尾款。
+                      </Typography>
+                      {newExtras.map((r) => (
+                        <Stack key={r.key} direction={isMobile ? 'column' : 'row'} spacing={1} alignItems={isMobile ? 'stretch' : 'flex-start'}>
+                          <TextField size="small" label="追加名稱" value={r.title} inputProps={{ maxLength: 60 }} sx={{ flex: 2 }}
+                            onChange={(e) => setNewExtras((prev) => prev.map((x) => (x.key === r.key ? { ...x, title: e.target.value } : x)))} />
+                          <TextField size="small" label="金額 NT$" value={r.amount} inputProps={{ inputMode: 'numeric' }} sx={{ width: isMobile ? '100%' : 140 }}
+                            onChange={(e) => setNewExtras((prev) => prev.map((x) => (x.key === r.key ? { ...x, amount: e.target.value.replace(/[^\d]/g, '') } : x)))} />
+                          <TextField size="small" label="內部備註（選填）" value={r.note} sx={{ flex: 1.5 }}
+                            onChange={(e) => setNewExtras((prev) => prev.map((x) => (x.key === r.key ? { ...x, note: e.target.value } : x)))} />
+                          <IconButton size="small" aria-label="刪除這一列" sx={{ mt: isMobile ? 0 : 0.5, alignSelf: isMobile ? 'flex-end' : undefined }}
+                            onClick={() => setNewExtras((prev) => (prev.length > 1 ? prev.filter((x) => x.key !== r.key) : [emptyPendingExtra()]))}><X size={16} /></IconButton>
+                        </Stack>
+                      ))}
+                      <Box>
+                        <Button size="small" startIcon={<Plus size={16} />} disabled={newExtras.length >= remainingExtraChargeSlots([])}
+                          onClick={() => setNewExtras((prev) => [...prev, emptyPendingExtra()])}>新增一列</Button>
+                      </Box>
+                    </Stack>
+                  </Section>
+                )}
 
                 {linenItems.length > 0 && (
                   <Section title="布巾備品洗滌成本">
