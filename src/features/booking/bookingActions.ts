@@ -128,6 +128,55 @@ export async function deleteBookings(rows: BookingRow[]) {
 }
 
 /**
+ * 批次建立訂單。一筆一筆建而不是一次 insert 一整批：訂單編號是前端產生的，撞到唯一鍵要換
+ * 一組重試（見 upsertBooking），整批一次送的話一筆撞號會讓其他筆跟著失敗。
+ *
+ * 失敗的那幾筆不會擋住其他筆——這是匯入既有資料的場景，為了一筆格式問題把三十筆全部退回，
+ * 使用者只會更難收拾。做完回報哪幾列失敗、原因是什麼。
+ *
+ * 操作紀錄寫一筆就好。拆成每張單一筆的話，一次匯入三十張就把整頁紀錄洗掉，
+ * 反而看不出「這是同一次批次操作」——跟 deleteBookings 同一個考量。
+ */
+export async function createBookingsBatch(
+  entries: { lineNo: number; payload: Record<string, unknown> }[]
+): Promise<{ created: number; failed: { lineNo: number; error: string }[] }> {
+  const created: string[] = [];
+  const failed: { lineNo: number; error: string }[] = [];
+
+  for (const entry of entries) {
+    try {
+      const { orderNumber } = await upsertBooking(null, entry.payload);
+      created.push(orderNumber);
+    } catch (err: any) {
+      failed.push({ lineNo: entry.lineNo, error: err?.message || '未知錯誤' });
+    }
+  }
+
+  if (created.length) {
+    await logOperation({
+      feature: LOG_FEATURES.order,
+      action: '批次新增',
+      target: `共 ${created.length} 筆`,
+      before: null,
+      after: {
+        訂單編號: created.join('、'),
+        ...(failed.length ? { 失敗: `第 ${failed.map((f) => f.lineNo).join('、')} 列未建立` } : {}),
+      },
+    });
+  }
+  if (failed.length && !created.length) {
+    await logUiError({
+      feature: LOG_FEATURES.order,
+      action: '批次新增失敗',
+      target: `共 ${failed.length} 筆`,
+      error: new Error(failed.map((f) => `第 ${f.lineNo} 列：${f.error}`).join('；')),
+    });
+  }
+
+  return { created: created.length, failed };
+}
+
+/**
  * 新增或更新訂單本體。新增時訂單編號由前端產生，撞到唯一鍵就換一組重試（最多 3 次）。
  * 回傳訂單 id 與（新增時）產生的訂單編號。
  */

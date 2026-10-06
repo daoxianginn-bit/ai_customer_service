@@ -5,7 +5,7 @@ import {
   TextField, Tooltip, Typography,
 } from '@mui/material';
 import { useSnackbar } from 'notistack';
-import { ChevronLeft, ChevronRight, ListFilter, Pencil, Plus, RefreshCw, RotateCcw, Search, Trash2 } from 'lucide-react';
+import { ChevronLeft, ChevronRight, ListFilter, Pencil, Plus, RefreshCw, RotateCcw, Rows, Search, Trash2 } from 'lucide-react';
 import {
   BOOKING_STATUS_OPTIONS, SYSTEM_ONLY_STATUSES, FLOW_STEP_STATUSES, MANUAL_ACTION_FLOW_STATUSES, MANUAL_ACTION_STATUSES,
   bookingStatusLabel, nextFlowStatus,
@@ -26,6 +26,7 @@ import {
 } from './bookingQueries';
 import { deleteBooking, deleteBookings } from './bookingActions';
 import BookingEditDialog from './BookingEditDialog';
+import BatchCreateDialog from './BatchCreateDialog';
 import AdvanceStatusDialog from './AdvanceStatusDialog';
 
 // ========================================================================
@@ -169,6 +170,8 @@ export default function BookingListPage() {
     }
   };
 
+  const [batchOpen, setBatchOpen] = useState(false);
+
   const openNew = () => setEditing({ open: true, booking: null });
   const openEdit = (row: BookingRow) => setEditing({ open: true, booking: row });
 
@@ -304,9 +307,16 @@ export default function BookingListPage() {
     <Box>
       <PageHeaderV2
         action={
-          <Can permission="booking.create">
-            {isMobile ? null : <Button variant="contained" startIcon={<Plus size={16} />} onClick={openNew}>新增訂單</Button>}
-          </Can>
+          <Stack direction="row" spacing={1}>
+            {/* 批次匯入一次寫入幾十張訂單，弄錯要一筆一筆刪回去，所以綁在「管理系統設定」
+                權限上，不開給日常客服。 */}
+            <Can permission="system.manage">
+              {isMobile ? null : <Button variant="outlined" startIcon={<Rows size={16} />} onClick={() => setBatchOpen(true)}>批次新建訂單</Button>}
+            </Can>
+            <Can permission="booking.create">
+              {isMobile ? null : <Button variant="contained" startIcon={<Plus size={16} />} onClick={openNew}>新增訂單</Button>}
+            </Can>
+          </Stack>
         }
         secondary={
           <Tooltip title="重新整理"><IconButton onClick={() => load()} aria-label="重新整理"><RefreshCw size={18} /></IconButton></Tooltip>
@@ -484,6 +494,12 @@ export default function BookingListPage() {
       )}
 
       <BookingEditDialog open={editing.open} booking={editing.booking} onClose={closeDialog} onSaved={onSaved} />
+
+      <BatchCreateDialog
+        open={batchOpen}
+        onClose={() => setBatchOpen(false)}
+        onCreated={(n) => { enqueueSnackbar(`已批次建立 ${n} 筆訂單`, { variant: 'success' }); load({ silent: true }); }}
+      />
       <AdvanceStatusDialog target={advanceTarget} onClose={() => setAdvanceTarget(null)} onDone={onAdvanced} />
     </Box>
   );
