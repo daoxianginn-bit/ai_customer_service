@@ -23,7 +23,14 @@
 
 import { ParsedIcsEvent } from './icsParser';
 
-export type OtaEventKind = 'reservation' | 'block';
+/**
+ * reservation 真訂單／block 關房（這幾天不能訂）／cancelled 平台已取消的訂單。
+ *
+ * cancelled 一定要跟 block 分開：關房代表「這段日期仍然不能賣」，所以對應的訂單要留著佔房；
+ * 取消代表「這段日期回到可以賣的狀態」，對應的訂單必須移除，否則房況被一筆不存在的訂單鎖住，
+ * 而且那筆假訂單會跟著被推上 Google 行事曆、算進成本統計。
+ */
+export type OtaEventKind = 'reservation' | 'block' | 'cancelled';
 
 export interface OtaEventClassification {
   kind: OtaEventKind;
@@ -31,9 +38,25 @@ export interface OtaEventClassification {
   confirmationCode: string | null;
   /** 平台願意提供的聯絡資訊片段（Airbnb 只給電話末 4 碼），供人工比對用。撈不到就是 null。 */
   phoneLast4: string | null;
-  /** 判定成關房時，是被哪一條規則擋下的，寫進同步摘要供人工追查。 */
+  /** 判定成關房／取消時，是被哪一條規則擋下的，寫進同步摘要供人工追查。 */
   blockedReason: string | null;
 }
+
+/**
+ * 取消的字樣。只用來「不要建立訂單」，不會據此刪除既有訂單——刪除只認 STATUS:CANCELLED
+ * 那個 RFC 定義的明確標記。
+ *
+ * 理由是誤判的代價不對稱：把真訂單誤判成取消會把已經賣掉的日期釋放出來，造成超賣；
+ * 而字面比對永遠有誤判的可能（客人姓名、備註都可能出現這些字）。所以字樣只負責「不收」，
+ * 「移除」留給平台自己講清楚的那個欄位。
+ */
+const CANCEL_KEYWORDS = [
+  'cancelled',
+  'canceled',
+  'cancellation',
+  '已取消',
+  '取消',
+];
 
 /**
  * 所有平台共用的關房字樣。比對時一律轉小寫，所以這裡只寫小寫。
@@ -95,6 +118,13 @@ export function classifyOtaEvent(
 ): OtaEventClassification {
   const rule = PLATFORM_RULES[platform] || {};
 
+  // 第零層：平台自己說這筆取消了。這是 RFC 5545 定義的欄位，不是猜的，所以放在白名單之前——
+  // 取消掉的訂單身上通常還留著原本的訂單識別資訊（Airbnb 的 Reservation URL 就是），
+  // 先跑白名單的話會因為「找得到確認碼」而被認定成有效訂單。
+  if (event.status === 'CANCELLED') {
+    return { kind: 'cancelled', confirmationCode: null, phoneLast4: null, blockedReason: '平台標記為已取消（STATUS:CANCELLED）' };
+  }
+
   // 第一層：正面證據。找得到就直接認定是真訂單，不再看黑名單——真訂單的標題本來就有可能
   // 剛好包含黑名單字樣（例如客人姓名裡有 "Block"），有正面證據時不該被字面比對推翻。
   const detected = rule.detectReservation?.(event) ?? null;
@@ -102,8 +132,14 @@ export function classifyOtaEvent(
     return { kind: 'reservation', confirmationCode: detected.confirmationCode, phoneLast4: detected.phoneLast4, blockedReason: null };
   }
 
-  // 第二層：黑名單。
+  // 第二層：黑名單。取消字樣先看——平台沒有用 STATUS 標記、只把「已取消」寫在標題上時，
+  // 至少不要把它收成一筆有效訂單（但也不會據此刪既有訂單，見 CANCEL_KEYWORDS 的說明）。
   const haystack = `${event.summary} ${event.description}`.toLowerCase();
+  const cancelHit = CANCEL_KEYWORDS.map((k) => k.toLowerCase()).find((k) => haystack.includes(k));
+  if (cancelHit) {
+    return { kind: 'block', confirmationCode: null, phoneLast4: null, blockedReason: `標題含取消字樣「${cancelHit}」，不收為訂單；若這段日期已經釋出請人工確認` };
+  }
+
   const keywords = [...COMMON_BLOCK_KEYWORDS, ...(rule.blockKeywords || []), ...extraBlockKeywords]
     .map((k) => k.trim().toLowerCase())
     .filter(Boolean);

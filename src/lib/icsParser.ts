@@ -14,6 +14,12 @@ export interface ParsedIcsEvent {
   endIso: string; // YYYY-MM-DD（沿用 iCal 全天事件慣例：不含這一天，跟 checkout_date 的語意一致）
   summary: string;
   description: string; // 沒有這個屬性時是空字串（Airbnb 的關房事件就完全沒有 DESCRIPTION）
+  /**
+   * RFC 5545 的 VEVENT STATUS，一律轉大寫；沒有這個屬性時是空字串。
+   * 合法值是 TENTATIVE／CONFIRMED／CANCELLED。平台取消一筆訂單時，有些會把事件從匯出裡拿掉，
+   * 有些則是留著、只把這個欄位改成 CANCELLED——後者如果沒解析，那筆訂單在我們這裡會一直是有效的。
+   */
+  status: string;
   raw: string; // 這個 VEVENT 的原文（不含 BEGIN/END 兩行），供查核與重新判讀用
 }
 
@@ -81,6 +87,7 @@ export function parseIcsEvents(icsText: string): ParsedIcsEvent[] {
   let endIso = '';
   let summary = '';
   let description = '';
+  let status = '';
   let rawLines: string[] = [];
 
   for (const line of lines) {
@@ -92,12 +99,13 @@ export function parseIcsEvents(icsText: string): ParsedIcsEvent[] {
       endIso = '';
       summary = '';
       description = '';
+      status = '';
       rawLines = [];
       continue;
     }
     if (trimmed === 'END:VEVENT') {
       if (inEvent && uid && startIso && endIso) {
-        events.push({ uid, startIso, endIso, summary, description, raw: rawLines.join('\n') });
+        events.push({ uid, startIso, endIso, summary, description, status, raw: rawLines.join('\n') });
       }
       inEvent = false;
       continue;
@@ -118,6 +126,9 @@ export function parseIcsEvents(icsText: string): ParsedIcsEvent[] {
     // DESCRIPTION 是判斷「這是真訂單還是關房」的關鍵：Airbnb 真訂單會帶
     // 「Reservation URL: .../details/<確認碼>」，關房事件則完全沒有這個屬性。
     else if (prop.name === 'DESCRIPTION') description = unescapeIcsText(prop.value.trim());
+    // STATUS:CANCELLED＝平台已經取消這筆訂單，但事件還留在匯出裡。不讀這個欄位的話，
+    // 取消掉的訂單會被當成有效訂單一直匯入，也會跟著被推上 Google 行事曆。
+    else if (prop.name === 'STATUS') status = prop.value.trim().toUpperCase();
   }
 
   return events;

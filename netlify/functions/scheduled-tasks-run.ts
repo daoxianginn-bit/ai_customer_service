@@ -1015,7 +1015,7 @@ async function removeGoogleEventsFor(settings: any, rows: { google_event_id?: st
   });
 }
 
-async function syncOneOtaChannel(channel: any, settings: any): Promise<{ summary: string; conflictLines: string[] }> {
+export async function syncOneOtaChannel(channel: any, settings: any): Promise<{ summary: string; conflictLines: string[] }> {
   const nowIso = new Date().toISOString();
   let icsText: string;
   try {
@@ -1037,17 +1037,29 @@ async function syncOneOtaChannel(channel: any, settings: any): Promise<{ summary
   const extraBlockKeywords = parseCsvKeywords(channel.extra_block_keywords);
   const reservations: { ev: (typeof allEvents)[number]; info: ReturnType<typeof classifyOtaEvent> }[] = [];
   const blockedKeys = new Set<string>();
+  const cancelledKeys = new Set<string>();
   for (const ev of allEvents) {
     const info = classifyOtaEvent(channel.platform, ev, extraBlockKeywords);
     if (info.kind === 'reservation') reservations.push({ ev, info });
+    else if (info.kind === 'cancelled') cancelledKeys.add(dateKey(ev.startIso, ev.endIso));
     else blockedKeys.add(dateKey(ev.startIso, ev.endIso));
   }
+  // 同一段日期同時有「取消的舊訂單」跟「新成立的訂單」時（客人取消後立刻重訂最常見），
+  // 以新的那筆為準：取消只負責移除沒有被任何有效訂單接手的日期。
+  for (const { ev } of reservations) cancelledKeys.delete(dateKey(ev.startIso, ev.endIso));
 
   // 「這次抓到的日期區間」要包含被過濾掉的關房事件——下面判斷「來源已移除」時用的是這一份。
   // 如果只放真訂單，那些被規則擋下的日期會被誤判成「平台那邊刪掉了」而把對應訂單自動取消；
   // 一旦平台改措辭導致真訂單被誤判成關房，就會反過來把已收的真訂單取消掉、房間被釋出，
   // 靜悄悄超賣。分開兩份之後，規則寫錯最多是「漏收新訂單」，不會取消既有訂單。
-  const seenKeys = new Set(allEvents.map((e) => dateKey(e.startIso, e.endIso)));
+  //
+  // 但「平台標記為已取消」的事件不算——那正是「這段日期已經沒有訂單了」的明確宣告，
+  // 留在這份清單裡會讓對應的訂單因為「還看得到」而永遠刪不掉。
+  const seenKeys = new Set(
+    allEvents
+      .filter((e) => !cancelledKeys.has(dateKey(e.startIso, e.endIso)))
+      .map((e) => dateKey(e.startIso, e.endIso))
+  );
 
   const { data: existingRows } = await supabase
     .from('bookings')
@@ -1103,11 +1115,13 @@ async function syncOneOtaChannel(channel: any, settings: any): Promise<{ summary
   // 兩道保護都只會讓「刪得比較少」，不會造成超賣：沒刪到的訂單仍然佔著房況。
   const feedUnusable = allEvents.length === 0;
   const todayIso = taiwanTodayIso();
-  const disappeared = feedUnusable ? [] : (existingRows || []).filter(
-    (r: any) =>
-      !seenKeys.has(dateKey(r.checkin_date, r.checkout_date)) &&
-      String(r.checkout_date ?? '').slice(0, 10) >= todayIso
-  );
+  const disappeared = feedUnusable ? [] : (existingRows || []).filter((r: any) => {
+    const key = dateKey(r.checkin_date, r.checkout_date);
+    // 平台明講取消的，不受上面第 2 點保護：取消的訂單不是「已經發生的住宿紀錄」，
+    // 留著會讓房況被一筆不存在的訂單鎖住，也會讓成本與獲利統計多算一筆沒發生的住宿。
+    if (cancelledKeys.has(key)) return true;
+    return !seenKeys.has(key) && String(r.checkout_date ?? '').slice(0, 10) >= todayIso;
+  });
   if (disappeared.length) {
     for (const r of disappeared) {
       await logSystemOperation({
@@ -1119,7 +1133,11 @@ async function syncOneOtaChannel(channel: any, settings: any): Promise<{ summary
           入住日期: String(r.checkin_date ?? '').slice(0, 10),
           退房日期: String(r.checkout_date ?? '').slice(0, 10),
         },
-        after: { 說明: `${channel.name}：該筆房況已從平台行事曆消失，訂單自動刪除` },
+        after: {
+          說明: cancelledKeys.has(dateKey(r.checkin_date, r.checkout_date))
+            ? `${channel.name}：平台已取消這筆訂單（STATUS:CANCELLED），訂單自動刪除`
+            : `${channel.name}：該筆房況已從平台行事曆消失，訂單自動刪除`,
+        },
       });
     }
     // 刪訂單之前先把它在 Google 行事曆上的事件收掉。訂單一刪，google_event_id 就跟著消失，
@@ -1210,6 +1228,7 @@ async function syncOneOtaChannel(channel: any, settings: any): Promise<{ summary
   const parts = [`新增 ${created} 筆`, `更新 ${updated} 筆`];
   if (feedUnusable) parts.push('⚠️ 這次沒有解析到任何事件，已略過「來源移除」判斷，既有訂單保持不動');
   if (blockedKeys.size) parts.push(`略過關房 ${blockedKeys.size} 筆`);
+  if (cancelledKeys.size) parts.push(`平台已取消 ${cancelledKeys.size} 筆`);
   if (disappeared.length) parts.push(`來源移除 ${disappeared.length} 筆（已刪除）`);
   if (conflictLines.length) parts.push(`⚠️ ${conflictLines.length} 筆疑似撞期`);
   if (staleBlocks.length) {
