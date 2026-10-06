@@ -1,5 +1,6 @@
 import { BOOKING_STATUS_OPTIONS } from '../../lib/bookingStatus';
 import { computeOrderAmounts } from '../../lib/messageVariables';
+import { roomLabel, roomLabels, type RoomOption } from '../../lib/rooms';
 
 // ========================================================================
 // 批次新建訂單的貼上內容解析（§批次匯入）。
@@ -29,6 +30,7 @@ export const BATCH_COLUMNS: BatchColumn[] = [
   { key: '電話', hint: '' },
   { key: 'LINE暱稱', hint: '' },
   { key: '人數', hint: '整數' },
+  { key: '房型', hint: '房間名稱，多間用「、」分隔，例如 暖木、晴空' },
   { key: '包棟', hint: '是／否，留空視為「是」' },
   { key: '房價', hint: '不含押金' },
   { key: '押金', hint: '留空時包棟帶入預設包棟押金，非包棟為 0' },
@@ -52,6 +54,8 @@ const COLUMN_ALIASES: Record<string, string> = {
   入住人數: '人數',
   訂單狀態: '狀態',
   是否包棟: '包棟',
+  房間: '房型',
+  房號: '房型',
   總額: '訂單總額',
   匯款末五碼: '匯款末5碼',
 };
@@ -120,12 +124,15 @@ export interface BatchRow {
   /** 貼上內容裡的行號（含標題列），錯誤訊息要指得出是哪一行 */
   lineNo: number;
   payload: Record<string, unknown> | null;
+  /** 對應到的房間 id，建單後寫進 booking_rooms，也是算布巾預設用量的依據 */
+  roomIds: string[];
   errors: string[];
   display: {
     checkin: string;
     checkout: string;
     name: string;
     statusLabel: string;
+    rooms: string;
     nights: number | null;
     total: number | null;
   };
@@ -140,6 +147,26 @@ export interface BatchParseResult {
 export interface BatchParseOptions {
   depositPercent: number;
   wholeHouseSecurity: number;
+  /** 可以指定的房間（room_types 裡 type='房間' 的那些） */
+  rooms: RoomOption[];
+}
+
+/**
+ * 房型欄位 →「這幾間房」。接受純名稱（暖木）或完整標籤（2F_暖木(2人)），多間用「、」分隔，
+ * 也容忍逗號、斜線與頓號混用——來源是人打的，分隔符號不會乖乖統一。
+ */
+function resolveRooms(raw: string, rooms: RoomOption[]): { ids: string[]; unknown: string[] } {
+  const wanted = raw.split(/[、,，/／]/).map((s) => s.trim()).filter(Boolean);
+  const ids: string[] = [];
+  const unknown: string[] = [];
+  const key = (s: string) => s.replace(/[\s　]/g, '').toLowerCase();
+
+  for (const w of wanted) {
+    const hit = rooms.find((r) => key(r.name) === key(w) || key(roomLabel(r)) === key(w));
+    if (!hit) { unknown.push(w); continue; }
+    if (!ids.includes(hit.id)) ids.push(hit.id);
+  }
+  return { ids, unknown };
 }
 
 export function parseBatchBookings(text: string, opts: BatchParseOptions): BatchParseResult {
@@ -211,6 +238,13 @@ export function parseBatchBookings(text: string, opts: BatchParseOptions): Batch
       errors.push('人數必須是 0 以上的整數');
     }
 
+    const roomRaw = get('房型');
+    const { ids: roomIds, unknown: unknownRooms } = resolveRooms(roomRaw, opts.rooms);
+    if (unknownRooms.length) {
+      errors.push(`找不到房間「${unknownRooms.join('、')}」，可用的是：${opts.rooms.map((r) => r.name).join('、')}`);
+    }
+    const pickedRooms = opts.rooms.filter((r) => roomIds.includes(r.id));
+
     const nights = checkin && checkout
       ? Math.round((Date.parse(`${checkout}T00:00:00Z`) - Date.parse(`${checkin}T00:00:00Z`)) / 86400000)
       : null;
@@ -218,7 +252,11 @@ export function parseBatchBookings(text: string, opts: BatchParseOptions): Batch
     // 金額的算法跟人工建單同一套（computeOrderAmounts）：押金留空時包棟帶預設包棟押金，
     // 總額＝房價＋押金，訂金＝房價×比例。有填就以填的為準，不要自作主張覆蓋。
     const roomAmount = numeric['房價'];
-    const securityDeposit = numeric['押金'] ?? (wholeHouse ? opts.wholeHouseSecurity : 0);
+    // 押金留空時的預設跟人工建單一致：包棟用固定的包棟押金，非包棟是「開了哪幾間房」的押金加總。
+    // 沒指定房型的非包棟訂單算不出來，只好是 0——那種單會進「待補布巾數量」佇列由房務補。
+    const securityDeposit = numeric['押金'] ?? (wholeHouse
+      ? opts.wholeHouseSecurity
+      : pickedRooms.reduce((sum, r) => sum + Number(r.security_deposit ?? 0), 0));
     const auto = computeOrderAmounts(roomAmount ?? 0, securityDeposit, opts.depositPercent);
     const totalAmount = numeric['訂單總額'] ?? (roomAmount == null ? null : auto.total_amount);
     const deposit = numeric['訂金'] ?? (roomAmount == null ? null : auto.deposit);
@@ -238,6 +276,8 @@ export function parseBatchBookings(text: string, opts: BatchParseOptions): Batch
       deposit,
       remit_last5: get('匯款末5碼') || null,
       status: statusOption!.value,
+      // 房型的顯示字串跟人工建單同一個函式，列表、篩選、訊息變數看到的格式才會一致。
+      room_type_label: pickedRooms.length ? roomLabels(pickedRooms) : null,
       notes: get('備註') || null,
       updated_at: new Date().toISOString(),
     };
@@ -245,12 +285,14 @@ export function parseBatchBookings(text: string, opts: BatchParseOptions): Batch
     rows.push({
       lineNo: i + 1,
       payload,
+      roomIds,
       errors,
       display: {
         checkin: checkin || checkinRaw,
         checkout: checkout || checkoutRaw,
         name: get('客戶姓名') || get('LINE暱稱') || '(未填姓名)',
         statusLabel: statusOption?.label || statusRaw,
+        rooms: pickedRooms.length ? pickedRooms.map((r) => r.name).join('、') : '—',
         nights,
         total: totalAmount,
       },

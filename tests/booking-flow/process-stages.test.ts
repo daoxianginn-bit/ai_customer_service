@@ -50,10 +50,21 @@ t('會計範本做得到四個金流關卡', ['awaiting_confirmation', 'awaiting
 t('會計範本沒有布巾／密碼／房況的權限', !['linen', 'checkin_password'].some((k) => acc.has(stage(k).permission)));
 t('新權限的相依都補齊（勾了就一定帶 booking.view）', ['booking.linen.manage', 'booking.checkin_password.manage', 'booking.room_check'].every((c) => withDependencies([c]).has('booking.view')));
 t('入住密碼不再綁在付款權限上（房務看得到密碼、看不到金額）', PERMISSION_CATALOG.find((p) => p.code === 'booking.payment.view')!.description.indexOf('入住密碼') === -1);
-t('groupsOf 依固定順序回傳（款項→入住→退房）', groupsOf(STAGES).join() === 'payment,checkin,checkout');
-t('房務打開只有入住準備與退房檢查兩組', groupsOf(STAGES.filter((s) => hk.has(s.permission))).join() === 'checkin,checkout');
+t('groupsOf 依固定順序回傳（款項→入住→退房→補登）', groupsOf(STAGES).join() === 'payment,checkin,checkout,backfill');
+t('房務打開入住準備、退房檢查與資料補登三組', groupsOf(STAGES.filter((s) => hk.has(s.permission))).join() === 'checkin,checkout,backfill');
 t('會計打開只有款項處理一組', groupsOf(STAGES.filter((s) => acc.has(s.permission))).join() === 'payment');
 
+// ---- 待補布巾數量（資料補登）
+const backfill = stage('linen_backfill');
+t('待補布巾數量不看狀態，只看旗標', backfill.statuses.length === 0 && typeof backfill.appliesTo === 'function');
+t('有旗標才進佇列', !!backfill.appliesTo!({ id: 'a', status: 'external_synced', needs_linen_backfill: true } as any));
+t('沒旗標不進佇列', !backfill.appliesTo!({ id: 'a', status: 'external_synced' } as any));
+t('第三方平台訂單本來不屬於任何關卡，靠這一關才看得到',
+  stagesForStatus('external_synced').length === 0 && !!backfill.appliesTo!({ id: 'a', status: 'external_synced', needs_linen_backfill: true } as any));
+t('這一關不推進狀態（補資料不該改訂單流程）', backfill.nextStatus === null && backfill.confirmAdvances === false);
+t('這一關不發客人通知', backfill.templateTitle === null);
+t('權限跟洗滌清單同一個（都是房務）', backfill.permission === stage('linen').permission);
+t('不吃入住時間窗（住完的也要補）', !stageUsesWindow(backfill));
 // ---- 入住準備的時間窗
 const bk = (checkin: string) => ({ id: 'x', status: 'awaiting_checkin', checkin_date: checkin }) as any;
 const today = new Date('2026-09-16T08:00:00');

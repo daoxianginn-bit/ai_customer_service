@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import {
   Alert, Box, Button, Checkbox, Chip, Dialog, DialogContent, Divider, IconButton, InputAdornment, Skeleton, Stack, TextField, ToggleButton, ToggleButtonGroup, Tooltip, Typography,
 } from '@mui/material';
@@ -13,7 +13,9 @@ import { computeUsage, linenItemLabel, normalizeChangeCount, type LinenItem, typ
 import StatusBadge from '../../components/ui-mui/StatusBadge';
 import { computeBalanceDue, extraChargeCode, hasUnpaidExtraCharges, type ExtraCharge } from '../../lib/extraCharges';
 import { fetchExtraCharges, setExtraChargesPaid } from '../booking/extraChargeQueries';
-import { fetchBookingLinen, fetchLinenSetup, type BookingRow } from '../booking/bookingQueries';
+import AddExtraChargesDialog from '../booking/AddExtraChargesDialog';
+import { fetchBookingLinen, fetchLinenSetup, fetchRooms, type BookingRow } from '../booking/bookingQueries';
+import { roomLabel, type RoomOption } from '../../lib/rooms';
 import { advanceBookingStatus, saveBookingLinen, BookingActionError } from '../booking/bookingActions';
 import { damageSummary, markStageConfirmed, saveStageEdits, type StageAction, type StageDef, type StageEditPatch } from './processQueries';
 
@@ -63,6 +65,14 @@ export default function StagePanel({ open, stage, booking, action, onClose, onCh
   const canAct = hasPermission(stage.permission);
   const canSeePayment = hasPermission('booking.payment.view');
   const canNotify = hasPermission('booking.notify') && !!stage.templateTitle;
+  const canVerifyPayment = hasPermission('booking.payment.verify');
+  // 跟訂單詳情的追加款明細同一套權限：訂單編輯或款項核對
+  const canAddExtras = hasPermission('booking.edit') || canVerifyPayment;
+  const [addingExtra, setAddingExtra] = useState(false);
+  // 視窗內新增追加款後的未付合計。不呼叫 onChanged：上層換了新的 booking 物件會觸發表單初始化，
+  // 把使用者已經填的備註、末五碼清掉。
+  const [unpaidOverride, setUnpaidOverride] = useState<number | null>(null);
+  const shown = unpaidOverride == null ? booking : ({ ...booking, extra_unpaid_total: unpaidOverride } as BookingRow);
 
   const [notes, setNotes] = useState('');
   const [remit, setRemit] = useState('');
@@ -74,6 +84,10 @@ export default function StagePanel({ open, stage, booking, action, onClose, onCh
   const [damageNote, setDamageNote] = useState('');
   const [linen, setLinen] = useState<{ items: LinenItem[]; defaults: RoomLinenDefault[]; roomIds: string[]; usage: LinenUsageRow[] } | null>(null);
   const [linenLoading, setLinenLoading] = useState(false);
+  const [rooms, setRooms] = useState<RoomOption[]>([]);
+  // 開啟當下這筆訂單有沒有房間。只有本來沒有的才讓房務在這裡選——已經排好房的訂單，
+  // booking_rooms 會影響檔期衝突判斷，不該由這一關改動。
+  const roomsWereEmptyRef = useRef(false);
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState<BookingRow | null>(null);
   const [remitError, setRemitError] = useState('');
@@ -95,24 +109,40 @@ export default function StagePanel({ open, stage, booking, action, onClose, onCh
     setDamaged(booking.damage_found ?? null);
     setDeduction(booking.damage_deduction == null ? '' : String(booking.damage_deduction));
     setDamageNote(booking.damage_note || '');
-    setDone(null); setRemitError(''); setLinen(null); setExtras([]); setExtrasPicked([]); setExtrasError('');
-    // 會計的關卡都看得到追加款明細（尾款裡含了多少、還有哪些沒收）
-    if (stage.money === 'full') {
-      fetchExtraCharges(booking.id).then((rows) => {
-        const active = rows.filter((r) => !r.voided_at);
-        setExtras(active);
-        // 追加款收款：預設全勾（通常是一起收的），沒收到的自己取消勾選
-        setExtrasPicked(active.filter((r) => !r.is_paid).map((r) => r.id));
-      });
-    }
+    setDone(null); setRemitError(''); setLinen(null);
     if (has('linen')) {
       setLinenLoading(true);
-      Promise.all([fetchLinenSetup(), fetchBookingLinen(booking.id)])
-        .then(([setup, mine]) => setLinen({ items: setup.items, defaults: setup.defaults, roomIds: mine.roomIds, usage: mine.usage }))
+      Promise.all([fetchLinenSetup(), fetchBookingLinen(booking.id), fetchRooms()])
+        .then(([setup, mine, allRooms]) => {
+          setRooms(allRooms);
+          // 一開啟就記住「進來的時候有沒有房間」。房間選擇器只開放給本來就沒有房間的訂單，
+          // 這個判斷必須鎖在開啟當下——不然使用者剛選完房、roomIds 有值了，選擇器就自己消失。
+          roomsWereEmptyRef.current = mine.roomIds.length === 0;
+          setLinen({ items: setup.items, defaults: setup.defaults, roomIds: mine.roomIds, usage: mine.usage });
+        })
         .finally(() => setLinenLoading(false));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, booking, stage]);
+
+  // 追加款獨立載入，只在開啟／換訂單／換關卡時重抓。以前跟上面的表單初始化綁在一起，
+  // 依賴 booking 物件：父層任何一次重新整理（換了新物件）都會把使用者剛取消的勾選整批重設回全勾。
+  const extrasKnownRef = useRef<Set<string>>(new Set());
+  const loadExtras = useCallback(async (resetPicked: boolean) => {
+    const rows = await fetchExtraCharges(booking.id);
+    const active = rows.filter((r) => !r.voided_at);
+    setExtras(active);
+    const unpaidIds = active.filter((r) => !r.is_paid).map((r) => r.id);
+    // 追加款收款：預設全勾（通常是一起收的），沒收到的自己取消勾選；重新載入時保留使用者已經做的選擇，新出現的預設勾選
+    setExtrasPicked((prev) => (resetPicked ? unpaidIds : [...prev.filter((id) => unpaidIds.includes(id)), ...unpaidIds.filter((id) => !prev.includes(id) && !extrasKnownRef.current.has(id))]));
+    extrasKnownRef.current = new Set(active.map((r) => r.id));
+  }, [booking.id]);
+  useEffect(() => {
+    if (!open) return;
+    setExtras([]); setExtrasPicked([]); setExtrasError(''); setUnpaidOverride(null); extrasKnownRef.current = new Set();
+    // 會計的關卡都看得到追加款明細（尾款裡含了多少、還有哪些沒收）
+    if (stage.money === 'full') loadExtras(true);
+  }, [open, booking.id, stage.key, stage.money, loadExtras]);
 
   const resetLinen = () => {
     if (!linen) return;
@@ -150,8 +180,9 @@ export default function StagePanel({ open, stage, booking, action, onClose, onCh
       const toMark = has('extras') ? extrasPicked : stage.key === 'awaiting_balance' ? unpaidShown : [];
       if (toMark.length) {
         await setExtraChargesPaid(booking.id, toMark, true);
+        setExtras((prev) => prev.map((r) => (toMark.includes(r.id) ? { ...r, is_paid: true } : r)));
         const markedTotal = extras.filter((r) => toMark.includes(r.id)).reduce((sum, r) => sum + r.amount, 0);
-        updated = { ...updated, extra_unpaid_total: Math.max(0, Number(booking.extra_unpaid_total || 0) - markedTotal) };
+        updated = { ...updated, extra_unpaid_total: Math.max(0, Number(shown.extra_unpaid_total || 0) - markedTotal) };
       }
       if ((advance || stage.confirmAdvances) && stage.nextStatus) {
         await advanceBookingStatus(updated, stage.nextStatus, { remitLast5: remit.trim(), skipExtraCharges: true });
@@ -166,9 +197,23 @@ export default function StagePanel({ open, stage, booking, action, onClose, onCh
     } finally { setBusy(false); }
   };
 
-  const balance = computeBalanceDue(booking);
+  const showAddExtra = canAddExtras && !['cancelled', 'awaiting_refund', 'refunded', 'external_synced'].includes(booking.status);
+  // 新增後重抓明細，並把訂單的未付合計（資料庫觸發器維護）同步給上層，尾款金額才會跟著變
+  const onExtrasAdded = async () => {
+    setAddingExtra(false);
+    const rows = (await fetchExtraCharges(booking.id)).filter((r) => !r.voided_at);
+    setExtras(rows);
+    setExtrasPicked((prev) => {
+      const unpaid = rows.filter((r) => !r.is_paid).map((r) => r.id);
+      return [...prev.filter((id) => unpaid.includes(id)), ...unpaid.filter((id) => !extrasKnownRef.current.has(id))];
+    });
+    extrasKnownRef.current = new Set(rows.map((r) => r.id));
+    setUnpaidOverride(rows.filter((r) => !r.is_paid).reduce((sum, r) => sum + r.amount, 0));
+  };
+
+  const balance = computeBalanceDue(shown);
   const nights = booking.nights ?? null;
-  const stageAmount = stage.amountOf(booking);
+  const stageAmount = stage.amountOf(shown);
   const damage = damageSummary(booking);
 
   const header = (
@@ -220,9 +265,12 @@ export default function StagePanel({ open, stage, booking, action, onClose, onCh
         </Box>
       )}
 
-      {stage.money === 'full' && extras.length > 0 && (
+      {stage.money === 'full' && (extras.length > 0 || showAddExtra) && (
         <Box>
-          <Typography variant="subtitle2" gutterBottom>追加款</Typography>
+          <Stack direction="row" alignItems="center" justifyContent="space-between">
+            <Typography variant="subtitle2" gutterBottom>追加款</Typography>
+            {showAddExtra && <Button size="small" startIcon={<Plus size={14} />} onClick={() => setAddingExtra(true)}>增加追加項目</Button>}
+          </Stack>
           <Stack spacing={0.25}>
             {extras.map((r) => {
               const pickable = has('extras') && !r.is_paid;
@@ -240,14 +288,14 @@ export default function StagePanel({ open, stage, booking, action, onClose, onCh
               );
             })}
           </Stack>
-          {stage.key === 'awaiting_balance' && hasUnpaidExtraCharges(booking) && <Typography variant="caption" color="text.secondary">應收尾款已含未付追加款 {formatMoney(booking.extra_unpaid_total)}，確認尾款時會一併標成已付。</Typography>}
+          {stage.key === 'awaiting_balance' && hasUnpaidExtraCharges(shown) && <Typography variant="caption" color="text.secondary">應收尾款已含未付追加款 {formatMoney(shown.extra_unpaid_total)}，確認尾款時會一併標成已付。</Typography>}
           {extrasError && <Typography variant="caption" color="error" component="div">{extrasError}</Typography>}
         </Box>
       )}
 
       {/* 押金退掉之後就很難再跟客人收，這是最後一道提醒 */}
-      {stage.key === 'deposit_processing' && hasUnpaidExtraCharges(booking) && (
-        <Alert severity="warning" sx={{ py: 0.5 }}>還有 <b>{formatMoney(booking.extra_unpaid_total)}</b> 追加款未收。要從押金扣抵的話，請自己調整下面的實退金額並寫在退款說明。</Alert>
+      {stage.key === 'deposit_processing' && hasUnpaidExtraCharges(shown) && (
+        <Alert severity="warning" sx={{ py: 0.5 }}>還有 <b>{formatMoney(shown.extra_unpaid_total)}</b> 追加款未收。要從押金扣抵的話，請自己調整下面的實退金額並寫在退款說明。</Alert>
       )}
 
       {/* 押金退款要看得到房務回報了什麼，不用自己跑去問 */}
@@ -335,7 +383,47 @@ export default function StagePanel({ open, stage, booking, action, onClose, onCh
               ))}
             </Box>
           )}
-          {linen && linen.roomIds.length === 0 && <Typography variant="caption" color="warning.main">這筆訂單還沒連結房間，「回復預設」算不出用量；請先到訂單編輯勾選房間。</Typography>}
+          {/* 沒有房間就算不出預設用量。第三方平台匯入的包棟訂單一定是這種（OTA 的 iCal 不帶房間資訊），
+              所以直接在這裡給選，房務不用再去找有訂單編輯權限的人。只開放給本來就沒有房間的訂單。 */}
+          {linen && roomsWereEmptyRef.current && (
+            <Box sx={{ mt: 1.5, p: 1.5, border: 1, borderColor: 'warning.light', borderRadius: 1, bgcolor: 'warning.lighter' }}>
+              <Typography variant="caption" color="warning.dark" sx={{ display: 'block', mb: 1 }}>
+                這筆訂單還沒連結房間，「回復預設」算不出用量。選好這次要備的房間後再按一次「回復預設」。
+              </Typography>
+              <Stack direction="row" flexWrap="wrap" useFlexGap spacing={0.75}>
+                {rooms.map((r) => {
+                  const picked = linen.roomIds.includes(r.id);
+                  return (
+                    <Chip
+                      key={r.id}
+                      size="small"
+                      label={roomLabel(r)}
+                      color={picked ? 'primary' : 'default'}
+                      variant={picked ? 'filled' : 'outlined'}
+                      onClick={canAct ? () => setLinen({
+                        ...linen,
+                        roomIds: picked ? linen.roomIds.filter((id) => id !== r.id) : [...linen.roomIds, r.id],
+                      }) : undefined}
+                      disabled={!canAct}
+                    />
+                  );
+                })}
+              </Stack>
+              {rooms.length > 0 && (
+                <Button
+                  size="small"
+                  sx={{ mt: 0.5 }}
+                  disabled={!canAct}
+                  onClick={() => setLinen({ ...linen, roomIds: linen.roomIds.length === rooms.length ? [] : rooms.map((r) => r.id) })}
+                >
+                  {linen.roomIds.length === rooms.length ? '全部取消' : '整棟全選'}
+                </Button>
+              )}
+            </Box>
+          )}
+          {linen && !roomsWereEmptyRef.current && linen.roomIds.length === 0 && (
+            <Typography variant="caption" color="warning.main">這筆訂單還沒連結房間，「回復預設」算不出用量；請先到訂單編輯勾選房間。</Typography>
+          )}
         </Box>
       )}
 
@@ -394,8 +482,15 @@ export default function StagePanel({ open, stage, booking, action, onClose, onCh
   );
 
   return (
-    <Dialog open={open} onClose={busy ? undefined : onClose} fullScreen={isMobile} maxWidth="sm" fullWidth PaperProps={{ sx: isMobile ? {} : { maxHeight: '90vh' } }}>
-      <DialogContent sx={{ p: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>{content}</DialogContent>
-    </Dialog>
+    <>
+      <Dialog open={open} onClose={busy ? undefined : onClose} fullScreen={isMobile} maxWidth="sm" fullWidth PaperProps={{ sx: isMobile ? {} : { maxHeight: '90vh' } }}>
+        <DialogContent sx={{ p: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>{content}</DialogContent>
+      </Dialog>
+      <AddExtraChargesDialog
+        open={addingExtra} booking={booking} charges={extras} canMarkPaid={canVerifyPayment}
+        onClose={() => setAddingExtra(false)}
+        onSaved={(notice) => { if (notice) enqueueSnackbar(notice, { variant: notice.startsWith('未通知') ? 'warning' : 'info' }); void onExtrasAdded(); }}
+      />
+    </>
   );
 }

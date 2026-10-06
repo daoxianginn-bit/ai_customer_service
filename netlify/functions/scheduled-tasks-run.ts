@@ -279,15 +279,37 @@ async function advanceToCheckedIn(config: Record<string, any>, settings: any): P
   // 取整列而不只是 id：洗滌單範本可以插入訂單變數（[姓名]、[入住日期]...），要有完整欄位才算得出來。
   const { data, error } = await supabase.from('bookings').select('*').eq('status', 'awaiting_checkin').eq('checkin_date', today);
   if (error) return { ok: false, summary: `查詢失敗：${error.message}` };
-  if (!data?.length) return { ok: true, summary: '沒有今日入住、需要轉為入住中的訂單' };
-  const { error: updateError } = await supabase.from('bookings').update({ status: 'checked_in', updated_at: new Date().toISOString() }).in('id', data.map((b) => b.id));
-  if (updateError) return { ok: false, summary: `更新失敗：${updateError.message}` };
-  await logStageAdvance(data, 'awaiting_checkin', 'checked_in', '入住日到，排程自動轉為入住中');
 
-  // 順便把今天要用的布巾數量彙整成洗滌單發到 LINE 群組。沒設定範本或群組時就只做狀態轉換，
-  // 維持這支排程原本「純狀態轉換」的行為，既有安裝不會因為這次改版突然開始發訊息。
-  const laundry = await sendLaundryNotice(config, today, data, settings);
-  return { ok: true, summary: `${data.length} 筆訂單已轉為入住中${laundry ? `；${laundry}` : ''}` };
+  const advanced = data || [];
+  if (advanced.length) {
+    const { error: updateError } = await supabase.from('bookings').update({ status: 'checked_in', updated_at: new Date().toISOString() }).in('id', advanced.map((b) => b.id));
+    if (updateError) return { ok: false, summary: `更新失敗：${updateError.message}` };
+    await logStageAdvance(advanced, 'awaiting_checkin', 'checked_in', '入住日到，排程自動轉為入住中');
+  }
+
+  // 洗滌單要另外查，不能直接用上面那批「剛被轉狀態的訂單」。
+  //
+  // 第三方平台匯入的訂單狀態永遠是 external_synced——那個狀態是「這幾天被平台訂走了」的標記，
+  // 不走 1~9 的流程，也絕對不能被轉成 checked_in（轉了 OTA 同步就認不得自己的資料了）。
+  // 所以它們不會出現在上面那批裡，過去也就從來沒上過洗滌單：房務就算把布巾數量填好，
+  // 洗滌廠還是收不到，客人到了沒有布巾可用。
+  //
+  // 改成依「今天入住」這個事實重新查一次，涵蓋剛轉好的直接訂房與 OTA 訂單。
+  // 也因此即使今天沒有任何訂單需要轉狀態，只要有 OTA 訂單入住，洗滌單一樣要發。
+  const { data: laundryBookings } = await supabase
+    .from('bookings')
+    .select('*')
+    .eq('checkin_date', today)
+    .in('status', ['checked_in', 'external_synced']);
+
+  const laundry = (laundryBookings || []).length
+    ? await sendLaundryNotice(config, today, laundryBookings || [], settings)
+    : null;
+
+  if (!advanced.length) {
+    return { ok: true, summary: `沒有今日入住、需要轉為入住中的訂單${laundry ? `；${laundry}` : ''}` };
+  }
+  return { ok: true, summary: `${advanced.length} 筆訂單已轉為入住中${laundry ? `；${laundry}` : ''}` };
 }
 
 /**
@@ -302,7 +324,8 @@ export async function resendLaundrySheet(dateIso: string): Promise<{ ok: boolean
   const { data: tasks } = await supabase.from('scheduled_tasks').select('config, is_active').eq('task_type', 'advance_to_checked_in').order('is_active', { ascending: false }).limit(1);
   const config = tasks?.[0]?.config || {};
   if (!readNoticeSetup(config)) return { ok: false, summary: '「待入住→入住中（含洗滌單）」排程還沒設定洗滌單內容或發送對象，無法重發' };
-  const { data, error } = await supabase.from('bookings').select('*').eq('checkin_date', dateIso).in('status', ['awaiting_checkin', 'checked_in']);
+  // external_synced 跟上面的排程同一個理由：第三方平台的訂單也要上洗滌單。
+  const { data, error } = await supabase.from('bookings').select('*').eq('checkin_date', dateIso).in('status', ['awaiting_checkin', 'checked_in', 'external_synced']);
   if (error) return { ok: false, summary: `查詢失敗：${error.message}` };
   if (!data?.length) return { ok: false, summary: '這一天沒有入住的訂單，沒有洗滌單可重發' };
   const template = String(config.notice_template ?? config.laundry_template ?? '');

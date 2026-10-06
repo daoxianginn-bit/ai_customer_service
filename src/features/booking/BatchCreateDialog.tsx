@@ -7,7 +7,9 @@ import { useSnackbar } from 'notistack';
 import { ClipboardCopy, X } from 'lucide-react';
 import { BATCH_COLUMNS, BATCH_TEMPLATE_HEADER, parseBatchBookings } from './batchImport';
 import { createBookingsBatch } from './bookingActions';
-import { fetchMoneyDefaults } from './bookingQueries';
+import { fetchMoneyDefaults, fetchRooms, fetchLinenSetup } from './bookingQueries';
+import { computeUsage, normalizeChangeCount, type LinenItem, type RoomLinenDefault } from '../../lib/linenCost';
+import type { RoomOption } from '../../lib/rooms';
 import { useConfirm } from '../../components/ui-mui/ConfirmDialogProvider';
 
 // ========================================================================
@@ -31,6 +33,8 @@ export default function BatchCreateDialog({
   const confirm = useConfirm();
   const [text, setText] = useState('');
   const [money, setMoney] = useState({ wholeHouseSecurity: 3000, percent: 30 });
+  const [rooms, setRooms] = useState<RoomOption[]>([]);
+  const [linen, setLinen] = useState<{ items: LinenItem[]; defaults: RoomLinenDefault[] }>({ items: [], defaults: [] });
   const [saving, setSaving] = useState(false);
   const [result, setResult] = useState<{ created: number; failed: { lineNo: number; error: string }[] } | null>(null);
 
@@ -39,13 +43,15 @@ export default function BatchCreateDialog({
     setText('');
     setResult(null);
     fetchMoneyDefaults().then(setMoney);
+    fetchRooms().then(setRooms);
+    fetchLinenSetup().then((s) => setLinen({ items: s.items, defaults: s.defaults }));
   }, [open]);
 
   const parsed = useMemo(
     () => (text.trim()
-      ? parseBatchBookings(text, { depositPercent: money.percent, wholeHouseSecurity: money.wholeHouseSecurity })
+      ? parseBatchBookings(text, { depositPercent: money.percent, wholeHouseSecurity: money.wholeHouseSecurity, rooms })
       : { rows: [], problems: [] }),
-    [text, money]
+    [text, money, rooms]
   );
 
   const okRows = parsed.rows.filter((r) => r.payload);
@@ -73,7 +79,16 @@ export default function BatchCreateDialog({
 
     setSaving(true);
     try {
-      const res = await createBookingsBatch(okRows.map((r) => ({ lineNo: r.lineNo, payload: r.payload! })));
+      const res = await createBookingsBatch(
+        okRows.map((r) => ({
+          lineNo: r.lineNo,
+          payload: r.payload!,
+          roomIds: r.roomIds,
+          // 布巾預設用量跟人工建單同一個算法；換洗次數批次裡沒有欄位，用 1 次（跟新增訂單的預設一致）。
+          usage: r.roomIds.length ? computeUsage(r.roomIds, linen.defaults, normalizeChangeCount(1), linen.items) : [],
+        })),
+        linen.items.length > 0
+      );
       setResult(res);
       if (res.created) onCreated(res.created);
     } catch (e: any) {
@@ -147,6 +162,7 @@ export default function BatchCreateDialog({
                       <TableCell>列</TableCell>
                       <TableCell>入住 → 退房</TableCell>
                       <TableCell>客戶</TableCell>
+                      <TableCell>房型</TableCell>
                       <TableCell>狀態</TableCell>
                       <TableCell align="right">總額</TableCell>
                       <TableCell>檢查結果</TableCell>
@@ -161,6 +177,7 @@ export default function BatchCreateDialog({
                           {r.display.nights != null && <Typography variant="caption" color="text.secondary"> （{r.display.nights} 晚）</Typography>}
                         </TableCell>
                         <TableCell>{r.display.name}</TableCell>
+                        <TableCell>{r.display.rooms}</TableCell>
                         <TableCell>{r.display.statusLabel}</TableCell>
                         <TableCell align="right">{r.display.total == null ? '—' : r.display.total.toLocaleString()}</TableCell>
                         <TableCell>

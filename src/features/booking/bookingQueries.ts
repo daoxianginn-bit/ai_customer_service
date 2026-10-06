@@ -59,6 +59,12 @@ export interface BookingRow {
   supersedes_booking_id?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
+  /**
+   * 不是資料庫欄位，是「訂單處理」在前端算完掛上去的旗標（見 processQueries.fetchQueues）：
+   * 這張訂單一點布巾數量都沒有、而且「待補布巾數量」那一關還沒按過確認。
+   * 關卡的 appliesTo 讀這個欄位——判斷需要 join 兩張表，不是一個純函式看單一列就答得出來的事。
+   */
+  needs_linen_backfill?: boolean;
   [key: string]: unknown;
 }
 

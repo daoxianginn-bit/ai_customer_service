@@ -138,14 +138,18 @@ export async function deleteBookings(rows: BookingRow[]) {
  * 反而看不出「這是同一次批次操作」——跟 deleteBookings 同一個考量。
  */
 export async function createBookingsBatch(
-  entries: { lineNo: number; payload: Record<string, unknown> }[]
+  entries: { lineNo: number; payload: Record<string, unknown>; roomIds: string[]; usage: LinenUsageRow[] }[],
+  linenEnabled: boolean
 ): Promise<{ created: number; failed: { lineNo: number; error: string }[] }> {
   const created: string[] = [];
   const failed: { lineNo: number; error: string }[] = [];
 
   for (const entry of entries) {
     try {
-      const { orderNumber } = await upsertBooking(null, entry.payload);
+      const { id, orderNumber } = await upsertBooking(null, entry.payload);
+      // 房間與布巾用量跟人工建單走同一支：匯入的訂單不會一出生就沒有房間、沒有布巾數量，
+      // 否則每一筆都要房務再到「待補布巾數量」補一次，批次匯入就只省了一半的工。
+      await saveBookingLinen(id, entry.roomIds, entry.usage, linenEnabled);
       created.push(orderNumber);
     } catch (err: any) {
       failed.push({ lineNo: entry.lineNo, error: err?.message || '未知錯誤' });

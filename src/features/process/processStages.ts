@@ -12,15 +12,17 @@ import { BALANCE_PAID_STATUSES } from '../../lib/bookingStatus';
 
 export type StageKey =
   | 'awaiting_confirmation' | 'awaiting_balance' | 'extra_charges' | 'deposit_processing' | 'awaiting_refund'
-  | 'linen' | 'checkin_password' | 'room_check';
-export type StageGroup = 'payment' | 'checkin' | 'checkout';
+  | 'linen' | 'checkin_password' | 'room_check' | 'linen_backfill';
+export type StageGroup = 'payment' | 'checkin' | 'checkout' | 'backfill';
 export type EditableField = 'remit' | 'balance_remit' | 'refund' | 'password' | 'linen' | 'damage' | 'extras';
 
-export const GROUP_LABELS: Record<StageGroup, string> = { payment: '款項處理', checkin: '入住準備', checkout: '退房檢查' };
+export const GROUP_LABELS: Record<StageGroup, string> = { payment: '款項處理', checkin: '入住準備', checkout: '退房檢查', backfill: '資料補登' };
 export const GROUP_HINTS: Record<StageGroup, string> = {
   payment: '確認錢進來了、或錢退出去了。確認後可以順手通知客人。',
   checkin: '客人到之前要準備好的事。狀態由排程在入住日自動轉，這裡不用推進。',
   checkout: '退房後先回報房況，會計再依回報決定押金退多少。',
+  // 這一組刻意不跟「入住準備」合併：裡面會有已經住完的訂單，「客人到之前要準備好的事」那句話對不上。
+  backfill: '資料不完整、需要補起來的訂單，包含第三方平台匯入的。補完按確認就會離開這裡。',
 };
 
 export interface StageDef {
@@ -134,6 +136,24 @@ export const STAGES: StageDef[] = [
     templateTitle: null, permission: 'booking.room_check',
     hint: '退房後檢查房間，回報有沒有損壞與建議扣多少；會計那邊的「押金退款」會直接帶入你填的金額。',
   },
+
+  // ---------------- 資料補登（房務）
+  //
+  // 一筆訂單身上一點布巾數量都沒有，洗滌單與洗滌成本就都算不到它。會發生在三種來源：
+  // 第三方平台匯入的包棟訂單（OTA 的 iCal 不帶房間資訊）、批次匯入沒填房型的、人工建單取消勾房的。
+  //
+  // 不看狀態也不看日期（statuses 留空、走 appliesTo）：已經住完的訂單一樣要補，否則那幾晚的
+  // 洗滌成本就永遠少一塊。離開佇列的方式是「填了數量」或「按確認」——按確認是給「這筆真的不用布巾」
+  // （客人自備、純場地租借）用的，否則填 0 會因為條件還成立而一直冒出來。
+  {
+    key: 'linen_backfill', group: 'backfill', title: '待補布巾數量', statuses: [],
+    appliesTo: (b) => !!b.needs_linen_backfill,
+    action: '補登數量',
+    color: '#b45309', colorLight: '#fef3c7', nextStatus: null, confirmAdvances: false, fields: ['linen'],
+    money: 'total', amountLabel: null, amountOf: () => null,
+    templateTitle: null, permission: 'booking.linen.manage',
+    hint: '這些訂單還沒有任何布巾數量，洗滌單與洗滌成本都算不到。沒有房間的（多半是第三方平台的包棟訂單）可以在這裡直接選房間，再按「回復預設」算出數量。確定不需要布巾就直接按確認。',
+  },
 ];
 
 export const stageByKey = (key: StageKey) => STAGES.find((s) => s.key === key)!;
@@ -141,7 +161,7 @@ export const stageByKey = (key: StageKey) => STAGES.find((s) => s.key === key)!;
 export const stageApplies = (stage: StageDef, b: BookingRow) => stage.statuses.includes(b.status) || !!stage.appliesTo?.(b);
 /** 這個狀態會出現在哪幾個關卡（一筆訂單可以同時有好幾張卡） */
 export const stagesForStatus = (status: string) => STAGES.filter((s) => s.statuses.includes(status));
-export const groupsOf = (stages: StageDef[]): StageGroup[] => (['payment', 'checkin', 'checkout'] as StageGroup[]).filter((g) => stages.some((s) => s.group === g));
+export const groupsOf = (stages: StageDef[]): StageGroup[] => (['payment', 'checkin', 'checkout', 'backfill'] as StageGroup[]).filter((g) => stages.some((s) => s.group === g));
 
 /** 只有「入住準備」需要時間窗：太遠的訂單現在準備也沒意義 */
 export const WINDOW_OPTIONS = [3, 7, 14, 0] as const; // 0＝全部
