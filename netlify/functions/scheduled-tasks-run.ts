@@ -296,15 +296,16 @@ async function advanceToCheckedIn(config: Record<string, any>, settings: any): P
   //
   // 改成依「今天入住」這個事實重新查一次，涵蓋剛轉好的直接訂房與 OTA 訂單。
   // 也因此即使今天沒有任何訂單需要轉狀態，只要有 OTA 訂單入住，洗滌單一樣要發。
-  const { data: laundryBookings } = await supabase
-    .from('bookings')
-    .select('*')
-    .eq('checkin_date', today)
-    .in('status', ['checked_in', 'external_synced']);
-
-  const laundry = (laundryBookings || []).length
-    ? await sendLaundryNotice(config, today, laundryBookings || [], settings)
-    : null;
+  // 沒設定洗滌單範本／收件人的安裝（sendLaundryNotice 會直接回 null）就不用白查一次。
+  let laundry: string | null = null;
+  if (readNoticeSetup(config)) {
+    const { data: laundryBookings } = await supabase
+      .from('bookings')
+      .select('*')
+      .eq('checkin_date', today)
+      .in('status', ['checked_in', 'external_synced']);
+    if (laundryBookings?.length) laundry = await sendLaundryNotice(config, today, laundryBookings, settings);
+  }
 
   if (!advanced.length) {
     return { ok: true, summary: `沒有今日入住、需要轉為入住中的訂單${laundry ? `；${laundry}` : ''}` };

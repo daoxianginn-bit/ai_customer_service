@@ -8,7 +8,7 @@ import { ClipboardCopy, X } from 'lucide-react';
 import { BATCH_COLUMNS, BATCH_TEMPLATE_HEADER, parseBatchBookings } from './batchImport';
 import { createBookingsBatch } from './bookingActions';
 import { fetchMoneyDefaults, fetchRooms, fetchLinenSetup } from './bookingQueries';
-import { computeUsage, normalizeChangeCount, type LinenItem, type RoomLinenDefault } from '../../lib/linenCost';
+import { computeUsage, type LinenItem, type RoomLinenDefault } from '../../lib/linenCost';
 import type { RoomOption } from '../../lib/rooms';
 import { useConfirm } from '../../components/ui-mui/ConfirmDialogProvider';
 
@@ -85,7 +85,7 @@ export default function BatchCreateDialog({
           payload: r.payload!,
           roomIds: r.roomIds,
           // 布巾預設用量跟人工建單同一個算法；換洗次數批次裡沒有欄位，用 1 次（跟新增訂單的預設一致）。
-          usage: r.roomIds.length ? computeUsage(r.roomIds, linen.defaults, normalizeChangeCount(1), linen.items) : [],
+          usage: r.roomIds.length ? computeUsage(r.roomIds, linen.defaults, 1, linen.items) : [],
         })),
         linen.items.length > 0
       );

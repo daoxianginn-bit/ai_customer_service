@@ -112,12 +112,15 @@ export default function StagePanel({ open, stage, booking, action, onClose, onCh
     setDone(null); setRemitError(''); setLinen(null);
     if (has('linen')) {
       setLinenLoading(true);
-      Promise.all([fetchLinenSetup(), fetchBookingLinen(booking.id), fetchRooms()])
+      // 房間清單只有「待補布巾數量」那一關用得到。洗滌清單不給改房間，就不要為它多打一支查詢，
+      // 行為也維持跟以前完全一樣。
+      const needRooms = stage.key === 'linen_backfill';
+      Promise.all([fetchLinenSetup(), fetchBookingLinen(booking.id), needRooms ? fetchRooms() : Promise.resolve([])])
         .then(([setup, mine, allRooms]) => {
           setRooms(allRooms);
           // 一開啟就記住「進來的時候有沒有房間」。房間選擇器只開放給本來就沒有房間的訂單，
           // 這個判斷必須鎖在開啟當下——不然使用者剛選完房、roomIds 有值了，選擇器就自己消失。
-          roomsWereEmptyRef.current = mine.roomIds.length === 0;
+          roomsWereEmptyRef.current = needRooms && mine.roomIds.length === 0;
           setLinen({ items: setup.items, defaults: setup.defaults, roomIds: mine.roomIds, usage: mine.usage });
         })
         .finally(() => setLinenLoading(false));

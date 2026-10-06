@@ -144,10 +144,12 @@ export default function ProcessPage() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [resending, setResending] = useState(false);
 
+  // 只有看得到「待補布巾數量」的人才去算那一關，不然每 30 秒替會計白跑一組最大的查詢。
+  const canBackfillLinen = useMemo(() => myStages.some((s) => s.key === 'linen_backfill'), [myStages]);
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
-    try { setData(await fetchQueues()); setError(null); } catch (e: any) { if (!silent) setError(e.message || '讀取失敗'); } finally { if (!silent) setLoading(false); }
-  }, []);
+    try { setData(await fetchQueues(canBackfillLinen)); setError(null); } catch (e: any) { if (!silent) setError(e.message || '讀取失敗'); } finally { if (!silent) setLoading(false); }
+  }, [canBackfillLinen]);
   useEffect(() => { load(); }, [load]);
 
   // 即時更新：Realtime 有開就吃它的事件；沒開（或斷線）靠 30 秒背景重抓兜底

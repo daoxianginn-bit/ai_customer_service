@@ -85,9 +85,9 @@ function splitLine(line: string, delimiter: string): string[] {
   return out;
 }
 
-/** 標題與儲存格都先正規化再比對：來源是試算表，前後空白與全形空格是常態。 */
+/** 標題與儲存格都先正規化再比對：來源是試算表，前後空白是常態（\s 本來就含全形空格）。 */
 function normalizeHeader(raw: string): string {
-  return raw.replace(/[\s　]/g, '');
+  return raw.replace(/\s/g, '');
 }
 
 function cell(raw: string | undefined): string {
@@ -159,7 +159,7 @@ function resolveRooms(raw: string, rooms: RoomOption[]): { ids: string[]; unknow
   const wanted = raw.split(/[、,，/／]/).map((s) => s.trim()).filter(Boolean);
   const ids: string[] = [];
   const unknown: string[] = [];
-  const key = (s: string) => s.replace(/[\s　]/g, '').toLowerCase();
+  const key = (s: string) => s.replace(/\s/g, '').toLowerCase();
 
   for (const w of wanted) {
     const hit = rooms.find((r) => key(r.name) === key(w) || key(roomLabel(r)) === key(w));

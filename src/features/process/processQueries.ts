@@ -49,15 +49,16 @@ const RECENT_DAYS = 7;
  *   沒按過確認 —— 不然「這筆真的不用布巾」會因為數量永遠是 0 而每次都重新冒出來
  */
 async function attachLinenBackfill(rows: BookingRow[]): Promise<BookingRow[]> {
+  // 先只拿 id 判斷誰需要補。這個查詢沒有日期範圍（住完的訂單一樣要補成本），訂單累積久了
+  // 會是整頁最大的一筆——拿整列回來只為了算一個布林值，代價差很多。
   const { data: candidates, error } = await supabase
     .from('bookings')
-    .select('*')
-    .in('status', OCCUPYING_STATUSES)
-    .order('checkin_date', { ascending: false });
+    .select('id')
+    .in('status', OCCUPYING_STATUSES);
   // 查不到就當作沒有這一關，不要讓整個工作台開不起來
   if (error || !candidates?.length) return rows;
 
-  const candidateIds = (candidates as BookingRow[]).map((b) => b.id);
+  const candidateIds = candidates.map((b: any) => b.id);
   const [{ data: usage }, { data: done }] = await Promise.all([
     supabase.from('booking_linen_usage').select('booking_id, quantity').in('booking_id', candidateIds),
     supabase.from('booking_stage_actions').select('booking_id').eq('stage', 'linen_backfill').in('booking_id', candidateIds),
@@ -65,19 +66,32 @@ async function attachLinenBackfill(rows: BookingRow[]): Promise<BookingRow[]> {
 
   const hasQty = new Set((usage || []).filter((u: any) => Number(u.quantity) > 0).map((u: any) => u.booking_id));
   const confirmed = new Set((done || []).map((a: any) => a.booking_id));
-  const needs = new Set(candidateIds.filter((id) => !hasQty.has(id) && !confirmed.has(id)));
+  const needs = candidateIds.filter((id: string) => !hasQty.has(id) && !confirmed.has(id));
+  if (!needs.length) return rows;
 
   const byId = new Map(rows.map((b) => [b.id, b]));
-  for (const b of candidates as BookingRow[]) {
-    if (!needs.has(b.id)) continue;
-    const existing = byId.get(b.id);
+  // 已經在佇列裡的（款項／入住準備那些關卡撈過的）直接掛旗標，只有不在的才需要再查整列。
+  const missing = needs.filter((id: string) => !byId.has(id));
+  for (const id of needs) {
+    const existing = byId.get(id);
     if (existing) existing.needs_linen_backfill = true;
-    else byId.set(b.id, { ...b, needs_linen_backfill: true });
+  }
+  if (missing.length) {
+    const { data: extra } = await supabase
+      .from('bookings')
+      .select('*')
+      .in('id', missing)
+      .order('checkin_date', { ascending: false });
+    for (const b of (extra || []) as BookingRow[]) byId.set(b.id, { ...b, needs_linen_backfill: true });
   }
   return [...byId.values()];
 }
 
-export async function fetchQueues(): Promise<QueueData> {
+/**
+ * @param withLinenBackfill 看得到「待補布巾數量」那一關的人才要算。會計、客服看不到那一關，
+ *   算了也沒有地方顯示——而那是這一頁最大的一組查詢，每 30 秒輪詢一次更不該白跑。
+ */
+export async function fetchQueues(withLinenBackfill = false): Promise<QueueData> {
   const statuses = STAGES.flatMap((s) => s.statuses);
   const since = new Date(Date.now() - RECENT_DAYS * 86400e3).toISOString();
   const [{ data: bookings, error }, { data: recentActions }, { data: withExtras }] = await Promise.all([
@@ -94,8 +108,8 @@ export async function fetchQueues(): Promise<QueueData> {
 
   // 「待補布巾數量」的佇列。另外撈的原因跟追加款那一關一樣：上面那個查詢只收「關卡狀態的聯集」，
   // 而第三方平台匯入的訂單是 external_synced，從來不在任何關卡的狀態清單裡——不另外撈就永遠看不到。
-  // 不限日期（已經住完的也要補，否則那幾晚的洗滌成本永遠少一塊），靠下面兩個條件收斂。
-  rows = await attachLinenBackfill(rows);
+  // 不限日期（已經住完的也要補，否則那幾晚的洗滌成本永遠少一塊），靠裡面兩個條件收斂。
+  if (withLinenBackfill) rows = await attachLinenBackfill(rows);
 
   const ids = rows.map((b) => b.id);
   const { data: actions } = ids.length ? await supabase.from('booking_stage_actions').select('*').in('booking_id', ids) : { data: [] };
