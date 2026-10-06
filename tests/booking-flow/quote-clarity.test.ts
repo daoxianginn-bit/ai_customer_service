@@ -109,7 +109,7 @@ const ex = (m: string, opts?: any) => extractStepFieldsWithoutAi(m, fields as an
   t('人數｜被問人數時回「9」仍然是 9 人', ex('9').headcount === '9');
 
   // ===== 冷啟動 =====
-  let c = await cold('9/29-30');
+  const c = await cold('9/29-30');
   t('冷啟動｜「9/29-30」→ 開流程、只問人數（不再問退房、不用 30 人）', c.handled === true && /人數/.test(c.replies[0] || '') && !/退房/.test(c.replies[0] || '') && c.session?.collected?.headcount === undefined, c);
 
   // ===== 報價後：問的是目前的組合 =====
