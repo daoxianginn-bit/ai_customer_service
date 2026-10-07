@@ -220,7 +220,7 @@ export default function StagePanel({ open, stage, booking, action, onClose, onCh
   const damage = damageSummary(booking);
 
   const header = (
-    <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', px: 2.5, py: 1.5, borderBottom: '1px solid', borderColor: 'divider' }}>
+    <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', px: 2.5, py: 1.5, borderBottom: '1px solid', borderColor: 'divider', flexShrink: 0 }}>
       <Stack direction="row" spacing={1} alignItems="center" sx={{ minWidth: 0 }}>
         <Chip label={stage.action} size="small" sx={{ bgcolor: stage.color, color: '#fff', fontWeight: 600 }} />
         <Typography variant="h6" noWrap sx={{ fontFamily: 'monospace', fontSize: 16 }}>{booking.order_number}</Typography>
@@ -454,7 +454,7 @@ export default function StagePanel({ open, stage, booking, action, onClose, onCh
   );
 
   const footer = !done && (
-    <Box sx={{ px: 2.5, py: 1.5, borderTop: '1px solid', borderColor: 'divider', display: 'flex', gap: 1, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
+    <Box sx={{ px: 2.5, py: 1.5, borderTop: '1px solid', borderColor: 'divider', display: 'flex', gap: 1, justifyContent: 'flex-end', flexWrap: 'wrap', flexShrink: 0 }}>
       <Button color="inherit" onClick={onClose} disabled={busy}>取消</Button>
       {/* 高亮動作鈕就是「確認」：清單上按的是哪顆，視窗裡按的就是同一顆 */}
       <Button variant="contained" onClick={() => run(false)} disabled={busy || !canAct} startIcon={<Check size={16} />} sx={{ bgcolor: stage.color, fontWeight: 600, boxShadow: 'none', '&:hover': { bgcolor: stage.color, filter: 'brightness(.92)', boxShadow: 'none' } }}>
@@ -468,10 +468,17 @@ export default function StagePanel({ open, stage, booking, action, onClose, onCh
     </Box>
   );
 
+  // 外層這個 Box 也要 minHeight: 0。它自己是 DialogContent 的 flex 子項，height:100% 只是
+  // 「基準高度」，min-height: auto 一樣會讓它撐到內容的完整高度、溢出的部分被 overflow:hidden 切掉。
+  // 只在裡面那層加不夠——外層先撐開了，裡面就永遠分不到「需要捲動」的狀態。
   const content = (
-    <Box sx={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+    <Box sx={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       {header}
-      <Box sx={{ p: 2.5, overflow: 'auto', flex: 1 }}>
+      {/* minHeight: 0 不能省。flex 子項的 min-height 預設是 auto，也就是「不准縮得比內容還小」，
+          所以 flex: 1 + overflow: auto 其實不會捲動——這一塊會撐到內容的完整高度，把下面的
+          頁尾（確認鈕）連同超出的內容一起擠到對話框外面。畫面高度夠的時候看不出來，
+          筆電的 650px 左右就會發生：洗物數量在最底下，剛好是被擠出去看不到的那一段。 */}
+      <Box sx={{ p: 2.5, overflow: 'auto', flex: 1, minHeight: 0 }}>
         {done ? doneView : (
           <Stack spacing={3}>
             {info}
