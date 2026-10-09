@@ -23,9 +23,9 @@ t('待入住同時出現在 洗滌清單 與 入住密碼 兩關', (() => {
   const keys = stagesForStatus('awaiting_checkin').map((s) => s.key).sort();
   return keys.join() === 'checkin_password,linen' && stagesForStatus('checked_in').map((s) => s.key).sort().join() === keys.join();
 })(), stagesForStatus('awaiting_checkin').map((s) => s.key));
-t('押金處理：房況檢查（房務）與 押金退款（會計）都在，另外還能回頭補密碼與洗物', (() => {
+t('押金處理同時出現在 房況檢查（房務）與 押金退款（會計）兩關', (() => {
   const keys = stagesForStatus('deposit_processing').map((s) => s.key).sort();
-  return keys.join() === 'checkin_password,deposit_processing,linen,room_check';
+  return keys.join() === 'deposit_processing,room_check';
 })(), stagesForStatus('deposit_processing').map((s) => s.key));
 
 // ---- 推進目標與狀態機一致
@@ -59,11 +59,8 @@ const backfill = stage('linen_backfill');
 t('待補布巾數量不看狀態，只看旗標', backfill.statuses.length === 0 && typeof backfill.appliesTo === 'function');
 t('有旗標才進佇列', !!backfill.appliesTo!({ id: 'a', status: 'external_synced', needs_linen_backfill: true } as any));
 t('沒旗標不進佇列', !backfill.appliesTo!({ id: 'a', status: 'external_synced' } as any));
-t('第三方平台訂單也進得了入住準備的兩關（房務要能幫它設密碼、確認布巾）',
-  stagesForStatus('external_synced').map((s) => s.key).sort().join() === 'checkin_password,linen',
-  stagesForStatus('external_synced').map((s) => s.key));
-t('沒有數量的第三方訂單仍然靠這一關被撈出來（那一關不受入住日時間窗限制）',
-  !!backfill.appliesTo!({ id: 'a', status: 'external_synced', needs_linen_backfill: true } as any) && !stageUsesWindow(backfill));
+t('第三方平台訂單本來不屬於任何關卡，靠這一關才看得到',
+  stagesForStatus('external_synced').length === 0 && !!backfill.appliesTo!({ id: 'a', status: 'external_synced', needs_linen_backfill: true } as any));
 t('這一關不推進狀態（補資料不該改訂單流程）', backfill.nextStatus === null && backfill.confirmAdvances === false);
 t('這一關不發客人通知', backfill.templateTitle === null);
 t('權限跟洗滌清單同一個（都是房務）', backfill.permission === stage('linen').permission);
@@ -75,15 +72,6 @@ t('只有入住準備用時間窗', STAGES.filter(stageUsesWindow).map((s) => s.
 t('14 天內的算在內、第 20 天的不算', withinCheckinWindow(bk('2026-09-29'), 14, today) && !withinCheckinWindow(bk('2026-10-06'), 14, today));
 t('今天入住、昨天就入住（入住中）都算在內', withinCheckinWindow(bk('2026-09-16'), 3, today) && withinCheckinWindow(bk('2026-09-10'), 3, today));
 t('選「全部」時不過濾', withinCheckinWindow(bk('2027-01-01'), 0, today));
-
-// 關卡放寬到「訂金收了以後」之後，押金處理／已處理的訂單也會進入住準備那兩關。
-// 時間窗原本只擋未來那一側（入住日在過去永遠成立），住完的訂單會就這樣永久卡在佇列裡。
-const stay = (checkin: string, checkout: string) => ({ id: 'x', status: 'completed', checkin_date: checkin, checkout_date: checkout }) as any;
-t('已經退房的不佔住佇列', !withinCheckinWindow(stay('2026-09-01', '2026-09-03'), 14, today));
-t('昨天入住、明天才退房（還在現場）算在內', withinCheckinWindow(stay('2026-09-15', '2026-09-17'), 14, today));
-t('今天退房的還算在內（退房當天房務還要收布巾）', withinCheckinWindow(stay('2026-09-14', '2026-09-16'), 14, today));
-t('切「全部」時住完的也看得到（回頭補密碼與洗物）', withinCheckinWindow(stay('2026-09-01', '2026-09-03'), 0, today));
-t('沒有退房日的不受這條影響', withinCheckinWindow(bk('2026-09-10'), 14, today));
 
 // ---- 排序：越急越上面
 const q = sortQueue(stage('awaiting_confirmation'), [

@@ -299,8 +299,7 @@ export default function BookingEditDialog({ open, booking, onClose, onSaved }: P
         total_amount: form.total_amount === '' ? null : Number(form.total_amount),
         deposit: form.deposit === '' ? null : Number(form.deposit),
         remit_last5: form.remit_last5 || null,
-        // 收到訂金以後都可以有值（房務要能提前準備）；報價中與取消／退款的訂單則清空——
-        // 已經取消的訂單不該留著大門密碼。
+        // 只有「待入住」「入住中」才允許有值——不是這些狀態時一律清空，不要讓舊密碼在不該生效的狀態下還留著。
         check_in_password: CHECKIN_PASSWORD_STATUSES.includes(targetStatus) ? (form.check_in_password || null) : null,
         status: targetStatus,
         guest_notes: form.guest_notes || null,
@@ -586,7 +585,7 @@ export default function BookingEditDialog({ open, booking, onClose, onSaved }: P
                       {field('check_in_password', '入住密碼', {
                         disabled: !CHECKIN_PASSWORD_STATUSES.includes(form.status),
                         placeholder: '入住時用來核對身分的密碼／門禁碼',
-                        helperText: !CHECKIN_PASSWORD_STATUSES.includes(form.status) ? '收到訂金之後才能設定；取消／退款的訂單存檔時會清掉密碼' : undefined,
+                        helperText: !CHECKIN_PASSWORD_STATUSES.includes(form.status) ? '僅「待入住」「入住中」狀態可填' : undefined,
                       })}
                     </Grid>
                     {/* 顧客備註跟內部備註刻意分成兩格：一個是客人在 LINE 上打的字（訂房流程自動寫入），一個是客服自己記的。 */}

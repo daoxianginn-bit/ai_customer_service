@@ -160,21 +160,8 @@ export const REQUIRES_REMIT_LAST5_STATUS = 'reserved';
 
 // 選這個狀態時才能填寫「入住密碼」欄位（前端表單驗證），其餘狀態這個欄位鎖住不可編輯。
 export const REQUIRES_CHECKIN_PASSWORD_STATUS = 'awaiting_checkin';
-
-/**
- * 可以設定、而且會保留「入住密碼」與「布巾用量」的狀態：訂金收了以後，加上第三方平台匯入的訂單。
- *
- * 原本只認「待入住／入住中」，其餘狀態一律把密碼清成 null。那讓房務沒辦法提前準備：在「已預定」
- * 階段設好的密碼，下次任何人編輯那張訂單存檔就被默默清掉，而且當事人不會收到任何提示。
- *
- * 現在改成「訂金收了就算數」——訂單確定會發生之後才有備料的意義，而還停在報價階段的訂單多半
- * 不會成立。沒列在這裡的狀態（報價中、取消、退款）存檔時仍然會清掉密碼：
- * 已經取消的訂單不該留著大門密碼。
- */
-export const CHECKIN_PASSWORD_STATUSES = [
-  'reserved', 'awaiting_balance', 'awaiting_checkin', 'checked_in',
-  'deposit_processing', 'completed', 'external_synced',
-];
+// 2026-09 訂單處理：入住中也要能改密碼（客人住到一半換密碼、或入住當天才設定），其餘狀態一律清空。
+export const CHECKIN_PASSWORD_STATUSES = ['awaiting_checkin', 'checked_in'];
 
 // 訂單管理頁「訂單流程狀態」進度列用的 9 步驟正常流程，依序前進；取消/待退款/已退款/待人工確認
 // 是例外流程，不在這個序列裡（flowStepIndex 對它們回傳 null，畫面上另外用例外樣式呈現，
