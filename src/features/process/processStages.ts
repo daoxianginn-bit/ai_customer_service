@@ -65,7 +65,16 @@ const num = (v: unknown) => (v == null || v === '' ? null : Number(v));
 const balanceOf = (b: BookingRow) => computeBalanceDue(b);
 /** 取消退款的應退：訂金＋已付追加款 */
 const paidOf = (b: BookingRow) => (num(b.deposit) == null && !Number(b.extra_paid_total || 0) ? null : Number(b.deposit || 0) + Number(b.extra_paid_total || 0));
-const CHECKIN_STATUSES = ['awaiting_checkin', 'checked_in'];
+// 「入住準備」兩張卡（洗滌清單、入住密碼）收的訂單：已預定 ~ 入住中。
+//
+// 原本只收「待入住／入住中」。問題是「待收尾款 → 待入住」那一步沒有排程、只能人工按
+// （見 awaiting_balance 關卡的 nextStatus），尾款沒人確認的訂單就會一路停在待收尾款，
+// 連客人當天要來了都還沒進到待入住——房務因此完全碰不到那筆單。
+// 收到訂金之後訂單就確定會發生，備料不該再等前面那一關。
+//
+// 刻意不含押金處理與已處理：那兩個是退房後的狀態，備料已經沒有意義，放進來只會讓
+// 住完的訂單堆在佇列裡。要回頭補已經住完的布巾成本，走「資料補登」那一關。
+const CHECKIN_STATUSES = ['reserved', 'awaiting_balance', 'awaiting_checkin', 'checked_in'];
 
 export const STAGES: StageDef[] = [
   // ---------------- 款項處理（會計）

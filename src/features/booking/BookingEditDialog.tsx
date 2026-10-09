@@ -299,7 +299,8 @@ export default function BookingEditDialog({ open, booking, onClose, onSaved }: P
         total_amount: form.total_amount === '' ? null : Number(form.total_amount),
         deposit: form.deposit === '' ? null : Number(form.deposit),
         remit_last5: form.remit_last5 || null,
-        // 只有「待入住」「入住中」才允許有值——不是這些狀態時一律清空，不要讓舊密碼在不該生效的狀態下還留著。
+        // 「已預定」到「入住中」之間才允許有值（房務要能提前準備），其餘狀態一律清空，
+        // 不要讓舊密碼在不該生效的狀態下還留著。
         check_in_password: CHECKIN_PASSWORD_STATUSES.includes(targetStatus) ? (form.check_in_password || null) : null,
         status: targetStatus,
         guest_notes: form.guest_notes || null,
@@ -585,7 +586,7 @@ export default function BookingEditDialog({ open, booking, onClose, onSaved }: P
                       {field('check_in_password', '入住密碼', {
                         disabled: !CHECKIN_PASSWORD_STATUSES.includes(form.status),
                         placeholder: '入住時用來核對身分的密碼／門禁碼',
-                        helperText: !CHECKIN_PASSWORD_STATUSES.includes(form.status) ? '僅「待入住」「入住中」狀態可填' : undefined,
+                        helperText: !CHECKIN_PASSWORD_STATUSES.includes(form.status) ? '「已預定」到「入住中」之間才能填；其他狀態存檔時會清空' : undefined,
                       })}
                     </Grid>
                     {/* 顧客備註跟內部備註刻意分成兩格：一個是客人在 LINE 上打的字（訂房流程自動寫入），一個是客服自己記的。 */}

@@ -2,7 +2,7 @@
 import {
   STAGES, damageSummary, defaultTemplateFor, groupsOf, mergeTemplate, sortQueue, stageByKey, stagesForStatus, stageUsesWindow, withinCheckinWindow,
 } from '../../src/features/process/processStages';
-import { MANUAL_ACTION_STATUSES, nextFlowStatus } from '../../src/lib/bookingStatus';
+import { CHECKIN_PASSWORD_STATUSES, MANUAL_ACTION_STATUSES, nextFlowStatus } from '../../src/lib/bookingStatus';
 import { PERMISSION_CATALOG, ROLE_TEMPLATES, withDependencies } from '../../src/app/permissions';
 
 const checks: [string, boolean, string?][] = [];
@@ -65,6 +65,30 @@ t('這一關不推進狀態（補資料不該改訂單流程）', backfill.nextS
 t('這一關不發客人通知', backfill.templateTitle === null);
 t('權限跟洗滌清單同一個（都是房務）', backfill.permission === stage('linen').permission);
 t('不吃入住時間窗（住完的也要補）', !stageUsesWindow(backfill));
+// ---- 入住準備：已預定 ~ 入住中都能備料
+//
+// 「待收尾款 → 待入住」沒有排程、只能人工按，尾款沒人確認的訂單會一路停在待收尾款。
+// 只收待入住／入住中的話，客人當天要來了房務還是碰不到那筆單。
+const prepStatuses = ['reserved', 'awaiting_balance', 'awaiting_checkin', 'checked_in'];
+for (const s of prepStatuses) {
+  t(`${s}：洗滌清單與入住密碼都進得去`,
+    stagesForStatus(s).map((x) => x.key).sort().join().includes('checkin_password')
+    && stagesForStatus(s).map((x) => x.key).includes('linen'),
+    stagesForStatus(s).map((x) => x.key));
+}
+t('押金處理不進入住準備（退房後備料沒有意義，要補成本走資料補登）',
+  !stagesForStatus('deposit_processing').some((s) => s.group === 'checkin'),
+  stagesForStatus('deposit_processing').map((s) => s.key));
+t('已處理不進入住準備', !stagesForStatus('completed').some((s) => s.group === 'checkin'));
+t('第三方平台訂單仍然只靠資料補登那一關',
+  stagesForStatus('external_synced').length === 0);
+
+// 兩份清單必須一字不差。不一致的後果是「房務在工作台設好密碼，別人下一次編輯那張訂單存檔
+// 就把它清成 null」——而且畫面上不會有任何提示，是會默默吃掉資料的那種錯。
+t('可填密碼的狀態＝入住密碼那一關收的狀態',
+  [...CHECKIN_PASSWORD_STATUSES].sort().join() === stage('checkin_password').statuses.slice().sort().join(),
+  { 密碼欄位: CHECKIN_PASSWORD_STATUSES, 關卡: stage('checkin_password').statuses });
+
 // ---- 入住準備的時間窗
 const bk = (checkin: string) => ({ id: 'x', status: 'awaiting_checkin', checkin_date: checkin }) as any;
 const today = new Date('2026-09-16T08:00:00');
