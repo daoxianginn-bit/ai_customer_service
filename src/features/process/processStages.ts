@@ -65,7 +65,19 @@ const num = (v: unknown) => (v == null || v === '' ? null : Number(v));
 const balanceOf = (b: BookingRow) => computeBalanceDue(b);
 /** 取消退款的應退：訂金＋已付追加款 */
 const paidOf = (b: BookingRow) => (num(b.deposit) == null && !Number(b.extra_paid_total || 0) ? null : Number(b.deposit || 0) + Number(b.extra_paid_total || 0));
-const CHECKIN_STATUSES = ['awaiting_checkin', 'checked_in'];
+/**
+ * 「入住準備」兩張卡（洗滌清單、入住密碼）收的訂單：訂金收了以後，加上第三方平台匯入的。
+ *
+ * 原本只收「待入住／入住中」，等於房務只能在入住前幾天才動得了手。客人提前兩個月就訂了，
+ * 想先把密碼設好、把布巾數量確認好，在系統裡沒有地方可以做。改成訂單確定會發生之後就能準備。
+ *
+ * 放寬之後佇列會變長，靠「入住日」那個 3／7／14 天／全部的篩選收斂：預設 14 天就是平常的工作量，
+ * 要提前處理或回頭補已經住完的訂單再切「全部」。
+ */
+const CHECKIN_STATUSES = [
+  'reserved', 'awaiting_balance', 'awaiting_checkin', 'checked_in',
+  'deposit_processing', 'completed', 'external_synced',
+];
 
 export const STAGES: StageDef[] = [
   // ---------------- 款項處理（會計）
@@ -168,13 +180,22 @@ export const WINDOW_OPTIONS = [3, 7, 14, 0] as const; // 0＝全部
 export const DEFAULT_WINDOW_DAYS = 14;
 export const stageUsesWindow = (stage: StageDef) => stage.group === 'checkin';
 
-/** 入住日在今天起 days 天內（含已經入住中的）。days<=0＝不限 */
+/** 入住日在今天起 days 天內（含已經入住中的），且還沒退房。days<=0＝不限 */
 export function withinCheckinWindow(b: BookingRow, days: number, today = new Date()): boolean {
   if (days <= 0 || !b.checkin_date) return true;
   const start = new Date(today); start.setHours(0, 0, 0, 0);
   const limit = new Date(start); limit.setDate(limit.getDate() + days);
   const checkin = new Date(`${b.checkin_date}T00:00:00`);
-  return checkin < limit; // 已經過了入住日（入住中）也算，還在現場
+  if (checkin >= limit) return false; // 還太遠，現在準備也沒意義
+  // 已經退房的不算。時間窗本來只擋未來那一側，而「入住日在過去」永遠成立——關卡放寬到
+  // 收押金處理、已處理之後，住完的訂單會就這樣永久卡在佇列裡。要回頭補它們，把時間窗切到「全部」。
+  if (b.checkout_date && `${b.checkout_date}`.slice(0, 10) < isoDay(start)) return false;
+  return true; // 入住中也算，客人還在現場
+}
+
+function isoDay(d: Date): string {
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
 /** 佇列排序：越急越上面 */
