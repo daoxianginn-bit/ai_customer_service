@@ -3,7 +3,7 @@ import {
   Alert, Box, Button, Checkbox, Chip, Dialog, DialogContent, Divider, IconButton, InputAdornment, Skeleton, Stack, TextField, ToggleButton, ToggleButtonGroup, Tooltip, Typography,
 } from '@mui/material';
 import { useSnackbar } from 'notistack';
-import { ArrowRight, Check, Minus, Plus, RotateCcw, Send, Shuffle, X } from 'lucide-react';
+import { ArrowRight, Check, Minus, Plus, RotateCcw, Send, X } from 'lucide-react';
 import { useAuth } from '../../lib/AuthContext';
 import { usePermissions } from '../../app/PermissionContext';
 import { useBreakpoint } from '../../app/useBreakpoint';
@@ -40,7 +40,22 @@ function QtyStepper({ label, value, onChange, disabled }: { label: string; value
     <Stack direction="row" alignItems="center" spacing={1} sx={{ py: 0.75, borderBottom: '1px solid', borderColor: 'divider' }}>
       <Typography variant="body2" sx={{ flex: 1, minWidth: 0 }}>{label}</Typography>
       <IconButton size="small" onClick={() => onChange(Math.max(0, value - 1))} disabled={disabled || value <= 0} aria-label={`${label} 減一`}><Minus size={16} /></IconButton>
-      <Typography variant="h6" sx={{ width: 40, textAlign: 'center', fontVariantNumeric: 'tabular-nums' }}>{value}</Typography>
+      {/* 可以直接打字，不是只能一下一下按。備 20 條浴巾按 20 次加號不合理。
+          空字串當成 0 處理，但不要在輸入中途就塞回 0——那會讓使用者刪掉舊數字想重打時
+          游標前面突然冒出一個 0。 */}
+      <TextField
+        size="small"
+        value={value === 0 ? '' : String(value)}
+        placeholder="0"
+        onChange={(e) => {
+          const digits = e.target.value.replace(/[^\d]/g, '');
+          onChange(digits === '' ? 0 : Math.min(9999, Number(digits)));
+        }}
+        onFocus={(e) => e.target.select()}
+        disabled={disabled}
+        inputProps={{ inputMode: 'numeric', 'aria-label': `${label} 數量`, style: { textAlign: 'center', fontVariantNumeric: 'tabular-nums', padding: '4px 0' } }}
+        sx={{ width: 56, '& .MuiOutlinedInput-root': { fontSize: '1.05rem' } }}
+      />
       <IconButton size="small" onClick={() => onChange(value + 1)} disabled={disabled} aria-label={`${label} 加一`}><Plus size={16} /></IconButton>
     </Stack>
   );
@@ -344,7 +359,6 @@ export default function StagePanel({ open, stage, booking, action, onClose, onCh
             helperText="大門／房門密碼，排程會用 [入住密碼] 發給客人" inputProps={{ inputMode: 'numeric' }}
             sx={{ maxWidth: 200, '& input': { fontSize: 24, letterSpacing: 4, fontFamily: 'monospace' } }}
           />
-          <Button size="small" startIcon={<Shuffle size={14} />} onClick={() => setPassword(String(Math.floor(1000 + Math.random() * 9000)))} disabled={!canAct} sx={{ mt: 1.5 }}>隨機</Button>
         </Stack>
       )}
 

@@ -7,7 +7,7 @@
 // 而不是拿來當作唯一的把關。這裡做的事情是讓使用者不會看到自己按了也會失敗的功能。
 // ========================================================================
 
-import { hasPermission } from '../app/permissions';
+import { hasPermission, legacyRoleFromPermissions } from '../app/permissions';
 import { navigation, permissionForPath } from '../app/navigation';
 
 /**
@@ -78,13 +78,21 @@ export function canAccessRoute(granted: ReadonlySet<string> | readonly string[] 
 }
 
 /**
- * 使用者登入後該落在哪一頁：選單上第一個他進得去的入口。
+ * 使用者登入後該落在哪一頁。
  *
- * 不寫死某一頁：首頁是房況行事曆，但會計這類角色沒有 calendar.view，寫死的話一登入就吃 403。
- * 順序直接沿用選單順序，所以「把哪一頁放第一個」只要改 navigation.ts。
+ * 管理者看全局，所以沿用選單順序（第一個進得去的入口，目前是房況行事曆）。
+ * 其他人一上班要做的就是「輪到我動手的那幾張單」，直接落在訂單處理，少點兩次。
+ * 判斷管理者用 legacyRoleFromPermissions：跟系統其他地方同一套定義，不另外再發明一個。
+ *
+ * 不寫死某一頁：會計這類角色沒有 calendar.view，寫死的話一登入就吃 403；
+ * 同理沒有 booking.view 的人（例如只做行銷）也不能丟去訂單處理，要退回選單順序。
  */
 export function defaultRouteFor(granted: ReadonlySet<string> | readonly string[] | null | undefined): string {
   if (!granted) return '/';
+  const codes = granted instanceof Set ? granted : new Set(granted);
+  if (legacyRoleFromPermissions(codes) !== 'admin' && hasPermission(granted, 'booking.view')) {
+    return '/bookings/process';
+  }
   for (const section of navigation) {
     for (const item of section.items) {
       if (hasPermission(granted, item.permission)) return item.path;

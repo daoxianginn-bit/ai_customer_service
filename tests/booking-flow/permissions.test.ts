@@ -75,7 +75,21 @@ t('canAccessRoute：沒登記的路徑 default deny，只有 system.manage 能�
 t('canAccessRoute：/bookings/:id 用 booking.view', canAccessRoute(new Set(['booking.view']), '/bookings/123') && !canAccessRoute(new Set(['calendar.view']), '/bookings/123'));
 t('canAccessRoute：首頁是房況行事曆（/calendar 要 calendar.view）', canAccessRoute(new Set(['calendar.view']), '/calendar') && !canAccessRoute(new Set(['dashboard.view']), '/calendar'));
 t('defaultRouteFor：落到選單上第一個進得去的入口', defaultRouteFor(new Set(['calendar.view'])) === '/calendar' && defaultRouteFor(new Set(['dashboard.view'])) === '/dashboard' && defaultRouteFor(new Set(['housekeeping.view'])).startsWith('/housekeeping'));
-t('defaultRouteFor：有行事曆權限的人優先落在行事曆（首頁）', defaultRouteFor(new Set(['calendar.view', 'dashboard.view', 'booking.view'])) === '/calendar');
+// 管理者看全局，其他人一上班要做的就是「輪到我動手的那幾張單」。
+t('defaultRouteFor：管理者落在行事曆（首頁）',
+  defaultRouteFor(new Set(['system.manage', 'calendar.view', 'dashboard.view', 'booking.view'])) === '/calendar');
+t('defaultRouteFor：非管理者有 booking.view 就落在訂單處理，即使也有行事曆權限',
+  defaultRouteFor(new Set(['calendar.view', 'dashboard.view', 'booking.view'])) === '/bookings/process');
+t('defaultRouteFor：非管理者沒有 booking.view 時退回選單順序（例如只做行銷）',
+  defaultRouteFor(new Set(['marketing.view', 'customer.view'])) !== '/bookings/process');
+for (const code of ['housekeeping', 'accounting', 'staff']) {
+  const perms = new Set(ROLE_TEMPLATES.find((r) => r.code === code)!.permissions);
+  t(`defaultRouteFor：${code} 落在訂單處理`, defaultRouteFor(perms) === '/bookings/process', defaultRouteFor(perms));
+}
+for (const code of ['super_admin', 'sys_admin']) {
+  const perms = new Set(ROLE_TEMPLATES.find((r) => r.code === code)!.permissions);
+  t(`defaultRouteFor：${code} 不被改道，維持選單順序`, defaultRouteFor(perms) === '/calendar', defaultRouteFor(perms));
+}
 t('defaultRouteFor：完全沒權限時回 /（由 LandingRedirect 轉走）', defaultRouteFor(new Set()) === '/');
 
 let ok = true;
