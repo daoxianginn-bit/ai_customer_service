@@ -65,6 +65,20 @@ t('這一關不推進狀態（補資料不該改訂單流程）', backfill.nextS
 t('這一關不發客人通知', backfill.templateTitle === null);
 t('權限跟洗滌清單同一個（都是房務）', backfill.permission === stage('linen').permission);
 t('不吃入住時間窗（住完的也要補）', !stageUsesWindow(backfill));
+// ---- 歷史訂單（資料補登）
+const history = stage('history');
+t('歷史訂單不看狀態，只看「已退房且真的住過」的旗標',
+  history.statuses.length === 0 && !!history.appliesTo!({ id: 'a', status: 'completed', is_past_stay: true } as any));
+t('沒有旗標就不列入', !history.appliesTo!({ id: 'a', status: 'completed' } as any));
+t('跟待補布巾數量同一組（資料補登）', history.group === 'backfill' && stage('linen_backfill').group === 'backfill');
+t('只開放布巾與房況兩種欄位', history.fields.slice().sort().join() === 'damage,linen');
+t('不開放房間與入住密碼（房間影響撞期判斷、密碼退房後存檔會被清空）',
+  !history.fields.includes('password'), history.fields);
+t('房況欄位另外要求自己的權限，不會被布巾權限帶進來',
+  history.fieldPermissions?.damage === 'booking.room_check');
+t('不推進狀態、也不發客人通知', history.nextStatus === null && history.confirmAdvances === false && history.templateTitle === null);
+t('不吃入住日時間窗（它收的本來就是過去的訂單）', !stageUsesWindow(history));
+
 // ---- 入住準備：已預定 ~ 入住中都能備料
 //
 // 「待收尾款 → 待入住」沒有排程、只能人工按，尾款沒人確認的訂單會一路停在待收尾款。

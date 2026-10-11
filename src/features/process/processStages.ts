@@ -12,7 +12,7 @@ import { BALANCE_PAID_STATUSES } from '../../lib/bookingStatus';
 
 export type StageKey =
   | 'awaiting_confirmation' | 'awaiting_balance' | 'extra_charges' | 'deposit_processing' | 'awaiting_refund'
-  | 'linen' | 'checkin_password' | 'room_check' | 'linen_backfill';
+  | 'linen' | 'checkin_password' | 'room_check' | 'linen_backfill' | 'history';
 export type StageGroup = 'payment' | 'checkin' | 'checkout' | 'backfill';
 export type EditableField = 'remit' | 'balance_remit' | 'refund' | 'password' | 'linen' | 'damage' | 'extras';
 
@@ -58,6 +58,11 @@ export interface StageDef {
   notifyLabel?: string;
   /** 按確認需要的權限 */
   permission: string;
+  /**
+   * 個別欄位另外要求的權限。一關只有一個 permission，但「歷史訂單」同時放了布巾與房況兩種欄位，
+   * 它們在原本的關卡裡是分開授權的——不多這一層的話，只有布巾權限的人會從這裡改到房況。
+   */
+  fieldPermissions?: Partial<Record<EditableField, string>>;
   hint: string;
 }
 
@@ -162,6 +167,23 @@ export const STAGES: StageDef[] = [
     money: 'total', amountLabel: null, amountOf: () => null,
     templateTitle: null, permission: 'booking.linen.manage',
     hint: '這些訂單還沒有任何布巾數量，洗滌單與洗滌成本都算不到。沒有房間的（多半是第三方平台的包棟訂單）可以在這裡直接選房間，再按「回復預設」算出數量。確定不需要布巾就直接按確認。',
+  },
+  //
+  // 已經退房的訂單，回頭修正用。跟上面那一關的差別是「有沒有數量」都列出來：
+  // 洗滌廠帳單對不起來、退房後才發現損壞，這兩件事都是事後才知道的。
+  //
+  // 刻意不開放房間與入住密碼：房間會影響檔期衝突判斷，密碼在退房後的狀態存檔時本來就會被清空
+  // （見 CHECKIN_PASSWORD_STATUSES），放進來只會讓人以為改得動。
+  {
+    key: 'history', group: 'backfill', title: '歷史訂單', statuses: [],
+    appliesTo: (b) => !!b.is_past_stay,
+    action: '修改紀錄',
+    color: '#64748b', colorLight: '#f1f5f9', nextStatus: null, confirmAdvances: false,
+    fields: ['linen', 'damage'],
+    money: 'total', amountLabel: null, amountOf: () => null,
+    templateTitle: null, permission: 'booking.linen.manage',
+    fieldPermissions: { damage: 'booking.room_check' },
+    hint: '已經退房、而且真的住過的訂單（取消與退款不列入）。用來補登或修正布巾數量與房況回報；只列最近 200 筆，更早的請到「訂單」頁查。',
   },
 ];
 

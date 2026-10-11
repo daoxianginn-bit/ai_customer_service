@@ -17,7 +17,7 @@ import AddExtraChargesDialog from '../booking/AddExtraChargesDialog';
 import { fetchBookingLinen, fetchLinenSetup, fetchRooms, type BookingRow } from '../booking/bookingQueries';
 import { roomLabel, type RoomOption } from '../../lib/rooms';
 import { advanceBookingStatus, saveBookingLinen, BookingActionError } from '../booking/bookingActions';
-import { damageSummary, markStageConfirmed, saveStageEdits, type StageAction, type StageDef, type StageEditPatch } from './processQueries';
+import { damageSummary, markStageConfirmed, saveStageEdits, type StageAction, type StageDef, type StageEditPatch, type EditableField } from './processQueries';
 
 // ========================================================================
 // 處理視窗：點一筆訂單後彈出置中視窗（手機整頁），只顯示「這一關需要看的」——訂單編號、訂房資訊、
@@ -78,6 +78,15 @@ export default function StagePanel({ open, stage, booking, action, onClose, onCh
   const { hasPermission } = usePermissions();
   const { isMobile } = useBreakpoint();
   const canAct = hasPermission(stage.permission);
+  /**
+   * 某些欄位另外要求自己的權限（見 StageDef.fieldPermissions）。
+   * 「歷史訂單」同時放了布巾與房況，而這兩件事在原本的關卡裡是分開授權的——
+   * 少了這一層，只有布巾權限的人會從歷史訂單改到房況。
+   */
+  const canEdit = (field: EditableField) => {
+    const extra = stage.fieldPermissions?.[field];
+    return canAct && (!extra || hasPermission(extra));
+  };
   const canSeePayment = hasPermission('booking.payment.view');
   const canNotify = hasPermission('booking.notify') && !!stage.templateTitle;
   const canVerifyPayment = hasPermission('booking.payment.verify');
@@ -183,7 +192,7 @@ export default function StagePanel({ open, stage, booking, action, onClose, onCh
       if (has('balance_remit')) patch.balance_remit_last5 = remit.trim() || null;
       if (has('password')) patch.check_in_password = password.trim() || null;
       if (has('refund')) { patch.refund_amount = refund === '' ? null : Number(refund); patch.refund_note = refundNote.trim() || null; }
-      if (has('damage')) {
+      if (canEdit('damage')) {
         patch.damage_found = damaged;
         patch.damage_deduction = damaged && deduction !== '' ? Number(deduction) : damaged ? 0 : null;
         patch.damage_note = damageNote.trim() || null;
@@ -367,7 +376,7 @@ export default function StagePanel({ open, stage, booking, action, onClose, onCh
           <Box>
             <Typography variant="body2" sx={{ mb: 0.75 }}>房間狀況</Typography>
             <ToggleButtonGroup
-              exclusive size="small" value={damaged === null ? null : damaged ? 'yes' : 'no'} disabled={!canAct}
+              exclusive size="small" value={damaged === null ? null : damaged ? 'yes' : 'no'} disabled={!canEdit('damage')}
               onChange={(_, v) => { if (v === null) return; setDamaged(v === 'yes'); if (v === 'no') setDeduction(''); }}
             >
               <ToggleButton value="no" sx={{ px: 2.5, '&.Mui-selected': { bgcolor: 'success.light', color: 'success.dark' } }}>正常</ToggleButton>
@@ -376,12 +385,12 @@ export default function StagePanel({ open, stage, booking, action, onClose, onCh
           </Box>
           {damaged && (
             <TextField
-              label="建議扣款" type="number" value={deduction} onChange={(e) => setDeduction(e.target.value)} disabled={!canAct}
+              label="建議扣款" type="number" value={deduction} onChange={(e) => setDeduction(e.target.value)} disabled={!canEdit('damage')}
               InputProps={{ startAdornment: <InputAdornment position="start">NT$</InputAdornment> }} inputProps={{ min: 0, inputMode: 'numeric' }}
               helperText={`押金 ${formatMoney(booking.security_deposit)}，會計退款時會自動扣掉這個金額`} sx={{ maxWidth: 260 }}
             />
           )}
-          <TextField label={damaged ? '損壞說明' : '房況說明（選填）'} value={damageNote} onChange={(e) => setDamageNote(e.target.value)} disabled={!canAct} multiline minRows={2} fullWidth placeholder={damaged ? '例如：浴室玻璃杯破一個' : ''} />
+          <TextField label={damaged ? '損壞說明' : '房況說明（選填）'} value={damageNote} onChange={(e) => setDamageNote(e.target.value)} disabled={!canEdit('damage')} multiline minRows={2} fullWidth placeholder={damaged ? '例如：浴室玻璃杯破一個' : ''} />
         </Stack>
       )}
 

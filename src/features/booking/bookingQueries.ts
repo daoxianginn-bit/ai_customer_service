@@ -65,6 +65,8 @@ export interface BookingRow {
    * 關卡的 appliesTo 讀這個欄位——判斷需要 join 兩張表，不是一個純函式看單一列就答得出來的事。
    */
   needs_linen_backfill?: boolean;
+  /** 同樣是前端算出來的旗標：已經退房、而且真的住過（不含取消與退款）。給「歷史訂單」那一關用。 */
+  is_past_stay?: boolean;
   [key: string]: unknown;
 }
 

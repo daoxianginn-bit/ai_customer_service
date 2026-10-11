@@ -88,6 +88,34 @@ async function attachLinenBackfill(rows: BookingRow[]): Promise<BookingRow[]> {
 }
 
 /**
+ * 已經退房、而且真的住過的訂單（取消與退款不算——沒有布巾成本可言）。
+ * 給「歷史訂單」那一關回頭修正布巾數量與房況用。
+ *
+ * 有筆數上限：這份清單只會越來越長，全部撈回來會把整頁拖慢，而且沒有人會捲到三年前。
+ * 要找更舊的，到「訂單」頁用日期搜尋。
+ */
+const PAST_STAY_LIMIT = 200;
+
+async function attachPastStays(rows: BookingRow[], todayIso: string): Promise<BookingRow[]> {
+  const { data, error } = await supabase
+    .from('bookings')
+    .select('*')
+    .in('status', OCCUPYING_STATUSES)
+    .lt('checkout_date', todayIso)
+    .order('checkout_date', { ascending: false })
+    .limit(PAST_STAY_LIMIT);
+  if (error || !data?.length) return rows;
+
+  const byId = new Map(rows.map((b) => [b.id, b]));
+  for (const b of data as BookingRow[]) {
+    const existing = byId.get(b.id);
+    if (existing) existing.is_past_stay = true;
+    else byId.set(b.id, { ...b, is_past_stay: true });
+  }
+  return [...byId.values()];
+}
+
+/**
  * @param withLinenBackfill 看得到「待補布巾數量」那一關的人才要算。會計、客服看不到那一關，
  *   算了也沒有地方顯示——而那是這一頁最大的一組查詢，每 30 秒輪詢一次更不該白跑。
  */
@@ -109,7 +137,10 @@ export async function fetchQueues(withLinenBackfill = false): Promise<QueueData>
   // 「待補布巾數量」的佇列。另外撈的原因跟追加款那一關一樣：上面那個查詢只收「關卡狀態的聯集」，
   // 而第三方平台匯入的訂單是 external_synced，從來不在任何關卡的狀態清單裡——不另外撈就永遠看不到。
   // 不限日期（已經住完的也要補，否則那幾晚的洗滌成本永遠少一塊），靠裡面兩個條件收斂。
-  if (withLinenBackfill) rows = await attachLinenBackfill(rows);
+  if (withLinenBackfill) {
+    rows = await attachLinenBackfill(rows);
+    rows = await attachPastStays(rows, new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10));
+  }
 
   const ids = rows.map((b) => b.id);
   const { data: actions } = ids.length ? await supabase.from('booking_stage_actions').select('*').in('booking_id', ids) : { data: [] };
