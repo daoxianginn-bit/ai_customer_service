@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
-import { Link as RouterLink } from 'react-router-dom';
+import { Link as RouterLink, useNavigate } from 'react-router-dom';
 import { Box, Button, Link, Paper, Skeleton, Stack, Typography } from '@mui/material';
 import { useSnackbar } from 'notistack';
 import { RefreshCw } from 'lucide-react';
@@ -11,8 +11,9 @@ import PageHeaderV2 from '../../components/ui-mui/PageHeaderV2';
 import StatusBadge from '../../components/ui-mui/StatusBadge';
 import ResultState from '../../components/ui-mui/ResultState';
 import { useConfirm } from '../../components/ui-mui/ConfirmDialogProvider';
+import { useAuth } from '../../lib/AuthContext';
 import { bookingSourceLabel, type BookingRow } from './bookingQueries';
-import { resolveOtaConflict } from './bookingActions';
+import { isolateOtaBooking, releaseIgnoredRange, resolveOtaConflict } from './bookingActions';
 
 // ========================================================================
 // 候補／衝突（V2 §4.2）：三種「系統自己解不了、要人看」的訂單集中在一頁。
@@ -22,7 +23,19 @@ import { resolveOtaConflict } from './bookingActions';
 // 沒有新資料表：全部從 bookings 既有欄位讀。
 // ========================================================================
 
+export interface IgnoredRange {
+  id: string;
+  platform: string;
+  checkin_date: string;
+  checkout_date: string;
+  order_number: string | null;
+  reason: string | null;
+  created_by: string | null;
+  created_at: string | null;
+}
+
 interface ConflictData {
+  ignored: IgnoredRange[];
   ota: BookingRow[];
   manual: BookingRow[];
   waitlist: BookingRow[];
@@ -30,9 +43,10 @@ interface ConflictData {
 }
 
 async function fetchConflicts(): Promise<ConflictData> {
-  const [otaRes, pendingRes] = await Promise.all([
+  const [otaRes, pendingRes, ignoredRes] = await Promise.all([
     supabase.from('bookings').select('*').not('ota_conflict_with', 'is', null).order('checkin_date'),
     supabase.from('bookings').select('*').eq('status', 'pending_manual_conflict').order('checkin_date'),
+    supabase.from('ota_ignored_ranges').select('*').is('released_at', null).order('checkin_date'),
   ]);
   if (otaRes.error) throw otaRes.error;
   if (pendingRes.error) throw pendingRes.error;
@@ -48,7 +62,7 @@ async function fetchConflicts(): Promise<ConflictData> {
     const { data } = await supabase.from('bookings').select('id, order_number, name, nickname, checkin_date, checkout_date, status, room_type_label, whole_house').in('id', ids);
     for (const r of (data || []) as BookingRow[]) related[r.id] = r;
   }
-  return { ota, manual, waitlist, related };
+  return { ota, manual, waitlist, related, ignored: (ignoredRes.data || []) as IgnoredRange[] };
 }
 
 function Row({ booking, related, relatedLabel, note, actions }: { booking: BookingRow; related?: BookingRow | null; relatedLabel?: string; note?: string; actions?: ReactNode }) {
@@ -100,14 +114,69 @@ export default function BookingConflictsPage() {
   const confirm = useConfirm();
   const { isMobile } = useBreakpoint();
   const canEdit = usePermission('booking.override_conflict');
+  const navigate = useNavigate();
+  const { profile } = useAuth();
   const [data, setData] = useState<ConflictData | null>(null);
   const [error, setError] = useState('');
 
   const load = useCallback(async () => {
     setError('');
-    try { setData(await fetchConflicts()); } catch (e: any) { setError(e.message || '載入失敗'); setData({ ota: [], manual: [], waitlist: [], related: {} }); }
+    try { setData(await fetchConflicts()); } catch (e: any) { setError(e.message || '載入失敗'); setData({ ota: [], manual: [], waitlist: [], related: {}, ignored: [] }); }
   }, []);
   useEffect(() => { load(); }, [load]);
+
+  // 「平台這筆才對」：本地訂單牽涉金流（退訂金、退款），隔離功能不該直接動它。
+  // 只把人帶到那張訂單，由他決定取消還是待退款。
+  const keepOta = (b: BookingRow) => {
+    if (!b.ota_conflict_with) return;
+    navigate(`/bookings/${b.ota_conflict_with}`);
+  };
+
+  // 「本地這筆才對」：平台那筆是錯的 → 隔離。
+  const isolateOta = async (b: BookingRow) => {
+    const ok = await confirm({
+      title: `確定平台這筆是錯的，要隔離嗎？`,
+      message: (
+        <>
+          {bookingSourceLabel(b)}　{formatDateRange(b.checkin_date, b.checkout_date)}
+          <br /><br />
+          會把這段日期記成「<strong>隔離中</strong>」並刪掉這筆訂單。平台的行事曆還會殘留一陣子，
+          同步時會<strong>主動忽略跟這段日期重疊的資料</strong>，不會再匯入進來。
+          <br /><br />
+          等平台那邊更新、不再出現這段日期，<strong>隔離會自動解除</strong>。也可以隨時到下方「隔離中的平台資料」手動解除。
+          <br /><br />
+          ⚠️ 如果撞到的是<strong>另一個平台的訂單</strong>，那是真的超賣——隔離只是讓系統的房況正確，
+          <strong>還是要回平台後台取消</strong>，否則客人當天還是會來。
+        </>
+      ),
+      confirmLabel: '隔離',
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await isolateOtaBooking(b, '撞期查核：判定平台資料有誤', profile?.email || '');
+      enqueueSnackbar('已隔離，下次同步不會再匯入這段日期', { variant: 'success' });
+      load();
+    } catch (e: any) {
+      enqueueSnackbar(`隔離失敗：${e.message}`, { variant: 'error' });
+    }
+  };
+
+  const releaseIgnore = async (row: IgnoredRange) => {
+    const ok = await confirm({
+      title: '解除隔離？',
+      message: `${row.platform}　${row.checkin_date} ~ ${row.checkout_date}。解除後下一次同步會把平台上這段日期的資料重新匯入。`,
+      confirmLabel: '解除',
+    });
+    if (!ok) return;
+    try {
+      await releaseIgnoredRange(row.id, profile?.email || '');
+      enqueueSnackbar('已解除隔離', { variant: 'success' });
+      load();
+    } catch (e: any) {
+      enqueueSnackbar(`解除失敗：${e.message}`, { variant: 'error' });
+    }
+  };
 
   const clearOta = async (b: BookingRow) => {
     const ok = await confirm({
@@ -141,8 +210,41 @@ export default function BookingConflictsPage() {
                 related={b.ota_conflict_with ? data.related[b.ota_conflict_with] : null}
                 relatedLabel="撞到本地訂單"
                 note={b.ota_conflict_detected_at ? `偵測於 ${formatDateTime(String(b.ota_conflict_detected_at))}` : undefined}
-                actions={canEdit && <Button size="small" variant="outlined" color="inherit" onClick={() => clearOta(b)}>已查核，清除旗標</Button>}
+                actions={canEdit && (
+                  <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1}>
+                    <Button size="small" variant="contained" color="error" onClick={() => isolateOta(b)}>本地那筆才對，隔離平台這筆</Button>
+                    <Button size="small" variant="outlined" onClick={() => keepOta(b)} disabled={!b.ota_conflict_with}>平台這筆才對，去處理本地訂單</Button>
+                    <Button size="small" variant="outlined" color="inherit" onClick={() => clearOta(b)}>都沒問題，清除旗標</Button>
+                  </Stack>
+                )}
               />
+            ))}
+          </Section>
+
+          {/* 隔離是「靜悄悄把平台資料擋掉」的機制，一定要有地方看得到還有哪些生效中，
+              否則就是個黑洞——日後平台的正常訂單被擋掉時沒有人查得出原因。 */}
+          <Section
+            title="隔離中的平台資料"
+            count={data.ignored.length}
+            description="判定平台資料有誤而隔離的日期區間。同步時會忽略跟這些日期重疊的平台資料，不會再匯入。平台那邊更新、不再出現這段日期之後會自動解除。"
+          >
+            {data.ignored.map((row) => (
+              <Paper key={row.id} variant="outlined" sx={{ p: 1.5 }}>
+                <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5} alignItems={{ md: 'center' }}>
+                  <Box sx={{ minWidth: 0, flexGrow: 1 }}>
+                    <Typography variant="body2" fontWeight={600}>
+                      {row.platform}　{formatDateRange(row.checkin_date, row.checkout_date)}
+                      {row.order_number && <Typography component="span" variant="caption" color="text.secondary" sx={{ ml: 1 }}>原訂單 {row.order_number}</Typography>}
+                    </Typography>
+                    <Typography variant="caption" color="text.secondary">
+                      {row.reason || '未填原因'}
+                      {row.created_by && `・${row.created_by}`}
+                      {row.created_at && `・${formatDateTime(row.created_at)}`}
+                    </Typography>
+                  </Box>
+                  {canEdit && <Button size="small" variant="outlined" color="inherit" onClick={() => releaseIgnore(row)}>解除隔離</Button>}
+                </Stack>
+              </Paper>
             ))}
           </Section>
 

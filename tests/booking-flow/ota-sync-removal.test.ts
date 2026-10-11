@@ -29,12 +29,22 @@ const EV = (lines: string[]) => lines;
 const LIVE = EV(['UID:t1', 'DTSTART;VALUE=DATE:20261201', 'DTEND;VALUE=DATE:20261203', 'SUMMARY:Trip.com Booking']);
 const CANCELLED = EV([...LIVE, 'STATUS:CANCELLED']);
 
-async function sync(feed: string, bookings: Record<string, unknown>[]) {
-  __reset({ bookings, ota_channels: [{ ...CHANNEL }], operation_logs: [], booking_rooms: [] });
+async function sync(feed: string, bookings: Record<string, unknown>[], ignored: Record<string, unknown>[] = []) {
+  __reset({ bookings, ota_channels: [{ ...CHANNEL }], operation_logs: [], booking_rooms: [], ota_ignored_ranges: ignored });
   (globalThis as unknown as { fetch: unknown }).fetch = async () => ({ ok: true, status: 200, text: async () => feed });
   const r = await syncOneOtaChannel({ ...CHANNEL }, { ...SETTINGS });
-  return { summary: r.summary, remaining: (__db.bookings || []).map((b) => b.id), logs: __db.operation_logs || [] };
+  return {
+    summary: r.summary,
+    remaining: (__db.bookings || []).map((b) => b.id),
+    logs: __db.operation_logs || [],
+    ignores: __db.ota_ignored_ranges || [],
+  };
 }
+
+const ignore = (over: Record<string, unknown> = {}) => ({
+  id: 'ig1', channel_id: 'ch1', platform: 'trip',
+  checkin_date: '2026-12-01', checkout_date: '2026-12-03', released_at: null, ...over,
+});
 
 (async () => {
   // ---- 平台把訂單標成取消，但事件還留在匯出裡（這次回報的情境）
@@ -76,6 +86,43 @@ async function sync(feed: string, bookings: Record<string, unknown>[]) {
   r = await sync(ics(EV(['UID:t9', 'DTSTART;VALUE=DATE:20261201', 'DTEND;VALUE=DATE:20261203', 'SUMMARY:Cancelled by guest'])), [booking()]);
   t('只有標題寫 Cancelled：不刪既有訂單（誤判的代價是超賣）', r.remaining.includes('b1'), r.remaining);
   t('只有標題寫 Cancelled：也不會收成新訂單', r.remaining.length === 1, r.remaining);
+
+  // ---- 隔離：平台殘留的資料不能再被匯入
+  //
+  // 實際踩過的坑：把錯的那筆訂單刪掉，平台的 iCal 還留著，下次同步就原封不動再建一筆。
+  // 刪除快、平台更新慢，所以隔離必須是「同步時主動忽略」，不是訂單上的旗標。
+  r = await sync(ics(LIVE), [], [ignore()]);
+  t('隔離中：平台還在吐的那筆不會被重新匯入', r.remaining.length === 0, r.remaining);
+  t('隔離中：摘要講出來擋掉了幾筆（不能靜悄悄）', r.summary.includes('已隔離略過'), r.summary);
+
+  // 日期有重疊就忽略（不是完全相同）：平台殘留期間常常把同一筆的日期改來改去
+  const SHIFTED = EV(['UID:t5', 'DTSTART;VALUE=DATE:20261202', 'DTEND;VALUE=DATE:20261204', 'SUMMARY:Trip.com Booking']);
+  r = await sync(ics(SHIFTED), [], [ignore()]);
+  t('隔離中：平台把日期改掉但仍有重疊，照樣擋住', r.remaining.length === 0, r.remaining);
+
+  const APART = EV(['UID:t6', 'DTSTART;VALUE=DATE:20261220', 'DTEND;VALUE=DATE:20261222', 'SUMMARY:Trip.com Booking']);
+  r = await sync(ics(APART), [], [ignore()]);
+  t('隔離中：完全不重疊的另一段日期照常匯入', r.remaining.length === 1, r.remaining);
+
+  // 自動解除：隔離的壽命＝平台殘留的壽命
+  r = await sync(ics(APART), [], [ignore()]);
+  t('平台已不再出現那段日期 → 自動解除', !!r.ignores[0]?.released_at, r.ignores);
+  t('自動解除會在摘要講出來', r.summary.includes('解除隔離'), r.summary);
+
+  r = await sync(ics(LIVE), [], [ignore()]);
+  t('平台還在吐 → 不解除（隔離要繼續擋）', !r.ignores[0]?.released_at, r.ignores);
+
+  r = await sync(ics(LIVE), [], [ignore({ checkin_date: '2020-01-01', checkout_date: '2020-01-03' })]);
+  t('退房日已過的隔離自動解除（這張表不該無限長大）', !!r.ignores[0]?.released_at, r.ignores);
+
+  // feed 壞掉時一條都不能解除，否則下次同步那些錯的訂單全部回來
+  r = await sync(['BEGIN:VCALENDAR', 'END:VCALENDAR'].join(CRLF), [], [ignore()]);
+  t('feed 解析不到事件：隔離一條都不解除', !r.ignores[0]?.released_at, r.ignores);
+
+  // 整份 feed 剛好全部都在隔離中：那是正常狀態，不是抓取失敗
+  r = await sync(ics(LIVE), [booking()], [ignore()]);
+  t('全部事件都被隔離時不會誤判成「feed 壞掉」', !r.summary.includes('沒有解析到任何事件'), r.summary);
+  t('全部事件都被隔離時，既有訂單也不會被當成「來源已消失」而刪掉', r.remaining.includes('b1'), r.remaining);
 
   let ok = true;
   for (const [k, v, d] of checks) { console.log((v ? '✓ ' : '✗ ') + k + (d ? `\n     ${d}` : '')); if (!v) ok = false; }

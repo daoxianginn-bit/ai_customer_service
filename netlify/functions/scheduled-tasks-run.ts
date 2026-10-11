@@ -1028,7 +1028,27 @@ export async function syncOneOtaChannel(channel: any, settings: any): Promise<{ 
     return { summary: `${channel.name}：${msg}`, conflictLines: [] };
   }
 
-  const allEvents = parseIcsEvents(icsText);
+  const parsedEvents = parseIcsEvents(icsText);
+
+  // 隔離中的日期區間：撞期查核後被判定「這一筆平台資料是錯的」。平台的 iCal 還會殘留一陣子，
+  // 這裡主動把它們當成不存在——不建訂單、不算衝突、也不列入「來源已消失」的判斷。
+  // 比對是「日期有重疊」而不是完全相同：殘留期間平台常常把同一筆的日期改來改去。
+  const { data: ignoreRows } = await supabase
+    .from('ota_ignored_ranges')
+    .select('id, checkin_date, checkout_date')
+    .eq('channel_id', channel.id)
+    .is('released_at', null);
+  const ignores = (ignoreRows || []).map((r: any) => ({
+    id: r.id as string,
+    start: String(r.checkin_date).slice(0, 10),
+    end: String(r.checkout_date).slice(0, 10),
+  }));
+  const overlaps = (a: { start: string; end: string }, b: { start: string; end: string }) => a.start < b.end && b.start < a.end;
+
+  const allEvents = ignores.length
+    ? parsedEvents.filter((e) => !ignores.some((ig) => overlaps(ig, { start: e.startIso, end: e.endIso })))
+    : parsedEvents;
+  const ignoredCount = parsedEvents.length - allEvents.length;
 
   // 只收「該平台真正成立的訂單」，關房事件一律忽略（見 src/lib/otaEventFilter.ts）。
   // 關房的來源可能是房東手動封房、平台的可預訂範圍上限，也可能是我們自己匯出過去的本地訂單
@@ -1113,10 +1133,19 @@ export async function syncOneOtaChannel(channel: any, settings: any): Promise<{ 
   //      這正是行事曆出現大量重複事件的來源。
   //
   // 兩道保護都只會讓「刪得比較少」，不會造成超賣：沒刪到的訂單仍然佔著房況。
-  const feedUnusable = allEvents.length === 0;
+  // 看的是「解析出來幾筆」而不是過濾後的 allEvents：整份 feed 剛好全部都在隔離中時，
+  // 那是正常狀態，不是抓取失敗，不該觸發下面的保護也不該報警。
+  const feedUnusable = parsedEvents.length === 0;
   const todayIso = taiwanTodayIso();
   const disappeared = feedUnusable ? [] : (existingRows || []).filter((r: any) => {
     const key = dateKey(r.checkin_date, r.checkout_date);
+    // 日期落在隔離區間裡的訂單，這次同步根本沒有看它的平台資料——「從來源消失」這個結論
+    // 推不出來。隔離當下就會把訂單刪掉，所以這裡會遇到的是刪除失敗的殘留，留著讓人看得到，
+    // 比系統拿「我沒去看」當成「它不存在」而靜靜刪掉安全。
+    if (ignores.some((ig) => overlaps(ig, {
+      start: String(r.checkin_date ?? '').slice(0, 10),
+      end: String(r.checkout_date ?? '').slice(0, 10),
+    }))) return false;
     // 平台明講取消的，不受上面第 2 點保護：取消的訂單不是「已經發生的住宿紀錄」，
     // 留著會讓房況被一筆不存在的訂單鎖住，也會讓成本與獲利統計多算一筆沒發生的住宿。
     if (cancelledKeys.has(key)) return true;
@@ -1225,8 +1254,34 @@ export async function syncOneOtaChannel(channel: any, settings: any): Promise<{ 
     }
   }
 
+  // 隔離規則的自動解除：這次抓到的事件沒有任何一筆跟它重疊，代表平台已經跟上了，規則失效。
+  // 隔離的壽命＝平台殘留的壽命，不會留下來誤殺未來真的重訂同一段日期的訂單。
+  // 退房日已過的也一併解除，免得這張表無限長大。
+  //
+  // feed 解析不到東西時絕對不能做這件事——一次抓取失敗就會把所有隔離全部放掉，
+  // 下一次同步那些錯的訂單就全部回來了。
+  let released = 0;
+  if (!feedUnusable && ignores.length) {
+    const stale = ignores.filter((ig) => (
+      ig.end <= todayIso || !parsedEvents.some((e) => overlaps(ig, { start: e.startIso, end: e.endIso }))
+    ));
+    if (stale.length) {
+      await supabase
+        .from('ota_ignored_ranges')
+        .update({ released_at: nowIso, released_by: 'system' })
+        .in('id', stale.map((ig) => ig.id));
+      released = stale.length;
+    }
+  }
+
   const parts = [`新增 ${created} 筆`, `更新 ${updated} 筆`];
   if (feedUnusable) parts.push('⚠️ 這次沒有解析到任何事件，已略過「來源移除」判斷，既有訂單保持不動');
+  // 隔離是靜悄悄把資料擋掉的機制，每次都要講出來，不然沒有人知道少了什麼。
+  if (ignoredCount) {
+    const shown = ignores.slice(0, 3).map((ig) => `${ig.start}~${ig.end}`).join('、');
+    parts.push(`已隔離略過 ${ignoredCount} 筆（${shown}${ignores.length > 3 ? ' 等' : ''}）`);
+  }
+  if (released) parts.push(`解除隔離 ${released} 筆（平台已更新）`);
   if (blockedKeys.size) parts.push(`略過關房 ${blockedKeys.size} 筆`);
   if (cancelledKeys.size) parts.push(`平台已取消 ${cancelledKeys.size} 筆`);
   if (disappeared.length) parts.push(`來源移除 ${disappeared.length} 筆（已刪除）`);

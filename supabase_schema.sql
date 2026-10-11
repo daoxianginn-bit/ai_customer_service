@@ -786,6 +786,37 @@ CREATE TABLE IF NOT EXISTS public.ota_channels (
 ALTER TABLE public.ota_channels ADD COLUMN IF NOT EXISTS extra_block_keywords TEXT;
 CREATE INDEX IF NOT EXISTS idx_ota_channels_active ON public.ota_channels(is_active) WHERE is_active;
 
+-- 隔離中的 OTA 日期區間：撞期查核後判定「這一筆平台資料是錯的」時寫進來。
+--
+-- 為什麼不能只把那筆訂單刪掉：刪除只動我們這邊，平台的 iCal 還留著那筆事件，下一次同步
+-- 在 bookings 裡找不到對應訂單就會判定成新訂單再建一次。刪除快、平台更新慢，永遠追不上。
+-- 所以隔離必須是「同步時主動忽略」的規則，而不是訂單上的一個欄位。
+--
+-- 比對方式是「日期有重疊就忽略」（不是完全相同）：平台殘留期間常常會把同一筆的日期改來改去，
+-- 要求完全相同的話每改一次就要再隔離一次。代價是這段期間平台若真的收到新訂單也會被擋掉，
+-- 所以每次同步的摘要都會列出被隔離的筆數與日期，不讓它靜悄悄發生。
+--
+-- 自動解除：同步時若這次抓到的事件沒有任何一筆跟這個區間重疊，代表平台已經跟上了，規則自動失效
+-- （released_at 寫入時間）。隔離的壽命＝平台殘留的壽命，不會留下來誤殺未來的真訂單。
+CREATE TABLE IF NOT EXISTS public.ota_ignored_ranges (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    channel_id UUID REFERENCES public.ota_channels(id) ON DELETE CASCADE,
+    -- 頻道被刪掉之後仍然查得到這筆隔離當初是哪個平台來的
+    platform TEXT NOT NULL,
+    checkin_date DATE NOT NULL,
+    checkout_date DATE NOT NULL,
+    -- 被隔離的那張訂單編號與原因，純粹給事後追查用，不參與任何判斷
+    order_number TEXT,
+    reason TEXT,
+    created_by TEXT,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    -- null＝隔離中；有值＝已解除（自動或人工）
+    released_at TIMESTAMPTZ,
+    released_by TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_ota_ignored_active
+  ON public.ota_ignored_ranges(channel_id, checkin_date, checkout_date) WHERE released_at IS NULL;
+
 -- booking_source：這筆訂單是怎麼來的。'direct' 涵蓋 LINE 訂房流程與後台手動建單，
 -- 其餘四個對應 ota_channels.platform，只有 external_synced 狀態的訂單才會是非 direct。
 ALTER TABLE public.bookings ADD COLUMN IF NOT EXISTS booking_source TEXT NOT NULL DEFAULT 'direct'
@@ -2087,6 +2118,9 @@ BEGIN
       ('linen_items',                       'ANY', 'housekeeping.manage', 'housekeeping.manage', 'housekeeping.manage'),
       ('room_type_linen_defaults',          'ANY', 'housekeeping.manage', 'housekeeping.manage', 'housekeeping.manage'),
       ('ota_channels',                      'ANY', 'integration.manage', 'integration.manage', 'integration.manage'),
+      -- 隔離是撞期查核的結果，歸在「覆寫檔期衝突」那個權限底下——會做這件事的人就是在處理撞期的人。
+      -- 刪除不開放：解除隔離是把 released_at 寫進去（UPDATE），留著紀錄才查得到曾經隔離過什麼。
+      ('ota_ignored_ranges',                'booking.view', 'booking.override_conflict', 'booking.override_conflict', 'NONE'),
       ('notification_recipient_groups',     'ANY', 'integration.manage', 'integration.manage', 'integration.manage'),
       ('line_groups',                       'ANY', 'integration.manage', 'integration.manage', 'integration.manage'),
       ('line_group_members',                'ANY', 'integration.manage', 'integration.manage', 'integration.manage'),

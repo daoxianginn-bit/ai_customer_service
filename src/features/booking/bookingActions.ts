@@ -258,6 +258,65 @@ export async function logBookingSaveFailed(editingId: string | null, orderNumber
 }
 
 /**
+ * 隔離一筆判定為錯誤的 OTA 訂單：記下「這個頻道的這段日期要忽略」，然後把訂單刪掉。
+ *
+ * 為什麼不能只刪訂單：刪除只動我們這邊，平台的 iCal 還留著那筆事件，下一次同步在 bookings 裡
+ * 找不到對應訂單就會判定成新訂單再建一次。刪除快、平台更新慢，永遠追不上——這是實際踩過的坑。
+ * 所以要先寫隔離規則（同步會主動忽略重疊的日期），再刪訂單。
+ *
+ * 順序不能顛倒：先寫規則再刪單。中間若失敗，最壞情況是「規則寫了但訂單還在」——下次同步會忽略
+ * 那段日期、訂單留著讓人再處理一次，看得見。反過來先刪單的話，規則沒寫成就等於白刪，而且
+ * 下次同步它又回來了，使用者會以為按鈕壞掉。
+ *
+ * Google 行事曆的事件由 deleteBooking 一併處理（它會先呼叫 calendar-detach 再刪訂單）。
+ */
+export async function isolateOtaBooking(order: BookingRow, reason: string, actorEmail: string) {
+  if (!order.external_channel_id) throw new BookingActionError('這不是第三方平台匯入的訂單，不能隔離。');
+  try {
+    const { error: insertError } = await supabase.from('ota_ignored_ranges').insert({
+      channel_id: order.external_channel_id,
+      platform: order.booking_source || 'unknown',
+      checkin_date: order.checkin_date,
+      checkout_date: order.checkout_date,
+      order_number: order.order_number || null,
+      reason: reason.trim() || null,
+      created_by: actorEmail,
+    });
+    if (insertError) throw insertError;
+
+    await logOperation({
+      feature: LOG_FEATURES.order,
+      action: '隔離平台資料',
+      target: order.order_number || order.id,
+      before: labelRecord(order, ['order_number', 'checkin_date', 'checkout_date', 'room_type_label', 'status']),
+      after: { 說明: `已隔離 ${order.checkin_date}~${order.checkout_date} 這段日期，同步時會忽略平台的殘留資料`, 原因: reason.trim() || '（未填）' },
+    });
+
+    // 訂單本身走既有的刪除流程，Google 行事曆的事件會一併被清掉
+    await deleteBooking(order);
+  } catch (err: any) {
+    await logUiError({ feature: LOG_FEATURES.order, action: '隔離平台資料失敗', target: order.order_number || null, error: err });
+    throw err;
+  }
+}
+
+/** 解除隔離：下一次同步就會把平台上這段日期的資料重新匯入。留著紀錄不刪，事後查得到曾經隔離過什麼。 */
+export async function releaseIgnoredRange(id: string, actorEmail: string) {
+  const { error } = await supabase
+    .from('ota_ignored_ranges')
+    .update({ released_at: new Date().toISOString(), released_by: actorEmail })
+    .eq('id', id);
+  if (error) throw error;
+  await logOperation({
+    feature: LOG_FEATURES.order,
+    action: '解除隔離',
+    target: id,
+    before: { 隔離狀態: '隔離中' },
+    after: { 隔離狀態: '已解除', 說明: '下次同步會重新匯入這段日期' },
+  });
+}
+
+/**
  * 人工清除 OTA 撞期旗標（§4.2 候補／衝突）。旗標是 OTA 同步排程標上去的，下次同步若已不撞期
  * 也會自動清掉；這裡給人工查核完「其實沒問題」時用，不動 status。
  */
