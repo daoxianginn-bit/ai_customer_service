@@ -169,7 +169,12 @@ export const REQUIRES_CHECKIN_PASSWORD_STATUS = 'awaiting_checkin';
  * 沒列在這裡的狀態（報價階段、取消、退款、退房之後）存檔時仍然清空：
  * 已經取消或已經結案的訂單不該留著大門密碼。
  */
-export const CHECKIN_PASSWORD_STATUSES = ['reserved', 'awaiting_balance', 'awaiting_checkin', 'checked_in'];
+export const CHECKIN_PASSWORD_STATUSES = [
+  'reserved', 'awaiting_balance', 'awaiting_checkin', 'checked_in',
+  // 第三方平台的客人一樣要門禁密碼。他們的狀態永遠是 external_synced，不含進來的話
+  // 房務在工作台設好的密碼，會在別人下次編輯那張訂單存檔時被清成 null。
+  'external_synced',
+];
 
 // 訂單管理頁「訂單流程狀態」進度列用的 9 步驟正常流程，依序前進；取消/待退款/已退款/待人工確認
 // 是例外流程，不在這個序列裡（flowStepIndex 對它們回傳 null，畫面上另外用例外樣式呈現，

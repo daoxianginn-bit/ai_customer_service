@@ -59,8 +59,10 @@ const backfill = stage('linen_backfill');
 t('待補布巾數量不看狀態，只看旗標', backfill.statuses.length === 0 && typeof backfill.appliesTo === 'function');
 t('有旗標才進佇列', !!backfill.appliesTo!({ id: 'a', status: 'external_synced', needs_linen_backfill: true } as any));
 t('沒旗標不進佇列', !backfill.appliesTo!({ id: 'a', status: 'external_synced' } as any));
-t('第三方平台訂單本來不屬於任何關卡，靠這一關才看得到',
-  stagesForStatus('external_synced').length === 0 && !!backfill.appliesTo!({ id: 'a', status: 'external_synced', needs_linen_backfill: true } as any));
+t('第三方平台訂單的布巾只走這一關（洗滌清單不收它，免得同一筆出現在兩個佇列）',
+  !stagesForStatus('external_synced').some((x) => x.key === 'linen')
+  && !!backfill.appliesTo!({ id: 'a', status: 'external_synced', needs_linen_backfill: true } as any),
+  stagesForStatus('external_synced').map((x) => x.key));
 t('這一關不推進狀態（補資料不該改訂單流程）', backfill.nextStatus === null && backfill.confirmAdvances === false);
 t('這一關不發客人通知', backfill.templateTitle === null);
 t('權限跟洗滌清單同一個（都是房務）', backfill.permission === stage('linen').permission);
@@ -94,8 +96,10 @@ t('押金處理不進入住準備（退房後備料沒有意義，要補成本�
   !stagesForStatus('deposit_processing').some((s) => s.group === 'checkin'),
   stagesForStatus('deposit_processing').map((s) => s.key));
 t('已處理不進入住準備', !stagesForStatus('completed').some((s) => s.group === 'checkin'));
-t('第三方平台訂單仍然只靠資料補登那一關',
-  stagesForStatus('external_synced').length === 0);
+// 第三方平台的客人一樣會到現場、一樣需要門禁密碼，只是永遠不會走 1~9 的流程。
+t('第三方平台訂單進得了入住密碼那一關',
+  stagesForStatus('external_synced').map((x) => x.key).join() === 'checkin_password',
+  stagesForStatus('external_synced').map((x) => x.key));
 
 // 兩份清單必須一字不差。不一致的後果是「房務在工作台設好密碼，別人下一次編輯那張訂單存檔
 // 就把它清成 null」——而且畫面上不會有任何提示，是會默默吃掉資料的那種錯。

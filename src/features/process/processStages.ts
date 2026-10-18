@@ -81,6 +81,13 @@ const paidOf = (b: BookingRow) => (num(b.deposit) == null && !Number(b.extra_pai
 // 住完的訂單堆在佇列裡。要回頭補已經住完的布巾成本，走「資料補登」那一關。
 const CHECKIN_STATUSES = ['reserved', 'awaiting_balance', 'awaiting_checkin', 'checked_in'];
 
+// 入住密碼另外收第三方平台的訂單。那些客人一樣會到現場、一樣需要門禁密碼，只是他們不走
+// 1~9 的流程、狀態永遠是 external_synced，照上面那份清單就永遠進不了這一關。
+//
+// 沒有一起放進洗滌清單：OTA 訂單的布巾走「資料補登 → 待補布巾數量」那條線（不限日期、
+// 本來就收 external_synced），放進每日佇列只會讓同一筆同時出現在兩個地方。
+const PASSWORD_STATUSES = [...CHECKIN_STATUSES, 'external_synced'];
+
 export const STAGES: StageDef[] = [
   // ---------------- 款項處理（會計）
   {
@@ -135,11 +142,11 @@ export const STAGES: StageDef[] = [
     hint: '核對這筆訂單要備的布巾數量。入住當天 13:00 的洗滌單會依這裡的數量加總發給洗滌廠，之後才改的話記得重發。',
   },
   {
-    key: 'checkin_password', group: 'checkin', title: '入住密碼', statuses: CHECKIN_STATUSES, action: '密碼設定',
+    key: 'checkin_password', group: 'checkin', title: '入住密碼', statuses: PASSWORD_STATUSES, action: '密碼設定',
     color: '#0284c7', colorLight: '#e0f2fe', nextStatus: null, confirmAdvances: false, fields: ['password'],
     money: 'total', amountLabel: null, amountOf: () => null,
     templateTitle: '入住密碼發送', notifyLabel: '補發密碼給客人', permission: 'booking.checkin_password.manage',
-    hint: '設定或修改大門密碼。入住當天 09:00 的排程會自動把密碼發給客人，確認後的「補發密碼」只是備用。',
+    hint: '設定或修改大門密碼。入住當天 09:00 的排程會自動把密碼發給客人，確認後的「補發密碼」只是備用。第三方平台的訂單沒有 LINE 可推播，自動發送與補發都不會送出，密碼請從平台的訊息系統給客人。',
   },
 
   // ---------------- 退房檢查（房務）
