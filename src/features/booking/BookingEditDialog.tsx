@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from 'react';
 import {
   Alert, Autocomplete, Box, Button, Chip, Dialog, DialogActions, DialogContent, DialogTitle, Divider, FormControlLabel,
   Grid, IconButton, Link, MenuItem, Paper, Stack, Checkbox, Table, TableBody, TableCell, TableFooter,
@@ -60,6 +60,13 @@ interface OrderForm {
   notes: string;
   linen_change_count: string;
 }
+
+/** 這個 user ID 在聯絡人清單裡找得到就顯示暱稱，找不到就顯示原始 ID（例如很久沒聊的客人）。 */
+const contactLabel = (lineUserId: string | null | undefined, contacts: LineContact[]): string => {
+  if (!lineUserId) return '';
+  const hit = contacts.find((c) => c.lineUserId === lineUserId);
+  return hit ? (hit.nickname || hit.lineUserId) : lineUserId;
+};
 
 const emptyForm = (): OrderForm => ({
   name: '', nickname: '', line_user_id: '', phone: '',
@@ -153,6 +160,9 @@ export default function BookingEditDialog({ open, booking, onClose, onSaved }: P
   }, []);
 
   const [form, setForm] = useState<OrderForm>(emptyForm());
+  // LINE 聯絡人輸入框顯示的文字。跟 form.line_user_id 分開：欄位裡要看到的是暱稱，
+  // 存進訂單的是 user ID，而打字中途兩者都還不成立。
+  const [contactInput, setContactInput] = useState('');
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState('');
   const [selectedRoomIds, setSelectedRoomIds] = useState<string[]>([]);
@@ -175,6 +185,7 @@ export default function BookingEditDialog({ open, booking, onClose, onSaved }: P
     if (booking) {
       originalRef.current = booking;
       setForm(rowToForm(booking));
+      setContactInput(contactLabel(booking.line_user_id, lineContacts));
       fetchBookingLinen(booking.id).then(({ roomIds, usage }) => {
         skipRecompute.current = true;
         setSelectedRoomIds(roomIds);
@@ -185,13 +196,14 @@ export default function BookingEditDialog({ open, booking, onClose, onSaved }: P
       // 新訂單一開始就是包棟（emptyForm 的 whole_house 是 true），押金欄位直接帶入包棟押金，
       // 不要只放在 placeholder 裡當提示——欄位留空存檔會被存成 0，畫面上看到 3000、實際存 0。
       setForm({ ...emptyForm(), security_deposit: String(moneyDefaults.wholeHouseSecurity) });
+      setContactInput('');
       // 新訂單預設「是否包棟」為勾選狀態，房間也跟著預設全選。這是全新訂單，沒有既有資料要保護，
       // skipRecompute 設 false 讓下面的 effect 直接算出預設布巾組合。
       skipRecompute.current = false;
       setSelectedRoomIds(rooms.map((r) => r.id));
       setUsageRows([]);
     }
-  }, [open, editingId, booking, lookupsReady, rooms, moneyDefaults.wholeHouseSecurity]);
+  }, [open, editingId, booking, lookupsReady, rooms, moneyDefaults.wholeHouseSecurity, lineContacts]);
 
   // 換房間或改換洗次數才重算；已手動調整過的品項由 mergeUsage 保留。
   // 日期不在依賴裡：換洗次數改由使用者自己填，晚數只是給他參考的提示。
@@ -443,18 +455,26 @@ export default function BookingEditDialog({ open, booking, onClose, onSaved }: P
                       <TextField fullWidth size="small" label="訂單編號" value={editingId ? form.order_number || '' : '（儲存後自動產生）'} disabled />
                     </Grid>
                     <Grid item xs={12} sm={6}>
-                      {/* 只有新增訂單時能填；訂單一旦建立就鎖住——LINE user ID 決定這張訂單屬於哪位聯絡人。
-                          下拉選單顯示暱稱（user ID 是一長串亂碼，沒有人認得出哪個是誰），選到誰就把
+                      {/* 下拉選單顯示暱稱（user ID 是一長串亂碼，沒有人認得出哪個是誰），選到誰就把
                           暱稱一併帶進下面的欄位。freeSolo 保留直接貼 user ID 的做法：清單只收最近
-                          互動的聯絡人，很久沒聊的客人或還沒傳過訊息的人不會在裡面。 */}
+                          互動的聯絡人，很久沒聊的客人或還沒傳過訊息的人不會在裡面。
+
+                          編輯既有訂單時也可以改。原本是鎖住的，但實務上一定會需要：電話訂房先建了單，
+                          客人後來才用 LINE 聯絡，這時要把兩邊接起來，通知（入住密碼、各關卡訊息）才送得到。
+                          改動會進操作紀錄，查得到是誰把這張單換到哪個聯絡人。 */}
                       <Autocomplete
                         freeSolo
-                        disabled={!!editingId}
+                        // 點進去就把既有的值選起來，打字直接取代。編輯既有訂單時欄位裡已經有一長串
+                        // user ID，沒有這個就得先手動刪乾淨才能換人——新增時欄位是空的，看不出這個問題。
+                        selectOnFocus
                         options={lineContacts}
-                        // 比對得到聯絡人就把「物件」交給 Autocomplete，輸入框才會顯示暱稱；
-                        // 直接給字串的話顯示出來的是 user ID 那串亂碼，等於白做。
-                        value={lineContacts.find((c) => c.lineUserId === form.line_user_id) ?? form.line_user_id}
-                        isOptionEqualToValue={(o, v) => o.lineUserId === (typeof v === 'string' ? v : v.lineUserId)}
+                        // value 只放「比對得到的聯絡人物件」，比對不到就是 null，不要把打到一半的字
+                        // 當成 value 交回去：MUI 看到「輸入內容等於已選值的標籤」會判定使用者還沒開始打字，
+                        // 直接把整份清單原封不動顯示出來，打字就篩不動了。
+                        // 輸入框顯示什麼改由 inputValue 自己控制（見下面的 contactInput）。
+                        value={lineContacts.find((c) => c.lineUserId === form.line_user_id) ?? null}
+                        inputValue={contactInput}
+                        isOptionEqualToValue={(o, v) => o.lineUserId === v.lineUserId}
                         getOptionLabel={(o) => (typeof o === 'string' ? o : o.nickname || o.lineUserId)}
                         filterOptions={(opts, state) => {
                           const kw = state.inputValue.trim().toLowerCase();
@@ -464,14 +484,18 @@ export default function BookingEditDialog({ open, booking, onClose, onSaved }: P
                             .slice(0, 50);
                         }}
                         onChange={(_e, picked) => {
-                          if (!picked) { setForm({ ...form, line_user_id: '' }); return; }
-                          if (typeof picked === 'string') { setForm({ ...form, line_user_id: picked.trim() }); return; }
+                          if (!picked) { setForm({ ...form, line_user_id: '' }); setContactInput(''); return; }
+                          if (typeof picked === 'string') { setForm({ ...form, line_user_id: picked.trim() }); setContactInput(picked.trim()); return; }
+                          // 選到聯絡人：存的是 user ID，輸入框顯示暱稱，順手把暱稱也帶進下面的欄位
                           setForm({ ...form, line_user_id: picked.lineUserId, nickname: picked.nickname || form.nickname });
+                          setContactInput(picked.nickname || picked.lineUserId);
                         }}
                         onInputChange={(_e, text, reason) => {
-                          // 使用者自己打字時才同步回表單；reset 是選取後元件自己把輸入框換成標籤文字，
-                          // 跟著寫回去會把 user ID 覆蓋成暱稱。
-                          if (reason === 'input') setForm({ ...form, line_user_id: text.trim() });
+                          if (reason !== 'input') return; // reset／clear 由上面的 onChange 自己處理
+                          setContactInput(text);
+                          // 打字就是在指定 user ID（清單裡沒有的人要能直接貼）。選到聯絡人時走的是
+                          // onChange，不會經過這裡，所以不會被暱稱蓋掉。
+                          setForm({ ...form, line_user_id: text.trim() });
                         }}
                         renderOption={(props, o) => (
                           <li {...props} key={o.lineUserId}>
@@ -488,11 +512,15 @@ export default function BookingEditDialog({ open, booking, onClose, onSaved }: P
                             size="small"
                             label="LINE 聯絡人"
                             placeholder="非 LINE 客戶可留空"
-                            helperText={editingId ? undefined : '選暱稱即可，也可以直接貼 LINE User ID'}
+                            helperText="選暱稱即可，也可以直接貼 LINE User ID；這決定通知要發給誰"
+                            // selectOnFocus 只在「取得焦點」那一下作用，欄位已經有焦點時再點不會重選，
+                            // 打字就變成接在原值後面（選錯人想重打最容易踩到）。這裡的值是一整串
+                            // user ID 或暱稱，本來就是整個換掉而不是改中間幾個字，所以點擊一律全選。
+                            inputProps={{ ...params.inputProps, onClick: (e: MouseEvent<HTMLInputElement>) => e.currentTarget.select() }}
                           />
                         )}
                       />
-                      {!editingId && !!form.line_user_id && (
+                      {!!form.line_user_id && (
                         <Typography variant="caption" color="text.secondary" sx={{ fontFamily: 'monospace', wordBreak: 'break-all' }}>
                           {form.line_user_id}
                         </Typography>
