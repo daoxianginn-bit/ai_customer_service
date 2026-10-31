@@ -18,6 +18,7 @@ import {
 } from '../../lib/linenCost';
 import { RoomOption, roomLabel } from '../../lib/rooms';
 import { formatDateTime, formatMoney } from '../../lib/format';
+import { isLineUserId } from '../../lib/lineErrors';
 import { useBreakpoint } from '../../app/useBreakpoint';
 import { usePermission } from '../../app/Can';
 import StatusBadge from '../../components/ui-mui/StatusBadge';
@@ -267,6 +268,12 @@ export default function BookingEditDialog({ open, booking, onClose, onSaved }: P
       setFormError('狀態改成「已預定」時，請先填寫匯款末5碼再儲存。');
       return;
     }
+    // 聯絡人欄位打字會直接寫進 line_user_id（清單裡沒有的人要能貼 ID），所以打了暱稱沒點選清單就存檔，
+    // 存進去的會是「陳小姐」這種字串——之後入住密碼、各關卡通知推播給它，LINE 一律回 400。存檔前擋下。
+    if (form.line_user_id && !isLineUserId(form.line_user_id)) {
+      setFormError(`LINE 聯絡人請從清單點選，或貼上完整的 LINE User ID（U 開頭共 33 碼）。目前填的「${form.line_user_id}」不是有效的 ID。`);
+      return;
+    }
     // 新增訂單順便填的追加款：先驗好，有錯就擋在這裡，不要訂單建起來了追加款才發現填錯
     const extraRows = editingId || !canAddExtras
       ? []
@@ -512,7 +519,10 @@ export default function BookingEditDialog({ open, booking, onClose, onSaved }: P
                             size="small"
                             label="LINE 聯絡人"
                             placeholder="非 LINE 客戶可留空"
-                            helperText="選暱稱即可，也可以直接貼 LINE User ID；這決定通知要發給誰"
+                            error={!!form.line_user_id && !isLineUserId(form.line_user_id)}
+                            helperText={!!form.line_user_id && !isLineUserId(form.line_user_id)
+                              ? '請從清單點選聯絡人，或貼上完整的 LINE User ID（U 開頭共 33 碼）'
+                              : '選暱稱即可，也可以直接貼 LINE User ID；這決定通知要發給誰'}
                             // selectOnFocus 只在「取得焦點」那一下作用，欄位已經有焦點時再點不會重選，
                             // 打字就變成接在原值後面（選錯人想重打最容易踩到）。這裡的值是一整串
                             // user ID 或暱稱，本來就是整個換掉而不是改中間幾個字，所以點擊一律全選。

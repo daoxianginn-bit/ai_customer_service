@@ -176,6 +176,15 @@ export const CHECKIN_PASSWORD_STATUSES = [
   'external_synced',
 ];
 
+/**
+ * 入住當天要上洗滌單的狀態：收過訂金、還沒退房的訂單，加上第三方平台的訂單。
+ *
+ * 必須涵蓋房務「洗滌清單」那一關開放填布巾數量的所有狀態（已預定～入住中，見 processStages）。
+ * 尾款沒人勾掉的訂單會停在「待收尾款」度過入住日——它不會被轉成入住中，但客人照樣會來；
+ * 只撈入住中的話，房務填好的布巾數量洗滌廠永遠收不到。
+ */
+export const LAUNDRY_SHEET_STATUSES = ['reserved', 'awaiting_balance', 'awaiting_checkin', 'checked_in', 'external_synced'];
+
 // 訂單管理頁「訂單流程狀態」進度列用的 9 步驟正常流程，依序前進；取消/待退款/已退款/待人工確認
 // 是例外流程，不在這個序列裡（flowStepIndex 對它們回傳 null，畫面上另外用例外樣式呈現，
 // 不會出現在 1~9 的進度點上——這就是「4 已預定下一步可能走 5 待收尾款或 20 取消訂單」

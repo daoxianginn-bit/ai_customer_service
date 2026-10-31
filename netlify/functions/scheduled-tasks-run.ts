@@ -4,12 +4,13 @@ import { createClient } from '@supabase/supabase-js';
 import { randomUUID, createSign } from 'crypto';
 import { parseCsvKeywords, buildMergeFields, MessageVariable, computeTodayTomorrowFields, laundryItemName, laundryItemFullName } from '../../src/lib/messageVariables';
 import { computeNextRunAt, ScheduleConfig } from '../../src/lib/scheduleRecurrence';
-import { OCCUPYING_STATUSES, BALANCE_PAID_STATUSES } from '../../src/lib/bookingStatus';
+import { OCCUPYING_STATUSES, BALANCE_PAID_STATUSES, LAUNDRY_SHEET_STATUSES } from '../../src/lib/bookingStatus';
 import { parseIcsEvents } from '../../src/lib/icsParser';
 import { otaPlatformLabel } from '../../src/lib/otaChannels';
 import { classifyOtaEvent } from '../../src/lib/otaEventFilter';
 import { writeOperationLog, withErrorLogging, LOG_FEATURES, SYSTEM_ACTOR } from '../../src/lib/operationLog';
 import { requirePermission } from '../../src/lib/requireRole';
+import { isLineUserId, lineErrorDetail } from '../../src/lib/lineErrors';
 import { processWaitlist } from './line-webhook';
 
 // ========================================================================
@@ -296,21 +297,39 @@ async function advanceToCheckedIn(config: Record<string, any>, settings: any): P
   //
   // 改成依「今天入住」這個事實重新查一次，涵蓋剛轉好的直接訂房與 OTA 訂單。
   // 也因此即使今天沒有任何訂單需要轉狀態，只要有 OTA 訂單入住，洗滌單一樣要發。
-  // 沒設定洗滌單範本／收件人的安裝（sendLaundryNotice 會直接回 null）就不用白查一次。
-  let laundry: string | null = null;
-  if (readNoticeSetup(config)) {
-    const { data: laundryBookings } = await supabase
+  //
+  // 同一個道理也適用於尾款還沒人勾掉的訂單：它們停在「待收尾款」（甚至「已預定」）度過入住日，
+  // 上面不會把它們轉成入住中（收尾款是人工關卡），但客人照樣會來、房務也已經在「洗滌清單」那一關
+  // 填好布巾數量。只撈入住中的話這些訂單就整筆從洗滌單上消失，執行結果還只會寫「沒有需要轉狀態的
+  // 訂單」，看不出洗滌單根本沒發——房務回報「洗滌單沒發送」就是這個情況。
+  //
+  // 洗滌單有沒有發、為什麼沒發，一律寫進執行結果：這支排程的結果是客服判斷「洗滌廠今天有沒有
+  // 收到單子」唯一的依據，沉默跳過等於讓人以為發了。
+  let laundry: string;
+  let laundryFailed = false;
+  if (!readNoticeSetup(config)) {
+    laundry = '洗滌單未設定範本或發送對象，未發送';
+  } else {
+    const { data: laundryBookings, error: laundryError } = await supabase
       .from('bookings')
       .select('*')
       .eq('checkin_date', today)
-      .in('status', ['checked_in', 'external_synced']);
-    if (laundryBookings?.length) laundry = await sendLaundryNotice(config, today, laundryBookings, settings);
+      .in('status', LAUNDRY_SHEET_STATUSES);
+    if (laundryError) {
+      laundry = `洗滌單查詢失敗：${laundryError.message}`;
+      laundryFailed = true;
+    } else if (!laundryBookings?.length) {
+      laundry = '今日沒有入住的訂單，不需發送洗滌單';
+    } else {
+      laundry = (await sendLaundryNotice(config, today, laundryBookings, settings)) || '洗滌單未發送';
+      // 「找不到收件人」「推播全部失敗」是洗滌廠真的沒收到單子，排程要標成失敗才會被注意到；
+      // 「沒有布巾用量」是資料還沒填，照實寫出來即可。
+      laundryFailed = laundry.startsWith('洗滌單未發送：');
+    }
   }
 
-  if (!advanced.length) {
-    return { ok: true, summary: `沒有今日入住、需要轉為入住中的訂單${laundry ? `；${laundry}` : ''}` };
-  }
-  return { ok: true, summary: `${advanced.length} 筆訂單已轉為入住中${laundry ? `；${laundry}` : ''}` };
+  const advancedText = advanced.length ? `${advanced.length} 筆訂單已轉為入住中` : '沒有今日入住、需要轉為入住中的訂單';
+  return { ok: !laundryFailed, summary: `${advancedText}；${laundry}` };
 }
 
 /**
@@ -325,8 +344,8 @@ export async function resendLaundrySheet(dateIso: string): Promise<{ ok: boolean
   const { data: tasks } = await supabase.from('scheduled_tasks').select('config, is_active').eq('task_type', 'advance_to_checked_in').order('is_active', { ascending: false }).limit(1);
   const config = tasks?.[0]?.config || {};
   if (!readNoticeSetup(config)) return { ok: false, summary: '「待入住→入住中（含洗滌單）」排程還沒設定洗滌單內容或發送對象，無法重發' };
-  // external_synced 跟上面的排程同一個理由：第三方平台的訂單也要上洗滌單。
-  const { data, error } = await supabase.from('bookings').select('*').eq('checkin_date', dateIso).in('status', ['awaiting_checkin', 'checked_in', 'external_synced']);
+  // 跟上面的排程用同一份狀態清單：第三方平台的訂單、尾款還沒勾掉的訂單也要上洗滌單。
+  const { data, error } = await supabase.from('bookings').select('*').eq('checkin_date', dateIso).in('status', LAUNDRY_SHEET_STATUSES);
   if (error) return { ok: false, summary: `查詢失敗：${error.message}` };
   if (!data?.length) return { ok: false, summary: '這一天沒有入住的訂單，沒有洗滌單可重發' };
   const template = String(config.notice_template ?? config.laundry_template ?? '');
@@ -689,18 +708,23 @@ async function pushToCustomersWithTemplate(
   templateId: string | undefined,
   settings: any,
   extraFields?: (b: any) => Record<string, string>
-): Promise<{ pushed: number; failed: number; skippedNoTemplate: boolean }> {
+): Promise<{ pushed: number; failed: number; skippedNoTemplate: boolean; failures: string[] }> {
   const templateBody = await fetchTemplateBody(templateId);
-  if (!templateBody) return { pushed: 0, failed: 0, skippedNoTemplate: true };
+  if (!templateBody) return { pushed: 0, failed: 0, skippedNoTemplate: true, failures: [] };
 
   const [variables, customerChannel] = await Promise.all([fetchMessageVariablesList(), fetchCustomerChannel()]);
-  if (!customerChannel?.channel_access_token) return { pushed: 0, failed: bookings.length, skippedNoTemplate: false };
+  if (!customerChannel?.channel_access_token) return { pushed: 0, failed: bookings.length, skippedNoTemplate: false, failures: ['找不到客戶用官方帳號的憑證'] };
 
   const client = new Client({ channelAccessToken: customerChannel.channel_access_token, channelSecret: customerChannel.channel_secret });
   let pushed = 0;
   let failed = 0;
+  // 每一筆失敗都記下「哪張單、為什麼」放進執行結果——只寫「失敗 1 位」的話，客服不知道要去補發給誰，
+  // 也看不出是 LINE ID 存錯（訂單編輯時打了暱稱沒選清單）還是別的原因。
+  const failures: string[] = [];
+  const who = (b: any) => b.order_number || b.name || b.nickname || String(b.id).slice(0, 8);
   for (const b of bookings) {
-    if (!b.line_user_id) { failed++; continue; }
+    if (!b.line_user_id) { failed++; failures.push(`${who(b)}：沒有 LINE 聯絡人`); continue; }
+    if (!isLineUserId(b.line_user_id)) { failed++; failures.push(`${who(b)}：LINE 聯絡人不是有效 ID（存的是「${b.line_user_id}」）`); continue; }
     const fields = {
       ...buildMergeFields(variables, { booking: b, customer: { nickname: b.nickname, line_user_id: b.line_user_id }, settings }),
       ...(extraFields ? extraFields(b) : {}),
@@ -710,11 +734,13 @@ async function pushToCustomersWithTemplate(
       await client.pushMessage(b.line_user_id, { type: 'text', text });
       pushed++;
     } catch (e: any) {
-      console.error('[ScheduledTasks] customer push failed:', e.message);
+      const d = lineErrorDetail(e);
+      console.error('[ScheduledTasks] customer push failed:', d.message);
       failed++;
+      failures.push(`${who(b)}：${d.invalidRecipient ? 'LINE 拒收（聯絡人不是客戶用官方帳號的好友）' : `LINE 推播失敗 ${d.status ?? ''} ${d.message}`.trim()}`);
     }
   }
-  return { pushed, failed, skippedNoTemplate: false };
+  return { pushed, failed, skippedNoTemplate: false, failures };
 }
 
 // 推播一份彙整清單給某個通知名單（不是單一客人）——格式固定（標題＋筆數＋逐行清單），
@@ -886,7 +912,11 @@ async function checkinNotice(config: Record<string, any>, settings: any): Promis
 
   const result = await pushToCustomersWithTemplate(data, config.template_id, settings, (b) => ({ 入住密碼: b.check_in_password || '（尚未設定，請聯繫客服）' }));
   if (result.skippedNoTemplate) return { ok: true, summary: `${data.length} 筆今日入住，但尚未設定訊息範本，略過發送` };
-  return { ok: true, summary: `${data.length} 筆今日入住，通知客人 ${result.pushed} 位成功、${result.failed} 位失敗` };
+  const failText = result.failures.length ? `（${result.failures.join('；')}）` : '';
+  // 入住密碼沒送到，客人到門口就進不去——LINE ID 存錯或 LINE 拒收要標成失敗，執行紀錄與錯誤紀錄才看得到。
+  // 本來就沒有 LINE 的訂單（電話訂房）是預期中的，不算排程失敗。
+  const hardFailures = result.failures.filter((f) => !f.endsWith('沒有 LINE 聯絡人')).length;
+  return { ok: hardFailures === 0, summary: `${data.length} 筆今日入住，通知客人 ${result.pushed} 位成功、${result.failed} 位失敗${failText}` };
 }
 
 // 押金處理通知：客戶用帳號底下，狀態為押金處理中的訂單，彙整通知給通知名單去核對退還。
@@ -1669,6 +1699,28 @@ function toScheduleConfig(task: any): ScheduleConfig {
   };
 }
 
+/**
+ * 每一次執行都在「自動化排程 → 執行紀錄」留一筆，不論有沒有改到訂單、成功或失敗。
+ *
+ * 執行紀錄頁讀的是 operation_logs，但原本只有「改了訂單狀態」的排程會寫（每張單一筆「狀態變更」）。
+ * scheduled_tasks.last_run_* 只存最近一次、下次執行就被蓋掉；純通知型的排程（洗滌單、入住前提醒、
+ * 尾款提醒…）或當天沒有訂單要轉狀態的執行，在執行紀錄頁就像沒跑過一樣，隔天有人問
+ * 「昨天洗滌單到底有沒有發」也查不到。失敗的執行記成 error，「系統錯誤」頁也會一起出現。
+ */
+async function logTaskRun(task: any, result: { ok: boolean; summary: string }, trigger: 'schedule' | 'manual', actorName?: string) {
+  await writeOperationLog(supabase, {
+    feature: LOG_FEATURES.scheduledTask,
+    action: result.ok ? '排程執行' : '排程執行失敗',
+    target: task.name || task.task_type,
+    actorType: trigger === 'manual' ? 'user' : 'system',
+    actorName: trigger === 'manual' ? actorName || '未知使用者' : SYSTEM_ACTOR,
+    before: null,
+    after: { 觸發方式: trigger === 'manual' ? '手動執行' : '自動排程', 結果: result.summary },
+    level: result.ok ? 'info' : 'error',
+    errorMessage: result.ok ? null : result.summary,
+  });
+}
+
 // 「立即執行」（排程管理頁的測試按鈕、房況行事曆的手動整合）：手動觸發單一任務，不管 next_run_at 是否已到期，
 // 也不影響原本的排程節奏——只更新 last_run_*，刻意不動 next_run_at/is_active，
 // 這樣測試完不會打亂使用者原本設定好的排程時間。
@@ -1713,6 +1765,7 @@ export async function runTaskNow(event: any, taskId: string) {
       last_run_summary: `[手動測試] ${result.summary}`,
     })
     .eq('id', task.id);
+  await logTaskRun(task, result, 'manual', guard.user.email || guard.user.id);
 
   return { statusCode: 200, body: JSON.stringify(result) };
 }
@@ -1761,6 +1814,7 @@ const rawHandler: Handler = async (_event) => {
         updated_at: nowIso,
       })
       .eq('id', task.id);
+    await logTaskRun(task, result, 'schedule');
 
     console.log(`[ScheduledTasks] ${task.name} (${task.task_type}): ${result.summary}`);
   }
@@ -1772,4 +1826,4 @@ const rawHandler: Handler = async (_event) => {
 export const handler: Handler = withErrorLogging(supabase, 'scheduled-tasks-run', rawHandler);
 
 /** 測試用：待收尾款排程（轉狀態＋依天數發通知、依角色／帳號找收件人）不經過排程觸發直接驗 */
-export const __scheduledTaskTesting = { advanceToAwaitingBalance, taiwanTodayIso };
+export const __scheduledTaskTesting = { advanceToAwaitingBalance, advanceToCheckedIn, checkinNotice, taiwanTodayIso, rawHandler };

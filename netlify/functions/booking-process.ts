@@ -6,6 +6,7 @@ import { LOG_FEATURES, withErrorLogging, writeOperationLog } from '../../src/lib
 import { requirePermission } from '../../src/lib/requireRole';
 import { notifyPaymentStaff, resendLaundrySheet } from './scheduled-tasks-run';
 import { BALANCE_PAID_STATUSES } from '../../src/lib/bookingStatus';
+import { isLineUserId, lineErrorDetail } from '../../src/lib/lineErrors';
 import {
   extraChargeCode, isBlankExtraChargeInput, nextExtraChargeLetters, remainingExtraChargeSlots, validateExtraChargeInput, type ExtraChargeInput,
 } from '../../src/lib/extraCharges';
@@ -47,9 +48,13 @@ async function loadBookingContext(bookingId: string) {
     supabase.from('message_variables').select('variable_name, source, field_key').order('display_order'),
   ]);
   if (!booking) return null;
-  const { data: state } = booking.line_user_id
-    ? await supabase.from('user_states').select('channel_id, nickname').eq('line_user_id', booking.line_user_id).order('last_message_at', { ascending: false, nullsFirst: false }).limit(1).maybeSingle()
-    : { data: null };
+  const { data: states } = booking.line_user_id
+    ? await supabase.from('user_states').select('channel_id, nickname').eq('line_user_id', booking.line_user_id).order('last_message_at', { ascending: false, nullsFirst: false })
+    : { data: [] };
+  // 訂單換過 LINE 聯絡人時，booking.channel_id 還是建單當時的官方帳號；而 LINE user ID 只在它所屬的
+  // 官方帳號有效，拿錯帳號的憑證推播 LINE 一律回 400。所以以「這位聯絡人實際在跟哪個帳號對話」為準：
+  // 訂單記的帳號底下有這個人就用它，沒有就用他最近對話的那個帳號。
+  const state = (states || []).find((s: any) => s.channel_id === booking.channel_id) || (states || [])[0] || null;
   const ctx = { booking, customer: state ? { ...state, line_user_id: booking.line_user_id } : { nickname: booking.nickname, line_user_id: booking.line_user_id }, settings };
   const fields: Record<string, string> = {
     // 標準欄位先鋪底（管理員沒建對照也能用），管理員自訂的同名變數蓋過去
@@ -59,7 +64,7 @@ async function loadBookingContext(bookingId: string) {
     // [入住密碼] 是特殊變數（不在一般欄位白名單裡），只有這種「發給客人本人」的通知才代入
     入住密碼: booking.check_in_password || '（尚未設定）',
   };
-  const channelId = booking.channel_id || state?.channel_id || null;
+  const channelId = state?.channel_id || booking.channel_id || null;
   return { booking, settings, fields, channelId, nickname: state?.nickname || booking.nickname || null };
 }
 
@@ -232,7 +237,8 @@ const rawHandler: Handler = async (event) => {
     if (body.action === 'context') {
       const ctx = await loadBookingContext(String(body.bookingId || ''));
       if (!ctx) return { statusCode: 404, body: JSON.stringify({ error: '找不到這筆訂單' }) };
-      const channel = ctx.booking.line_user_id ? await fetchChannel(ctx.channelId) : null;
+      // 存的不是有效 LINE ID（例如打了暱稱沒選清單）就當作沒有 LINE，通知對話框才會先提示，不會按下去才失敗
+      const channel = isLineUserId(ctx.booking.line_user_id) ? await fetchChannel(ctx.channelId) : null;
       const quota = channel?.channel_access_token ? await lineQuota(channel.channel_access_token) : null;
       return {
         statusCode: 200,
@@ -254,12 +260,27 @@ const rawHandler: Handler = async (event) => {
       const ctx = await loadBookingContext(String(body.bookingId || ''));
       if (!ctx) return { statusCode: 404, body: JSON.stringify({ error: '找不到這筆訂單' }) };
       if (!ctx.booking.line_user_id) return { statusCode: 400, body: JSON.stringify({ error: '這筆訂單沒有 LINE 帳號（第三方平台或手動建立的訂單），無法推播' }) };
+      // 聯絡人欄位可以打字、也可以貼 ID，舊資料裡可能存著暱稱或打到一半的字。先擋下來講清楚，
+      // 不要送去 LINE 換一個只寫「status code 400」的錯誤。
+      if (!isLineUserId(ctx.booking.line_user_id)) {
+        return { statusCode: 400, body: JSON.stringify({ error: `這筆訂單的 LINE 聯絡人不是有效的 LINE User ID（目前存的是「${ctx.booking.line_user_id}」），請到訂單編輯從清單重新選擇 LINE 聯絡人` }) };
+      }
       const channel = await fetchChannel(ctx.channelId);
       if (!channel?.channel_access_token) return { statusCode: 500, body: JSON.stringify({ error: '找不到客戶用官方帳號的憑證，請至串接管理確認' }) };
 
       const text = mergeTemplate(template, ctx.fields);
       const client = new Client({ channelAccessToken: channel.channel_access_token, channelSecret: channel.channel_secret });
-      await client.pushMessage(ctx.booking.line_user_id, { type: 'text', text });
+      try {
+        await client.pushMessage(ctx.booking.line_user_id, { type: 'text', text });
+      } catch (e: any) {
+        const d = lineErrorDetail(e);
+        const error = d.invalidRecipient
+          ? `LINE 拒收：這位聯絡人不是「${channel.name || '客戶用官方帳號'}」的好友（ID 可能貼錯，或是別的官方帳號的聯絡人），請到訂單編輯重新選擇 LINE 聯絡人。LINE 回覆：${d.message}`
+          : `LINE 推播失敗（${d.status ?? '連線錯誤'}）：${d.message}`;
+        // LINE 拒絕這個請求（4xx）是資料問題，訊息要原樣讓操作的人看到；5xx／連線失敗才是伺服器錯誤。
+        const status = d.status && d.status >= 400 && d.status < 500 ? 400 : 502;
+        return { statusCode: status, body: JSON.stringify({ error }) };
+      }
 
       const now = new Date().toISOString();
       const templateTitle = String(body.templateTitle || '').trim() || null;
